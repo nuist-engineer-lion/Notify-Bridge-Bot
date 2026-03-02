@@ -13,7 +13,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("qq-redot")
 
-WS_URL = "wss://lion-qq.laysath.cn/qq-ws"
+WS_URL = "ws://10.254.100.21:3001"
 WS_TOKEN = "TYnR3DXCeM9H~O.W"
 
 INTERNAL_GROUP_ID = 1056221119 # 内部客服通知群号
