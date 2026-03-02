@@ -1,9 +1,17 @@
 import time
 import asyncio
 import logging
-from typing import TypedDict, Any
+from collections import deque
+from typing import TypedDict, Any, cast
 
-from napcat import NapCatClient, PrivateMessageEvent, FriendRequestEvent
+from napcat import (
+    NapCatClient,
+    PrivateMessageEvent,
+    FriendRequestEvent,
+    GroupMsgEmojiLikeEvent,
+    Reply,
+    Text,
+)
 
 # ================= 日志配置 =================
 logging.basicConfig(
@@ -19,6 +27,8 @@ WS_TOKEN = "TYnR3DXCeM9H~O.W"
 INTERNAL_GROUP_ID = 1056221119 # 内部客服通知群号
 WHITELIST = [123456789, 987654321] # 免监控的白名单 QQ
 MILESTONES = [5, 15, 30, 60, 120, 180, 360, 720, 1440, 2880, 4320] # 迟滞里程碑(分钟)
+MONITORED_FORWARD_LIMIT = 10
+CLOSING_MESSAGE = "本次会话暂时结束。感谢您的支持与信任，再见。（请勿回复）"
 
 class CustomerData(TypedDict):
     last_active: float
@@ -26,21 +36,62 @@ class CustomerData(TypedDict):
     is_newly_reported: bool
     reported_milestones: set[int]
 
+
+class ForwardMonitorData(TypedDict):
+    customer_ids: list[int]
+    group_id: int
+    created_at: float
+
 # 内存字典：存储未回复的客户状态
 unreplied_customers: dict[int, CustomerData] = {}
+monitored_forward_order: deque[int] = deque()
+monitored_forwards: dict[int, ForwardMonitorData] = {}
 
 # 客户端对象
 client: NapCatClient = NapCatClient(WS_URL, WS_TOKEN)
 
+
+def track_forward_message(message_id: int, customer_ids: list[int], group_id: int) -> None:
+    if message_id in monitored_forwards:
+        try:
+            monitored_forward_order.remove(message_id)
+        except ValueError:
+            pass
+
+    monitored_forward_order.append(message_id)
+    monitored_forwards[message_id] = {
+        "customer_ids": customer_ids,
+        "group_id": group_id,
+        "created_at": time.time(),
+    }
+
+    while len(monitored_forward_order) > MONITORED_FORWARD_LIMIT:
+        expired_id = monitored_forward_order.popleft()
+        monitored_forwards.pop(expired_id, None)
+
+    log.debug("监听合并转发已更新: message_id=%s, 当前监听数=%d", message_id, len(monitored_forward_order))
+
+
+def pop_tracked_forward(message_id: int) -> ForwardMonitorData | None:
+    data = monitored_forwards.pop(message_id, None)
+    if data is None:
+        return None
+
+    try:
+        monitored_forward_order.remove(message_id)
+    except ValueError:
+        pass
+    return data
+
 # ================= 辅助函数：构造嵌套合并转发 =================
-async def send_nested_forward(group_id: int, customer_list: list[tuple[int, CustomerData]], summary_text: str):
+async def send_nested_forward(group_id: int, customer_list: list[tuple[int, CustomerData]], summary_text: str) -> int | None:
     """
     构造嵌套合并转发并发送
     customer_list: list[tuple[int, CustomerData]]
     """
     if not customer_list:
         log.debug("send_nested_forward: customer_list 为空，跳过发送")
-        return
+        return None
 
     log.info("开始构造合并转发 -> 群 %d, 共 %d 名客户", group_id, len(customer_list))
     outer_nodes: list[dict[str, Any]] = []
@@ -91,13 +142,16 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
     # 调用 SDK 混入的 send_group_forward_msg
     log.debug("合并转发节点数: %d (1 摘要 + %d 客户)", len(outer_nodes), len(customer_list))
     try:
-        await client.send_group_forward_msg(
+        response = cast(dict[str, Any], await client.send_group_forward_msg(
             group_id=str(group_id),
             messages=outer_nodes  # type: ignore[arg-type]
-        )
-        log.info("合并转发发送成功 -> 群 %d", group_id)
+        ))
+        message_id = int(response["message_id"])
+        log.info("合并转发发送成功 -> 群 %d, message_id=%s", group_id, message_id)
+        return message_id
     except Exception as e:
         log.error("发送合并转发失败: %s", e, exc_info=True)
+        return None
 
 # ================= 核心逻辑：定时巡检任务 =================
 async def monitor_loop():
@@ -137,7 +191,13 @@ async def monitor_loop():
             
             # 建议只通报新触发的客户，避免每次都全量刷屏
             summary = f"📢 刚刚有 {len(new_customers_to_report)} 名客户发来消息，请及时回复！"
-            await send_nested_forward(INTERNAL_GROUP_ID, new_customers_to_report, summary)
+            message_id = await send_nested_forward(INTERNAL_GROUP_ID, new_customers_to_report, summary)
+            if message_id is not None:
+                track_forward_message(
+                    message_id=message_id,
+                    customer_ids=[qq for qq, _ in new_customers_to_report],
+                    group_id=INTERNAL_GROUP_ID,
+                )
         else:
             log.debug("阶段1: 无新客户需要通报")
             
@@ -169,7 +229,13 @@ async def monitor_loop():
                 log.warning("阶段2: 里程碑 %s 触发, 涉及 %d 名客户: %s",
                             unit, len(delay_list), [qq for qq, _ in delay_list])
                 summary = f"⚠️ 以下 {len(delay_list)} 名客户已等待长达 {unit}！"
-                await send_nested_forward(INTERNAL_GROUP_ID, delay_list, summary)
+                message_id = await send_nested_forward(INTERNAL_GROUP_ID, delay_list, summary)
+                if message_id is not None:
+                    track_forward_message(
+                        message_id=message_id,
+                        customer_ids=[qq for qq, _ in delay_list],
+                        group_id=INTERNAL_GROUP_ID,
+                    )
 
         log.info("===== 巡检结束 =====")
 
@@ -205,11 +271,66 @@ async def main():
                         log.info("已自动通过好友申请: user_id=%s, comment=%s", uid, comment)
                     except Exception as e:
                         log.error("自动通过好友申请失败: user_id=%s, err=%s", uid, e, exc_info=True)
-                # 1. 侦听客服的回复（清理字典）
+                # 1. 侦听内部群贴表情操作
+                case GroupMsgEmojiLikeEvent(group_id=gid, message_id=mid, is_add=True) if gid == INTERNAL_GROUP_ID:
+                    tracked_data = pop_tracked_forward(mid)
+                    if tracked_data is not None:
+                        customer_ids = tracked_data["customer_ids"]
+                        if len(customer_ids) == 1:
+                            customer_id = customer_ids[0]
+                            private_ok = True
+                            try:
+                                await client.send_private_msg(
+                                    user_id=str(customer_id),
+                                    message=CLOSING_MESSAGE,
+                                )
+                            except Exception as close_err:
+                                private_ok = False
+                                log.error(
+                                    "发送结束语失败: customer_id=%s, source_mid=%s, err=%s",
+                                    customer_id,
+                                    mid,
+                                    close_err,
+                                    exc_info=True,
+                                )
+
+                            feedback_text = (
+                                f"✅ 已对客户 {customer_id} 发送结束语。"
+                                if private_ok
+                                else f"❌ 对客户 {customer_id} 发送结束语失败，请手动处理。"
+                            )
+                            try:
+                                await client.send_group_msg(
+                                    group_id=str(gid),
+                                    message=[Reply(id=str(mid)), Text(text=feedback_text)],
+                                )
+                            except Exception as feedback_err:
+                                log.error("结束语群反馈失败: source_mid=%s, err=%s", mid, feedback_err, exc_info=True)
+                        else:
+                            try:
+                                await client.send_group_msg(
+                                    group_id=str(gid),
+                                    message=[Reply(id=str(mid)), Text(text="暂不支持：该合并转发包含多个客户，请手动处理。")],
+                                )
+                            except Exception as unsupported_err:
+                                log.error("多客户暂不支持反馈失败: source_mid=%s, err=%s", mid, unsupported_err, exc_info=True)
+                    else:
+                        try:
+                            msg_detail = await client.get_msg(message_id=str(mid))
+                            source_uid = int(str(msg_detail.get("user_id", 0)))
+                            self_uid = int(str(client.self_id))
+                            if source_uid == self_uid:
+                                await client.send_group_msg(
+                                    group_id=str(gid),
+                                    message=[Reply(id=str(mid)), Text(text="操作已过期")],
+                                )
+                        except Exception as expired_err:
+                            log.error("过期操作检测/反馈失败: source_mid=%s, err=%s", mid, expired_err, exc_info=True)
+                # 2. 侦听客服的回复（清理字典）
                 case PrivateMessageEvent(post_type="message_sent", target_id=tid) if tid in unreplied_customers:
                     del unreplied_customers[tid]
                     log.info("客服已回复 %s，移除提醒。剩余未回复: %d", tid, len(unreplied_customers))
-                # 2. 接收客户消息 (加入/更新字典)
+                # 3. 接收客户消息 (加入/更新字典)
                 case PrivateMessageEvent(post_type="message", user_id=uid, message_id=msg_id) if int(uid) not in WHITELIST:
                     uid = int(uid)
                     now = time.time()
