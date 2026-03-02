@@ -122,7 +122,7 @@ async def monitor_loop():
             new_customers_to_report.sort(key=lambda x: x[1]["last_active"], reverse=True)
             
             # 建议只通报新触发的客户，避免每次都全量刷屏
-            summary = f"📢 [新消息提醒] 刚刚有 {len(new_customers_to_report)} 名客户发来消息，请及时回复！"
+            summary = f"📢 刚刚有 {len(new_customers_to_report)} 名客户发来消息，请及时回复！"
             await send_nested_forward(INTERNAL_GROUP_ID, new_customers_to_report, summary)
         else:
             log.debug("阶段1: 无新客户需要通报")
@@ -151,7 +151,7 @@ async def monitor_loop():
                 unit = f"{m}分钟" if m < 60 else f"{m//60}小时"
                 log.warning("阶段2: 里程碑 %s 触发, 涉及 %d 名客户: %s",
                             unit, len(delay_list), [qq for qq, _ in delay_list])
-                summary = f"⚠️ [超时里程碑提醒] 以下 {len(delay_list)} 名客户已等待长达 {unit}！"
+                summary = f"⚠️ 以下 {len(delay_list)} 名客户已等待长达 {unit}！"
                 await send_nested_forward(INTERNAL_GROUP_ID, delay_list, summary)
 
         log.info("===== 巡检结束 =====")
