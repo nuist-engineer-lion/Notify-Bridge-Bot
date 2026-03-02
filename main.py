@@ -3,7 +3,7 @@ import asyncio
 import logging
 from typing import TypedDict, Any
 
-from napcat import NapCatClient, PrivateMessageEvent
+from napcat import NapCatClient, PrivateMessageEvent, FriendRequestEvent
 
 # ================= 日志配置 =================
 logging.basicConfig(
@@ -186,6 +186,25 @@ async def main():
         async for event in client:
             log.debug("收到事件: type=%s, post_type=%s", type(event).__name__, getattr(event, 'post_type', '?'))
             match event:
+                # 0. 自动通过好友申请
+                case FriendRequestEvent(user_id=uid, comment=comment):
+                    try:
+                        await event.approve()
+                        notify_text = (
+                            "✅ 已自动通过好友申请\n"
+                            f"QQ: {uid}\n"
+                            f"备注: {comment or '（无）'}"
+                        )
+                        try:
+                            await client.send_group_msg(
+                                group_id=str(INTERNAL_GROUP_ID),
+                                message=notify_text,
+                            )
+                        except Exception as notify_err:
+                            log.error("好友申请群通知发送失败: user_id=%s, err=%s", uid, notify_err, exc_info=True)
+                        log.info("已自动通过好友申请: user_id=%s, comment=%s", uid, comment)
+                    except Exception as e:
+                        log.error("自动通过好友申请失败: user_id=%s, err=%s", uid, e, exc_info=True)
                 # 1. 侦听客服的回复（清理字典）
                 case PrivateMessageEvent(post_type="message_sent", target_id=tid) if tid in unreplied_customers:
                     del unreplied_customers[tid]

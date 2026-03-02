@@ -1,0 +1,15 @@
+{
+	"servers": {
+		"napcat-sdk": {
+			"type": "stdio",
+			"command": "uvx",
+			"args": [
+				"--refresh",
+				"napcat-sdk",
+				"mcp",
+				"doc"
+			]
+		}
+	},
+	"inputs": []
+}
