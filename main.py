@@ -9,6 +9,7 @@ from napcat import (
     PrivateMessageEvent,
     FriendRequestEvent,
     GroupMsgEmojiLikeEvent,
+    FriendPokeEvent,
     Reply,
     Text,
 )
@@ -350,6 +351,22 @@ async def main():
                         unreplied_customers[uid]["reported_milestones"].clear()
                         log.info("客户 %d 追加消息 (msg_id=%s)，累计 %d 条，重置通报倒计时。",
                                  uid, msg_id, len(unreplied_customers[uid]["msg_ids"]))
+                # 4. 侦听私聊戳一戳（自动发送结束语）
+                case FriendPokeEvent(user_id=uid, sender_id=sid, target_id=tid) if uid not in WHITELIST and client.self_id == sid and sid == tid:
+                    try:
+                        await client.send_private_msg(
+                            user_id=str(uid),
+                            message=CLOSING_MESSAGE,
+                        )
+                        log.info(
+                            "私聊戳一戳自动发送结束语成功: user_id=%s, sender_id=%s, target_id=%s",
+                            uid, sid, tid,
+                        )
+                    except Exception as poke_err:
+                        log.error(
+                            "私聊戳一戳自动发送结束语失败: user_id=%s, sender_id=%s, target_id=%s, err=%s",
+                            uid, sid, tid, poke_err, exc_info=True,
+                        )
                 case _:
                     continue
         log.warning("连接断开或出错，5秒后重连...")
