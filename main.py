@@ -57,7 +57,20 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         }
     })
 
-    # 2. 为每个客户构造一个“子合并转发”节点
+    # 2. 快捷登录网址
+    outer_nodes.append({
+        "type": "node",
+        "data": {
+            "nickname": "快捷传送门",
+            "user_id": str(client.self_id),
+            "content": [{
+                "type": "text",
+                "data": {"text": "https://lion-qq.laysath.cn"}
+            }]
+        }
+    })
+
+    # 3. 为每个客户构造一个“子合并转发”节点
     for qq, data in customer_list:
         # 内层节点：该客户的所有消息 ID (使用 id 引用不需要 content)
         inner_nodes: list[dict[str, str | dict[str, str]]] = [
