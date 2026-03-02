@@ -24,6 +24,7 @@ class CustomerData(TypedDict):
     last_active: float
     msg_ids: list[int]
     is_newly_reported: bool
+    reported_milestones: set[int]
 
 # 内存字典：存储未回复的客户状态
 unreplied_customers: dict[int, CustomerData] = {}
@@ -141,19 +142,22 @@ async def monitor_loop():
             log.debug("阶段1: 无新客户需要通报")
             
         # ================= 阶段 2：迟滞里程碑通报 =================
-        
+
         # 初始化按里程碑分组的字典
         milestone_groups: dict[int, list[tuple[int, CustomerData]]] = {m: [] for m in MILESTONES}
-        
+
         for qq, data in unreplied_customers.items():
             elapsed_min = (now - data["last_active"]) / 60.0
             log.debug("  客户 %d: 已等待 %.1f 分钟, 消息数 %d", qq, elapsed_min, len(data["msg_ids"]))
-            
-            for m in MILESTONES:
-                if abs(elapsed_min - m) <= 0.5:
-                    log.debug("    -> 命中里程碑 %d 分钟", m)
-                    milestone_groups[m].append((qq, data))
-                    break # 单个客户在一个循环内最多只命中一个里程碑
+
+            # 找到当前已达到的最大里程碑，仅在该里程碑尚未播报时触发
+            for m in sorted(MILESTONES, reverse=True):
+                if elapsed_min >= m:
+                    if m not in data["reported_milestones"]:
+                        data["reported_milestones"].add(m)
+                        log.debug("    -> 命中里程碑 %d 分钟", m)
+                        milestone_groups[m].append((qq, data))
+                    break
         
         # 检查各列表，如果不为空则单独通报
         for m, delay_list in milestone_groups.items():
@@ -194,7 +198,8 @@ async def main():
                         unreplied_customers[uid] = {
                             "last_active": now,
                             "msg_ids": [msg_id],
-                            "is_newly_reported": False
+                            "is_newly_reported": False,
+                            "reported_milestones": set()
                         }
                         log.info("新增客户 %d 进入待回复队列 (msg_id=%s)。当前队列长度: %d",
                                  uid, msg_id, len(unreplied_customers))
@@ -202,6 +207,7 @@ async def main():
                         unreplied_customers[uid]["last_active"] = now
                         unreplied_customers[uid]["msg_ids"].append(msg_id)
                         unreplied_customers[uid]["is_newly_reported"] = False
+                        unreplied_customers[uid]["reported_milestones"].clear()
                         log.info("客户 %d 追加消息 (msg_id=%s)，累计 %d 条，重置通报倒计时。",
                                  uid, msg_id, len(unreplied_customers[uid]["msg_ids"]))
                 case _:
