@@ -2,7 +2,7 @@ import time
 import asyncio
 import logging
 from collections import deque
-from typing import TypedDict, Any, cast
+from typing import Any, TypedDict
 
 from napcat import (
     NapCatClient,
@@ -10,6 +10,9 @@ from napcat import (
     FriendRequestEvent,
     GroupMsgEmojiLikeEvent,
     FriendPokeEvent,
+    Message,
+    NodeInline,
+    NodeReference,
     Reply,
     Text,
 )
@@ -50,6 +53,11 @@ monitored_forwards: dict[int, ForwardMonitorData] = {}
 
 # 客户端对象
 client: NapCatClient = NapCatClient(WS_URL, WS_TOKEN)
+
+
+def serialize_message_segments(segments: list[Message]) -> Any:
+    """将 SDK 消息段序列化为 NodeInline 所需的原始 OB11 结构。"""
+    return [dict(segment) for segment in segments]
 
 
 def track_forward_message(message_id: int, customer_ids: list[int], group_id: int) -> None:
@@ -95,59 +103,43 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         return None
 
     log.info("开始构造合并转发 -> 群 %d, 共 %d 名客户", group_id, len(customer_list))
-    outer_nodes: list[dict[str, Any]] = []
-    
-    # 1. 头部摘要节点
-    outer_nodes.append({
-        "type": "node",
-        "data": {
-            "nickname": "客服系统提示",
-            "user_id": str(client.self_id),
-            "content": [{
-                "type": "text",
-                "data": {"text": summary_text}
-            }]
-        }
-    })
-
-    # 2. 快捷登录网址
-    outer_nodes.append({
-        "type": "node",
-        "data": {
-            "nickname": "快捷传送门",
-            "user_id": str(client.self_id),
-            "content": [{
-                "type": "text",
-                "data": {"text": "https://lion-qq.laysath.cn"}
-            }]
-        }
-    })
+    outer_nodes: list[Message] = [
+        NodeInline(
+            nickname="客服系统提示",
+            user_id=str(client.self_id),
+            content=serialize_message_segments([Text(text=summary_text)]),
+        ),
+        NodeInline(
+            nickname="快捷传送门",
+            user_id=str(client.self_id),
+            content=serialize_message_segments([Text(text="https://lion-qq.laysath.cn")]),
+        ),
+    ]
 
     # 3. 为每个客户构造一个“子合并转发”节点
     for qq, data in customer_list:
         # 内层节点：该客户的所有消息 ID (使用 id 引用不需要 content)
-        inner_nodes: list[dict[str, str | dict[str, str]]] = [
-            {"type": "node", "data": {"id": str(msg_id)}} 
+        inner_nodes: list[Message] = [
+            NodeReference(id=str(msg_id))
             for msg_id in data["msg_ids"]
         ]
-        
-        outer_nodes.append({
-            "type": "node",
-            "data": {
-                "nickname": "客户",
-                "user_id": str(qq),
-                "content": inner_nodes
-            }
-        })
+
+        outer_nodes.append(
+            NodeInline(
+                nickname="客户",
+                user_id=str(qq),
+                content=serialize_message_segments(inner_nodes),
+            )
+        )
 
     # 调用 SDK 混入的 send_group_forward_msg
     log.debug("合并转发节点数: %d (1 摘要 + %d 客户)", len(outer_nodes), len(customer_list))
     try:
-        response = cast(dict[str, Any], await client.send_group_forward_msg(
+        response = await client.send_group_forward_msg(
             group_id=str(group_id),
-            messages=outer_nodes  # type: ignore[arg-type]
-        ))
-        message_id = int(response["message_id"])
+            messages=outer_nodes,
+        )
+        message_id = response["message_id"]
         log.info("合并转发发送成功 -> 群 %d, message_id=%s", group_id, message_id)
         return message_id
     except Exception as e:

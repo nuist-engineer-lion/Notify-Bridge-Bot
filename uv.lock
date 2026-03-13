@@ -180,7 +180,7 @@ wheels = [
 
 [[package]]
 name = "napcat-sdk"
-version = "0.6.4"
+version = "0.6.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -188,9 +188,9 @@ dependencies = [
     { name = "tomli-w" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/50/5b/4829399c62071d7146921c407f55c740eebc8efd3cbe0111de6de8806d89/napcat_sdk-0.6.4.tar.gz", hash = "sha256:1d7db8ce9b37146315403efb2ea8622dd41e105a87f80a65cadfb40dfcaf687c", size = 83612, upload-time = "2026-02-20T13:51:05.731Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/89/c2/35fd08155ca3f224176c4b0c0ea9fed8d8ff4231b29569f160b02f1841e5/napcat_sdk-0.6.8.tar.gz", hash = "sha256:e50aed7f81961b59ab7fa87fae31ad852bcf6be1ddd42afbb8f598f12db32259", size = 96448, upload-time = "2026-03-13T12:43:34.228Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/22/c1/3e467968803a12bd7bffad6c67f0fb5525c68ecf626b2ee48ef631d876b6/napcat_sdk-0.6.4-py3-none-any.whl", hash = "sha256:3a4e9e48b95a9c334f1857181a4866f462b99566f11d3ab2ccdb47ec0d4c8918", size = 113272, upload-time = "2026-02-20T13:51:04.669Z" },
+    { url = "https://files.pythonhosted.org/packages/ef/22/2f7e6da1bea7d14360d086226f5781e8473b850ebb9e7f549ebe32996377/napcat_sdk-0.6.8-py3-none-any.whl", hash = "sha256:296e885fb1bd70d3b1ca5c6411eafaa8d23ce33498817b2b3325f3bc8ba6eaed", size = 129296, upload-time = "2026-03-13T12:43:32.895Z" },
 ]
 
 [[package]]
@@ -264,7 +264,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "napcat-sdk", specifier = ">=0.6.4" }]
+requires-dist = [{ name = "napcat-sdk", specifier = ">=0.6.8" }]
 
 [[package]]
 name = "tomli-w"
