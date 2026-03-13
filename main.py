@@ -134,7 +134,7 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         outer_nodes.append({
             "type": "node",
             "data": {
-                "nickname": f"客户",
+                "nickname": "客户",
                 "user_id": str(qq),
                 "content": inner_nodes
             }
