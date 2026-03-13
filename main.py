@@ -442,13 +442,13 @@ async def main():
                                  uid, msg_id, len(unreplied_customers[uid]["msg_ids"]))
 
                 # 4. 侦听私聊戳一戳（自动发送结束语，并从队列移除）
-                case FriendPokeEvent(user_id=uid, sender_id=sid, target_id=tid) if uid not in WHITELIST and client.self_id == sid and sid == tid:
-                    closed = await close_session(uid, send_closing=True)
+                case FriendPokeEvent(sender_id=sid, target_id=tid) if tid == client.self_id and sid not in WHITELIST:
+                    closed = await close_session(sid, send_closing=True)
                     if closed:
-                        log.info("私聊戳一戳结束会话: user_id=%s", uid)
+                        log.info("私聊戳一戳结束会话: user_id=%s", sid)
                     else:
                         # 客户不在队列中，但已发送结束语（根据原有逻辑）
-                        log.info("私聊戳一戳自动发送结束语（客户不在队列）: user_id=%s", uid)
+                        log.info("私聊戳一戳自动发送结束语（客户不在队列）: user_id=%s", sid)
 
                 # 5. 新增：内部群戳一戳 -> 发送状态面板
                 case GroupPokeEvent(group_id=gid, target_id=tid) if gid == INTERNAL_GROUP_ID and tid == client.self_id:
