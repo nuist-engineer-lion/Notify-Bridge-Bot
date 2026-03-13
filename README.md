@@ -1,6 +1,6 @@
 # Notify-Bridge-Bot
 
-一个基于 `napcat-sdk` 的 QQ 私聊客服催回复机器人。
+一个基于 [`napcat-sdk`](https://github.com/faithleysath/napcat-sdk) 的 QQ 私聊客服催回复机器人。
 
 它的目标很简单：客户发来私聊消息后，如果客服迟迟没有回复，机器人就把消息整理后推送到内部群里提醒；如果超时更久，再按里程碑继续催办；客服处理完成后，再自动结束监控。
 
@@ -51,6 +51,8 @@ uv sync
 pip install napcat-sdk
 ```
 
+`napcat-sdk` 仓库：[`faithleysath/napcat-sdk`](https://github.com/faithleysath/napcat-sdk)
+
 ## 配置
 
 当前版本的配置写死在 [`main.py`](./main.py) 顶部，启动前至少需要检查这些常量：
@@ -79,6 +81,25 @@ uv run python main.py
 - 建立到 NapCat 的 WebSocket 连接
 - 后台每 60 秒执行一次巡检
 - 在连接断开后自动重连
+
+## AI 开发指南
+
+如果你用的是 Claude Code、Codex 或其他编码代理，建议在开始修改代码前，先让 AI 阅读这份 `napcat-sdk` 专用技能说明：
+
+- [`use-napcat-sdk/SKILL.md`](https://raw.githubusercontent.com/faithleysath/napcat-sdk/refs/heads/main/skills/use-napcat-sdk/SKILL.md)
+
+这样 AI 通常能更快理解：
+
+- `napcat-sdk` 的核心心智模型
+- 应该优先使用哪些文档查询方式
+- `NapCatClient`、事件类型、消息段的大致用法
+- 常见坑点，比如 `user_id` / `group_id` 的类型差异
+
+如果你要直接给 AI 一句提示词，可以这样写：
+
+```text
+在修改这个项目之前，请先阅读 https://raw.githubusercontent.com/faithleysath/napcat-sdk/refs/heads/main/skills/use-napcat-sdk/SKILL.md，并按照其中的 napcat-sdk 使用约定、文档查询路径和常见注意事项来理解与修改代码。
+```
 
 ## 提醒与收尾机制
 
