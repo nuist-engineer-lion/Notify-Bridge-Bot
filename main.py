@@ -523,6 +523,10 @@ async def main():
                     cmd_text = ''.join(cmd_parts).strip()
                     log.debug("群命令: reply_id=%s, cmd=%s", reply_id, cmd_text)
 
+                    # 先检查是否是支持的命令，如果不是则直接忽略
+                    if not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more')):
+                        continue
+                    
                     # 解析目标客户
                     customer_ids, err_msg = await resolve_target_from_reply(reply_id)
                     if err_msg:
