@@ -11,7 +11,8 @@ from napcat import (
     FriendRequestEvent,
     GroupMsgEmojiLikeEvent,
     FriendPokeEvent,
-    GroupPokeEvent,          # 新增导入
+    GroupMessageEvent, 
+    GroupPokeEvent, 
     Message,
     NodeInline,
     NodeReference,
@@ -337,6 +338,58 @@ async def monitor_loop():
 
         log.info("===== 巡检结束 =====")
 
+async def resolve_target_from_reply(reply_id: int) -> tuple[list[int] | None, str | None]:
+    """
+    根据被引用的消息ID解析对应的客户列表。
+    返回 (customer_ids, error_message)，若成功则 error_message 为 None。
+    """
+    # 先从监听的合并转发中查找
+    data = monitored_forwards.get(reply_id)
+    if data is not None:
+        return data["customer_ids"], None
+
+    # 未找到，尝试查询消息详情
+    try:
+        msg_detail = await client.get_msg(message_id=str(reply_id))
+        sender_id = int(msg_detail.get("user_id", 0))
+        self_id = int(client.self_id)
+        if sender_id == self_id:
+            return None, "操作已过期"
+        else:
+            return None, "无法识别的消息"
+    except Exception as e:
+        log.error("查询消息详情失败: reply_id=%s, err=%s", reply_id, e)
+        return None, "查询消息失败"
+
+
+async def send_forward_from_message_ids(group_id: int, title: str, user_id: int, message_ids: list[int]) -> int | None:
+    """根据消息ID列表发送合并转发到群"""
+    if not message_ids:
+        return None
+    outer_nodes: list[Message] = [
+        NodeInline(
+            nickname="客服系统提示",
+            user_id=str(client.self_id),
+            content=serialize_message_segments([Text(text=title)]),
+        ),
+        NodeInline(
+            nickname="消息记录",
+            user_id=str(user_id),
+            content=serialize_message_segments([
+                NodeReference(id=str(msg_id)) for msg_id in message_ids
+            ]),
+        )
+    ]
+    try:
+        response = await client.send_group_forward_msg(
+            group_id=str(group_id),
+            messages=outer_nodes,
+        )
+        return response["message_id"]
+    except Exception as e:
+        log.error("发送合并转发失败: %s", e, exc_info=True)
+        return None
+
 async def main():
     log.info("程序启动, WS_URL=%s, 通知群=%d, 白名单=%s", WS_URL, INTERNAL_GROUP_ID, WHITELIST)
     log.info("里程碑阈值(分钟): %s", MILESTONES)
@@ -455,6 +508,151 @@ async def main():
                 case GroupPokeEvent(group_id=gid, target_id=tid) if gid == INTERNAL_GROUP_ID and tid == client.self_id:
                     log.info("内部群戳一戳触发状态面板: group=%d", gid)
                     await send_status_panel(gid)
+                case GroupMessageEvent(group_id=gid, message=segments, message_id=msg_id) if gid == INTERNAL_GROUP_ID:
+                    # 解析引用和命令
+                    reply_id = None
+                    cmd_parts: list[str] = []
+                    for seg in segments:
+                        if isinstance(seg, Reply) and seg.id is not None:
+                            reply_id = int(seg.id)          # Reply.id 是字符串，转 int
+                        elif isinstance(seg, Text):
+                            cmd_parts.append(seg.text)
+                    if reply_id is None or not cmd_parts:
+                        continue
+
+                    cmd_text = ''.join(cmd_parts).strip()
+                    log.debug("群命令: reply_id=%s, cmd=%s", reply_id, cmd_text)
+
+                    # 解析目标客户
+                    customer_ids, err_msg = await resolve_target_from_reply(reply_id)
+                    if err_msg:
+                        await client.send_group_msg(
+                            group_id=str(gid),
+                            message=[Reply(id=str(msg_id)), Text(text=err_msg)],
+                        )
+                        continue
+
+                    # 防御性检查：customer_ids 必须非空
+                    if not customer_ids:
+                        await client.send_group_msg(
+                            group_id=str(gid),
+                            message=[Reply(id=str(msg_id)), Text(text="内部错误：无法解析客户列表")],
+                        )
+                        continue
+
+                    if len(customer_ids) != 1:
+                        await client.send_group_msg(
+                            group_id=str(gid),
+                            message=[Reply(id=str(msg_id)), Text(text="暂不支持：该合并转发包含多个客户，请手动处理。")],
+                        )
+                        continue
+
+                    customer_id = customer_ids[0]
+
+                    # 根据命令分发
+                    if cmd_text.startswith(".say"):
+                        # 提取 .say 后的内容
+                        content = cmd_text[4:].strip()   # 去掉 ".say"
+                        if not content:
+                            await client.send_group_msg(
+                                group_id=str(gid),
+                                message=[Reply(id=str(msg_id)), Text(text=".say 命令后需要附带要发送的消息内容")],
+                            )
+                            continue
+
+                        # 发送私聊消息
+                        try:
+                            await client.send_private_msg(
+                                user_id=str(customer_id),
+                                message=content,
+                            )
+                            # 结束会话（不移除监听记录，因为后续可能还有操作？但为了统一，结束类命令应移除监听）
+                            closed = await close_session(customer_id, send_closing=False)
+                            pop_tracked_forward(reply_id)   # 移除原转发的监听
+                            feedback = f"✅ 已向客户 {customer_id} 发送消息。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
+                        except Exception as e:
+                            log.error("发送私聊消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
+                            feedback = f"❌ 发送失败：{e}"
+                        # 发送群反馈，并将其加入监听
+                        resp = await client.send_group_msg(
+                            group_id=str(gid),
+                            message=[Reply(id=str(msg_id)), Text(text=feedback)],
+                        )
+                        feedback_msg_id = resp.get("message_id")
+                        if feedback_msg_id:
+                            track_forward_message(feedback_msg_id, [customer_id], gid)
+
+                    elif cmd_text.startswith(".bye"):
+                        # 发送结束语
+                        try:
+                            await client.send_private_msg(
+                                user_id=str(customer_id),
+                                message=CLOSING_MESSAGE,
+                            )
+                            closed = await close_session(customer_id, send_closing=False)
+                            pop_tracked_forward(reply_id)
+                            feedback = f"✅ 已向客户 {customer_id} 发送结束语。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
+                        except Exception as e:
+                            log.error("发送结束语失败: customer=%s, err=%s", customer_id, e, exc_info=True)
+                            feedback = f"❌ 发送失败：{e}"
+                        # 发送群反馈，并将其加入监听
+                        resp = await client.send_group_msg(
+                            group_id=str(gid),
+                            message=[Reply(id=str(msg_id)), Text(text=feedback)],
+                        )
+                        feedback_msg_id = resp.get("message_id")
+                        if feedback_msg_id:
+                            track_forward_message(feedback_msg_id, [customer_id], gid)
+
+                    elif cmd_text.startswith(".more"):
+                        # 获取最近100条聊天记录
+                        try:
+                            resp = await client.get_friend_msg_history(
+                                user_id=str(customer_id),
+                                count=100,
+                                parse_mult_msg=True,       # 可选，确保合并转发被解析
+                            )
+                            messages = resp.get("messages", [])
+                            if not messages:
+                                await client.send_group_msg(
+                                    group_id=str(gid),
+                                    message=[Reply(id=str(msg_id)), Text(text=f"客户 {customer_id} 暂无更多历史消息")],
+                                )
+                                continue
+
+                            # 按时间正序排序（假设返回的是倒序）
+                            messages.sort(key=lambda m: m.get("time", 0))
+                            msg_ids = [m["message_id"] for m in messages if "message_id" in m]
+
+                            # 构造合并转发
+                            title = f"客户 {customer_id} 的最近 {len(msg_ids)} 条消息"
+                            new_fwd_id = await send_forward_from_message_ids(
+                                group_id=gid,
+                                title=title,
+                                user_id=customer_id,
+                                message_ids=msg_ids,
+                            )
+                            if new_fwd_id:
+                                # 将新合并转发加入监听
+                                track_forward_message(new_fwd_id, [customer_id], gid)
+                                continue
+                            else:
+                                feedback = f"❌ 构造合并转发失败"
+                        except Exception as e:
+                            log.error("获取历史消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
+                            feedback = f"❌ 获取历史消息失败：{e}"
+                        # 发送群反馈，并将其加入监听
+                        resp = await client.send_group_msg(
+                            group_id=str(gid),
+                            message=[Reply(id=str(msg_id)), Text(text=feedback)],
+                        )
+                        feedback_msg_id = resp.get("message_id")
+                        if feedback_msg_id:
+                            track_forward_message(feedback_msg_id, [customer_id], gid)
+
+                    else:
+                        # 不是我们关心的命令，忽略
+                        continue
 
                 case _:
                     continue
