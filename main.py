@@ -508,13 +508,13 @@ async def main():
                 case GroupPokeEvent(group_id=gid, target_id=tid) if gid == INTERNAL_GROUP_ID and tid == client.self_id:
                     log.info("内部群戳一戳触发状态面板: group=%d", gid)
                     await send_status_panel(gid)
-                case GroupMessageEvent(group_id=gid, message=segments, message_id=msg_id) if gid == INTERNAL_GROUP_ID:
+                case GroupMessageEvent(group_id=gid, message=segments, message_id=msg_id, user_id=uid) if gid == INTERNAL_GROUP_ID and uid != client.self_id:
                     # 解析引用和命令
                     reply_id = None
                     cmd_parts: list[str] = []
                     for seg in segments:
                         if isinstance(seg, Reply) and seg.id is not None:
-                            reply_id = int(seg.id)          # Reply.id 是字符串，转 int
+                            reply_id = int(seg.id)
                         elif isinstance(seg, Text):
                             cmd_parts.append(seg.text)
                     if reply_id is None or not cmd_parts:
