@@ -635,7 +635,7 @@ async def main():
                             if new_fwd_id:
                                 # 将新合并转发加入监听
                                 track_forward_message(new_fwd_id, [customer_id], gid)
-                                feedback = f"✅ 已发送客户 {customer_id} 的历史消息合并转发"
+                                continue
                             else:
                                 feedback = f"❌ 构造合并转发失败"
                         except Exception as e:
