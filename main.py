@@ -568,15 +568,19 @@ async def main():
                             )
                             # 结束会话（不移除监听记录，因为后续可能还有操作？但为了统一，结束类命令应移除监听）
                             closed = await close_session(customer_id, send_closing=False)
-                            pop_tracked_forward(reply_id)   # 移除监听记录
+                            pop_tracked_forward(reply_id)   # 移除原转发的监听
                             feedback = f"✅ 已向客户 {customer_id} 发送消息。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
                         except Exception as e:
                             log.error("发送私聊消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
                             feedback = f"❌ 发送失败：{e}"
-                        await client.send_group_msg(
+                        # 发送群反馈，并将其加入监听
+                        resp = await client.send_group_msg(
                             group_id=str(gid),
                             message=[Reply(id=str(msg_id)), Text(text=feedback)],
                         )
+                        feedback_msg_id = resp.get("message_id")
+                        if feedback_msg_id:
+                            track_forward_message(feedback_msg_id, [customer_id], gid)
 
                     elif cmd_text.startswith(".bye"):
                         # 发送结束语
@@ -591,10 +595,14 @@ async def main():
                         except Exception as e:
                             log.error("发送结束语失败: customer=%s, err=%s", customer_id, e, exc_info=True)
                             feedback = f"❌ 发送失败：{e}"
-                        await client.send_group_msg(
+                        # 发送群反馈，并将其加入监听
+                        resp = await client.send_group_msg(
                             group_id=str(gid),
                             message=[Reply(id=str(msg_id)), Text(text=feedback)],
                         )
+                        feedback_msg_id = resp.get("message_id")
+                        if feedback_msg_id:
+                            track_forward_message(feedback_msg_id, [customer_id], gid)
 
                     elif cmd_text.startswith(".more"):
                         # 获取最近100条聊天记录
@@ -625,17 +633,22 @@ async def main():
                                 message_ids=msg_ids,
                             )
                             if new_fwd_id:
-                                # 可选：将新转发的消息也加入监听（如果需要后续操作），但一般不需要
+                                # 将新合并转发加入监听
+                                track_forward_message(new_fwd_id, [customer_id], gid)
                                 feedback = f"✅ 已发送客户 {customer_id} 的历史消息合并转发"
                             else:
                                 feedback = f"❌ 构造合并转发失败"
                         except Exception as e:
                             log.error("获取历史消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
                             feedback = f"❌ 获取历史消息失败：{e}"
-                        await client.send_group_msg(
+                        # 发送群反馈，并将其加入监听
+                        resp = await client.send_group_msg(
                             group_id=str(gid),
                             message=[Reply(id=str(msg_id)), Text(text=feedback)],
                         )
+                        feedback_msg_id = resp.get("message_id")
+                        if feedback_msg_id:
+                            track_forward_message(feedback_msg_id, [customer_id], gid)
 
                     else:
                         # 不是我们关心的命令，忽略
