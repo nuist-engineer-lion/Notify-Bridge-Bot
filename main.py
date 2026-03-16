@@ -419,6 +419,15 @@ async def main():
     log.info("程序启动, WS_URL=%s, 通知群=%d, 白名单=%s", WS_URL, INTERNAL_GROUP_ID, WHITELIST)
     log.info("里程碑阈值(分钟): %s", MILESTONES)
 
+    try:
+        await client.send_group_msg(
+            group_id=str(INTERNAL_GROUP_ID),
+            message="🤖 客服机器人已启动，开始监听消息。",
+        )
+        log.info("启动通知已发送至群 %d", INTERNAL_GROUP_ID)
+    except Exception as e:
+        log.error("发送启动通知失败: %s", e, exc_info=True)
+
     # 启动定时巡检后台任务
     asyncio.create_task(monitor_loop())
 
