@@ -46,6 +46,8 @@ DEBOUNCE_SECONDS = {
     "more": 5,
     "bye": 5,
 }
+# 好友申请去重缓存（flag -> 处理时间戳）
+PROCESSED_FRIEND_REQUESTS_EXPIRE = 60  # 缓存保留 60 秒
 
 # ================= 回复耗时记录（秒） =================
 REPLY_DURATION_MAXLEN = 1000  # 保留最近 N 次回复耗时，防止列表无限增长
@@ -69,6 +71,7 @@ unreplied_customers: dict[int, CustomerData] = {}
 monitored_forward_order: deque[int] = deque()
 monitored_forwards: dict[int, ForwardMonitorData] = {}
 last_command_time: dict[tuple[int, str], float] = {} # 记录每条消息上各指令的最后执行时间，键为 (message_id, command_type)
+processed_friend_requests: dict[str, float] = {} # 好友申请去重缓存（flag -> 处理时间戳）
 
 # 客户端对象
 client: NapCatClient = NapCatClient(WS_URL, WS_TOKEN)
@@ -295,6 +298,14 @@ async def monitor_loop():
         now = time.time()
         new_customers_to_report: list[tuple[int, CustomerData]] = []
 
+        # ===== 清理过期好友申请缓存 =====
+        now = time.time()
+        expired_flags = [flag for flag, ts in processed_friend_requests.items() if now - ts > PROCESSED_FRIEND_REQUESTS_EXPIRE]
+        for flag in expired_flags:
+            del processed_friend_requests[flag]
+        if expired_flags:
+            log.debug("已清理 %d 条过期好友申请缓存", len(expired_flags))
+
         # ================= 阶段 1：新客户防抖通报 =================
         # 筛选防抖时间 >= 1分钟且未报过的新客户
         for qq, data in unreplied_customers.items():
@@ -441,7 +452,17 @@ async def main():
             log.debug("收到事件: type=%s, post_type=%s", type(event).__name__, getattr(event, 'post_type', '?'))
             match event:
                 # 0. 自动通过好友申请
-                case FriendRequestEvent(user_id=uid, comment=comment):
+                case FriendRequestEvent(user_id=uid, comment=comment,flag=flag):
+                    log.info("收到好友申请："+str(uid)+" "+comment)
+                    # 去重检查：如果同一个 flag 在短时间内已处理过，则跳过
+                    now = time.time()
+                    last_time = processed_friend_requests.get(flag)
+                    if last_time and (now - last_time) < PROCESSED_FRIEND_REQUESTS_EXPIRE:
+                        log.info("好友申请重复事件已忽略: flag=%s, user_id=%s", flag, uid)
+                        continue
+                    # 记录当前处理
+                    processed_friend_requests[flag] = now
+
                     try:
                         await event.approve()
                         notify_text = (
