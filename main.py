@@ -56,24 +56,69 @@ PROCESSED_FRIEND_REQUESTS_EXPIRE = 60  # 缓存保留 60 秒
 # 格式：{ QQ号: { 星期几英文: [(开始时间, 结束时间), ...] } }
 # 星期几可用 "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
 AVAILABILITY: dict[int, dict[str, list[tuple[str, str]]]] = {
-    12345678: {  # 示例成员A
-        "monday": [("09:00", "12:00"), ("14:00", "18:00")],
-        "tuesday": [("09:00", "12:00"), ("14:00", "18:00")],
-        "wednesday": [("09:00", "12:00"), ("14:00", "18:00")],
-        "thursday": [("09:00", "12:00"), ("14:00", "18:00")],
-        "friday": [("09:00", "12:00"), ("14:00", "18:00")],
+    234666220: {  # yjx
+        "monday": [("00:00", "11:59"), ("12:00", "23:59")],
+        "tuesday": [],
+        "wednesday": [],
+        "thursday": [],
+        "friday": [],
         "saturday": [],
         "sunday": [],
     },
-    87654321: {  # 示例成员B
-        "monday": [("13:00", "17:00")],
-        "tuesday": [("13:00", "17:00")],
-        "wednesday": [("13:00", "17:00")],
-        "thursday": [("13:00", "17:00")],
-        "friday": [("13:00", "17:00")],
+    1284656930: {  # cz
+        "monday": [],
+        "tuesday": [("00:00", "11:59"), ("12:00", "23:59")],
+        "wednesday": [],
+        "thursday": [],
+        "friday": [],
         "saturday": [],
         "sunday": [],
     },
+    3499737435: {  # hyn
+        "monday": [],
+        "tuesday": [],
+        "wednesday": [("00:00", "11:59"), ("12:00", "23:59")],
+        "thursday": [],
+        "friday": [],
+        "saturday": [],
+        "sunday": [],
+    },
+    3525362286: {  # djh
+        "monday": [],
+        "tuesday": [],
+        "wednesday": [],
+        "thursday": [("00:00", "11:59"), ("12:00", "23:59")],
+        "friday": [],
+        "saturday": [],
+        "sunday": [],
+    },
+    1372438873: {  # ljh
+        "monday": [],
+        "tuesday": [],
+        "wednesday": [],
+        "thursday": [],
+        "friday": [("00:00", "11:59"), ("12:00", "23:59")],
+        "saturday": [],
+        "sunday": [],
+    },
+    3026425376: {  # pwy
+        "monday": [],
+        "tuesday": [],
+        "wednesday": [],
+        "thursday": [],
+        "friday": [],
+        "saturday": [("00:00", "11:59"), ("12:00", "23:59")],
+        "sunday": [],
+    },
+    2018160654: {  # yyx
+        "monday": [],
+        "tuesday": [],
+        "wednesday": [],
+        "thursday": [],
+        "friday": [],
+        "saturday": [],
+        "sunday": [("00:00", "11:59"), ("12:00", "23:59")],
+    }
 }
 
 # 星期几数字到英文的映射（datetime.weekday() 返回 0=周一, 6=周日）
