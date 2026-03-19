@@ -314,11 +314,6 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
     log.info("开始构造合并转发 -> 群 %d, 共 %d 名客户", group_id, len(customer_list))
     outer_nodes: list[Message] = [
         NodeInline(
-            nickname="客服系统提示",
-            user_id=str(client.self_id),
-            content=serialize_message_segments([Text(text=summary_text)]),
-        ),
-        NodeInline(
             nickname="快捷传送门",
             user_id=str(client.self_id),
             content=serialize_message_segments([Text(text="https://lion-qq.laysath.cn")]),
