@@ -3,6 +3,7 @@ import asyncio
 import logging
 import statistics
 import random
+import yaml
 from datetime import datetime
 from collections import deque
 from typing import Any, TypedDict
@@ -31,97 +32,35 @@ logging.basicConfig(
 )
 log = logging.getLogger("qq-redot")
 
-WS_URL = "ws://10.254.100.21:3001"
-WS_TOKEN = "TYnR3DXCeM9H~O.W"
+# ================= 加载配置 =================
+def load_config(path: str = "config.yaml"):
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    # 转换 availability 中的时段列表为元组
+    avail = {}
+    for qq, days in cfg["availability"].items():
+        avail[int(qq)] = {}
+        for day, slots in days.items():
+            avail[int(qq)][day] = [tuple(slot) for slot in slots]
+    cfg["availability"] = avail
+    return cfg
 
-INTERNAL_GROUP_ID = 1056221119 # 内部客服通知群号
-WHITELIST = [123456789, 987654321] # 免监控的白名单 QQ
-MILESTONES = [5, 15, 30, 60, 120, 180, 360, 720, 1440, 2880, 4320] # 迟滞里程碑(分钟)
-MONITORED_FORWARD_LIMIT = 10
-CLOSING_MESSAGE = "本次会话暂时结束。感谢您的支持与信任，再见。（请勿回复）"
+config = load_config()
 
-# ================= 程序启动时间 =================
-STARTED_AT = time.time()
+WS_URL = config["ws_url"]
+WS_TOKEN = config["ws_token"]
+INTERNAL_GROUP_ID = config["internal_group_id"]
+WHITELIST = config["whitelist"]
+MILESTONES = config["milestones"]
+MONITORED_FORWARD_LIMIT = config["monitored_forward_limit"]
+CLOSING_MESSAGE = config["closing_message"]
+DEBOUNCE_SECONDS = config["debounce_seconds"]
+PROCESSED_FRIEND_REQUESTS_EXPIRE = config["processed_friend_requests_expire"]
+REPLY_DURATION_MAXLEN = config["reply_duration_maxlen"]
+AVAILABILITY = config["availability"]
+MAX_LISTEN_AGE = config.get("max_listen_age", 86400)   # 24小时
 
-# 防抖间隔（秒）
-DEBOUNCE_SECONDS = {
-    "say": 5,
-    "more": 5,
-    "bye": 5,
-}
-# 好友申请去重缓存（flag -> 处理时间戳）
-PROCESSED_FRIEND_REQUESTS_EXPIRE = 60  # 缓存保留 60 秒
-
-# ================= 成员可用时间段配置 =================
-# 格式：{ QQ号: { 星期几英文: [(开始时间, 结束时间), ...] } }
-# 星期几可用 "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
-AVAILABILITY: dict[int, dict[str, list[tuple[str, str]]]] = {
-    234666220: {  # yjx
-        "monday": [("00:00", "11:59"), ("12:00", "23:59")],
-        "tuesday": [],
-        "wednesday": [],
-        "thursday": [],
-        "friday": [],
-        "saturday": [],
-        "sunday": [],
-    },
-    1284656930: {  # cz
-        "monday": [],
-        "tuesday": [("00:00", "11:59"), ("12:00", "23:59")],
-        "wednesday": [],
-        "thursday": [],
-        "friday": [],
-        "saturday": [],
-        "sunday": [],
-    },
-    3499737435: {  # hyn
-        "monday": [],
-        "tuesday": [],
-        "wednesday": [("00:00", "11:59"), ("12:00", "23:59")],
-        "thursday": [],
-        "friday": [],
-        "saturday": [],
-        "sunday": [],
-    },
-    3525362286: {  # djh
-        "monday": [],
-        "tuesday": [],
-        "wednesday": [],
-        "thursday": [("00:00", "11:59"), ("12:00", "23:59")],
-        "friday": [],
-        "saturday": [],
-        "sunday": [],
-    },
-    1372438873: {  # ljh
-        "monday": [],
-        "tuesday": [],
-        "wednesday": [],
-        "thursday": [],
-        "friday": [("00:00", "11:59"), ("12:00", "23:59")],
-        "saturday": [],
-        "sunday": [],
-    },
-    3026425376: {  # pwy
-        "monday": [],
-        "tuesday": [],
-        "wednesday": [],
-        "thursday": [],
-        "friday": [],
-        "saturday": [("00:00", "11:59"), ("12:00", "23:59")],
-        "sunday": [],
-    },
-    2018160654: {  # yyx
-        "monday": [],
-        "tuesday": [],
-        "wednesday": [],
-        "thursday": [],
-        "friday": [],
-        "saturday": [],
-        "sunday": [("00:00", "11:59"), ("12:00", "23:59")],
-    }
-}
-
-# 星期几数字到英文的映射（datetime.weekday() 返回 0=周一, 6=周日）
+# ================= 星期映射 =================
 WEEKDAY_MAP = {
     0: "monday",
     1: "tuesday",
@@ -131,10 +70,15 @@ WEEKDAY_MAP = {
     5: "saturday",
     6: "sunday",
 }
-# =================================================
+
+# ================= 程序启动时间 =================
+STARTED_AT = time.time()
+
+# 防抖间隔（秒）已在配置中，直接使用 DEBOUNCE_SECONDS 字典
+
+# 好友申请去重缓存（flag -> 处理时间戳）
 
 # ================= 回复耗时记录（秒） =================
-REPLY_DURATION_MAXLEN = 1000  # 保留最近 N 次回复耗时
 reply_durations: deque[float] = deque(maxlen=REPLY_DURATION_MAXLEN)
 
 class CustomerData(TypedDict):
@@ -417,8 +361,7 @@ async def monitor_loop():
             log.debug("巡检跳过: 客户端未运行")
             continue
 
-        # ===== 清理超过24小时的监听消息 =====
-        MAX_LISTEN_AGE = 24 * 3600  # 24小时
+        # ===== 清理超时的监听消息 =====
         now = time.time()
         to_remove = [mid for mid, data in monitored_forwards.items() if now - data["created_at"] > MAX_LISTEN_AGE]
         for mid in to_remove:
@@ -456,17 +399,17 @@ async def monitor_loop():
             # 标记已通报
             for qq, data in new_customers_to_report:
                 data["is_newly_reported"] = True
-            
+
             # 按时间更近的优先排序 (last_active 越大越靠前)
             new_customers_to_report.sort(key=lambda x: x[1]["last_active"], reverse=True)
-            
+
             # 只通报新触发的客户，避免每次都全量刷屏
             summary = f"📢 刚刚有 {len(new_customers_to_report)} 名客户发来消息，请及时回复！"
             # 替换为带 @ 的提醒
             await send_reminder_with_at(INTERNAL_GROUP_ID, summary, new_customers_to_report)
         else:
             log.debug("阶段1: 无新客户需要通报")
-            
+
         # ================= 阶段 2：迟滞里程碑通报 =================
 
         # 初始化按里程碑分组的字典
@@ -484,13 +427,13 @@ async def monitor_loop():
                         log.debug("    -> 命中里程碑 %d 分钟", m)
                         milestone_groups[m].append((qq, data))
                     break
-        
+
         # 检查各列表，如果不为空则单独通报
         for m, delay_list in milestone_groups.items():
             if delay_list:
                 # 排序：时间更近的优先
                 delay_list.sort(key=lambda x: x[1]["last_active"], reverse=True)
-                
+
                 unit = f"{m}分钟" if m < 60 else f"{m//60}小时"
                 log.warning("阶段2: 里程碑 %s 触发, 涉及 %d 名客户: %s",
                             unit, len(delay_list), [qq for qq, _ in delay_list])
