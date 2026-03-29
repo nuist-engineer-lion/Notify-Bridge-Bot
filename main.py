@@ -232,7 +232,8 @@ async def send_status_panel(group_id: int):
         f"• 最长回复耗时：{max_str}\n"
         f"• 平均回复耗时：{avg_str}\n"
         f"• 中位数耗时：{median_str}\n"
-        f"• 监听合并转发：{monitored_count}"
+        f"• 监听合并转发：{monitored_count}\n"
+        f"使用 .help 查看可用命令"
     )
 
     try:
@@ -642,16 +643,31 @@ async def main():
                             reply_id = int(seg.id)
                         elif isinstance(seg, Text):
                             cmd_parts.append(seg.text)
-                    if reply_id is None or not cmd_parts:
-                        continue
 
                     cmd_text = ''.join(cmd_parts).strip()
                     log.debug("群命令: reply_id=%s, cmd=%s", reply_id, cmd_text)
 
                     # 先检查是否是支持的命令，如果不是则直接忽略
-                    if not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more')):
+                    if not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help')):
                         continue
                     
+                    if cmd_text.startswith(".help"):
+                        help_text = (
+                            "📖 可用命令列表：\n"
+                            "• .say <内容> – 向客户发送私聊消息\n"
+                            "• .bye – 向客户发送结束语并关闭会话\n"
+                            "• .more – 获取客户的最近100条历史消息\n"
+                            "• .help – 显示此帮助信息\n"
+                            "\n"
+                            "使用方法：回复一条合并转发消息，然后输入对应命令。"
+                        )
+                        await client.send_group_msg(
+                            group_id=str(gid),
+                            message=[Text(text=help_text)],
+                        )
+                        continue
+                    if reply_id is None or not cmd_parts:
+                        continue
                     # 解析目标客户
                     customer_ids, err_msg = await resolve_target_from_reply(reply_id)
                     if err_msg:
