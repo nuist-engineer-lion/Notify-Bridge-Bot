@@ -246,11 +246,41 @@ async def send_status_panel(group_id: int):
         log.error("发送状态面板失败: %s", e, exc_info=True)
 
 
+# ================= 辅助函数：获取客户最近的消息ID列表 =================
+async def get_recent_message_ids(user_id: int, count: int = 200, max_age_seconds: int = 86400) -> list[int]:
+    """
+    通过 API 获取与指定用户的最近消息，筛选出最近 max_age_seconds 秒内的消息（双方消息）。
+    返回按时间正序排列的 message_id 列表。
+    """
+    now = time.time()
+    try:
+        resp = await client.get_friend_msg_history(
+            user_id=str(user_id),
+            count=count,
+            parse_mult_msg=True,
+        )
+        messages = resp.get("messages", [])
+        if not messages:
+            return []
+        # 按时间正序排序
+        messages.sort(key=lambda m: m.get("time", 0))
+        # 筛选最近 max_age_seconds 秒内的消息
+        filtered = [
+            m for m in messages
+            if (now - m.get("time", 0)) <= max_age_seconds
+        ]
+        msg_ids = [m["message_id"] for m in filtered if "message_id" in m]
+        log.debug("客户 %d 历史消息: 获取到 %d 条，过滤后 %d 条（%d 秒内）",
+                  user_id, len(messages), len(msg_ids), max_age_seconds)
+        return msg_ids
+    except Exception as e:
+        log.error("获取客户 %d 历史消息失败: %s", user_id, e, exc_info=True)
+        return []
+    
 # ================= 辅助函数：构造嵌套合并转发 =================
 async def send_nested_forward(group_id: int, customer_list: list[tuple[int, CustomerData]], summary_text: str) -> int | None:
     """
-    构造嵌套合并转发并发送
-    customer_list: list[tuple[int, CustomerData]]
+    构造嵌套合并转发并发送，每个客户的消息通过 get_recent_message_ids 获取最近1天内的消息
     """
     if not customer_list:
         log.debug("send_nested_forward: customer_list 为空，跳过发送")
@@ -265,12 +295,16 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         ),
     ]
 
-    # 3. 为每个客户构造一个“子合并转发”节点
-    for qq, data in customer_list:
-        # 内层节点：该客户的所有消息 ID (使用 id 引用不需要 content)
+    for qq, _ in customer_list:
+        # 获取最近1天内的消息ID（默认86400秒）
+        msg_ids = await get_recent_message_ids(qq, count=200, max_age_seconds=86400)
+        if not msg_ids:
+            log.warning("客户 %d 无1天内消息，跳过该客户节点", qq)
+            continue
+
         inner_nodes: list[Message] = [
             NodeReference(id=str(msg_id))
-            for msg_id in data["msg_ids"]
+            for msg_id in msg_ids
         ]
 
         outer_nodes.append(
@@ -281,8 +315,10 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
             )
         )
 
-    # 调用 SDK 混入的 send_group_forward_msg
-    log.debug("合并转发节点数: %d (1 摘要 + %d 客户)", len(outer_nodes), len(customer_list))
+    if len(outer_nodes) <= 1:
+        log.warning("所有客户均无1天内消息，取消发送合并转发")
+        return None
+
     try:
         response = await client.send_group_forward_msg(
             group_id=str(group_id),
