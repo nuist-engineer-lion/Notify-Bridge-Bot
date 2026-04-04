@@ -6,7 +6,7 @@ import random
 import yaml
 from datetime import datetime
 from collections import deque
-from typing import Any, TypedDict
+from typing import Any, TypedDict, Iterable, Union
 
 from napcat import (
     NapCatClient,
@@ -22,6 +22,7 @@ from napcat import (
     Reply,
     Text,
     At,
+    UnknownMessageSegment,
 )
 
 # ================= 日志配置 =================
@@ -77,6 +78,10 @@ STARTED_AT = time.time()
 # 防抖间隔（秒）已在配置中，直接使用 DEBOUNCE_SECONDS 字典
 
 # 好友申请去重缓存（flag -> 处理时间戳）
+processed_friend_requests: dict[str, float] = {}
+
+# 记录用户通过好友申请的时间戳（用于忽略刚通过申请后的第一条消息）
+friend_approve_time: dict[int, float] = {}
 
 # ================= 回复耗时记录（秒） =================
 reply_durations: deque[float] = deque(maxlen=REPLY_DURATION_MAXLEN)
@@ -99,7 +104,6 @@ unreplied_customers: dict[int, CustomerData] = {}
 monitored_forward_order: deque[int] = deque()
 monitored_forwards: dict[int, ForwardMonitorData] = {}
 last_command_time: dict[tuple[int, str], float] = {}  # 记录每条消息上各指令的最后执行时间
-processed_friend_requests: dict[str, float] = {}  # 好友申请去重缓存
 
 # 客户端对象
 client: NapCatClient = NapCatClient(WS_URL, WS_TOKEN)
@@ -410,7 +414,7 @@ async def monitor_loop():
             log.debug("巡检跳过: 当前无未回复客户")
             continue
 
-        log.info("===== 巡检开始 ===== 当前未回复客户数: %d", len(unreplied_customers))
+        log.info("===== 巡检开始 =====\n当前未回复客户数: %d", len(unreplied_customers))
         now = time.time()
         new_customers_to_report: list[tuple[int, CustomerData]] = []
 
@@ -421,6 +425,13 @@ async def monitor_loop():
             del processed_friend_requests[flag]
         if expired_flags:
             log.debug("已清理 %d 条过期好友申请缓存", len(expired_flags))
+
+        # ===== 清理过期的好友通过时间记录 =====
+        expired_approves = [uid for uid, ts in friend_approve_time.items() if now - ts > PROCESSED_FRIEND_REQUESTS_EXPIRE]
+        for uid in expired_approves:
+            del friend_approve_time[uid]
+        if expired_approves:
+            log.debug("已清理 %d 条过期好友通过时间记录", len(expired_approves))
 
         # ================= 阶段 1：新客户防抖通报 =================
         # 筛选防抖时间 >= 1分钟且未报过的新客户
@@ -532,6 +543,20 @@ async def send_forward_from_message_ids(group_id: int, title: str, user_id: int,
         log.error("发送合并转发失败: %s", e, exc_info=True)
         return None
 
+def extract_message_text(segments: Iterable[Union[Message, UnknownMessageSegment]]) -> str:
+    """
+    从消息段可迭代对象中提取纯文本，用于日志记录。
+    只提取 Text 段中的文本，忽略其他类型。
+    """
+    texts: list[str] = []
+    for seg in segments:
+        if isinstance(seg, Text):
+            texts.append(seg.text)
+    full = ''.join(texts).strip()
+    if len(full) > 100:
+        full = full[:100] + '…'
+    return full or '<无文本内容>'
+
 async def main():
     log.info("程序启动, WS_URL=%s, 通知群=%d, 白名单=%s", WS_URL, INTERNAL_GROUP_ID, WHITELIST)
     log.info("里程碑阈值(分钟): %s", MILESTONES)
@@ -570,6 +595,8 @@ async def main():
 
                     try:
                         await event.approve()
+                        # 记录通过申请的时间戳，用于忽略之后短时间内收到的第一条消息
+                        friend_approve_time[uid] = time.time()
                         notify_text = (
                             "✅ 已自动通过好友申请\n"
                             f"QQ: {uid}\n"
@@ -585,6 +612,7 @@ async def main():
                         log.info("已自动通过好友申请: user_id=%s, comment=%s", uid, comment)
                     except Exception as e:
                         log.error("自动通过好友申请失败: user_id=%s, err=%s", uid, e, exc_info=True)
+
                 # 1. 侦听内部群贴表情操作
                 case GroupMsgEmojiLikeEvent(group_id=gid, message_id=mid, is_add=True) if gid == INTERNAL_GROUP_ID:
                     tracked_data = pop_tracked_forward(mid)
@@ -636,25 +664,34 @@ async def main():
                     log.info("客服已回复 %s，移除提醒并记录耗时。剩余未回复: %d", tid, len(unreplied_customers))
 
                 # 3. 接收客户消息 (加入/更新字典)
-                case PrivateMessageEvent(post_type="message", user_id=uid, message_id=msg_id) if int(uid) not in WHITELIST:
+                case PrivateMessageEvent(post_type="message", user_id=uid, message_id=msg_id, message=msg_segments) if int(uid) not in WHITELIST:
                     uid = int(uid)
                     now = time.time()
+                    
+                    # 检查用户是否刚通过好友申请（窗口期内忽略其消息）
+                    if uid in friend_approve_time and (now - friend_approve_time[uid]) < PROCESSED_FRIEND_REQUESTS_EXPIRE:
+                        log.info("忽略刚通过好友申请的用户 %d 的消息（窗口期 %d 秒），不加入队列", 
+                                 uid, PROCESSED_FRIEND_REQUESTS_EXPIRE)
+                        continue
+                    
                     if uid not in unreplied_customers:
+                        # 直接将元组传入函数（因为函数现在接受 Iterable）
+                        msg_text = extract_message_text(msg_segments)
                         unreplied_customers[uid] = {
                             "last_active": now,
                             "msg_ids": [msg_id],
                             "is_newly_reported": False,
                             "reported_milestones": set(),
-                            "pending_since": now,          # 设置本轮开始时间
+                            "pending_since": now,
                         }
-                        log.info("新增客户 %d 进入待回复队列 (msg_id=%s)。当前队列长度: %d",
-                                 uid, msg_id, len(unreplied_customers))
+                        log.info("新增客户 %d 进入待回复队列 (msg_id=%s, 内容: %s)。当前队列长度: %d",
+                                 uid, msg_id, msg_text, len(unreplied_customers))
                     else:
+                        # 更新已有客户的信息
                         unreplied_customers[uid]["last_active"] = now
                         unreplied_customers[uid]["msg_ids"].append(msg_id)
                         unreplied_customers[uid]["is_newly_reported"] = False
                         unreplied_customers[uid]["reported_milestones"].clear()
-                        # 注意：不更新 pending_since，保持本轮开始时间不变
                         log.info("客户 %d 追加消息 (msg_id=%s)，累计 %d 条，重置通报倒计时。",
                                  uid, msg_id, len(unreplied_customers[uid]["msg_ids"]))
 
@@ -670,6 +707,7 @@ async def main():
                 case GroupPokeEvent(group_id=gid, target_id=tid) if gid == INTERNAL_GROUP_ID and tid == client.self_id:
                     log.info("内部群戳一戳触发状态面板: group=%d", gid)
                     await send_status_panel(gid)
+
                 case GroupMessageEvent(group_id=gid, message=segments, message_id=msg_id, user_id=uid) if gid == INTERNAL_GROUP_ID and uid != client.self_id:
                     # 解析引用和命令
                     reply_id = None

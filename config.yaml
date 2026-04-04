@@ -38,7 +38,7 @@ debounce_seconds:
   bye: 5
 
 # 好友申请去重缓存时间（秒）
-processed_friend_requests_expire: 60
+processed_friend_requests_expire: 3
 
 # 回复耗时记录最大保留条数
 reply_duration_maxlen: 1000
