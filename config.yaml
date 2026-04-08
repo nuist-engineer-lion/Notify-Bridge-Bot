@@ -36,8 +36,8 @@ debounce_seconds:
   say: 5
   more: 5
   bye: 5
-  close: 5   # 新增：.close 命令防抖间隔
-
+  close: 5
+  list: 5
 # 好友申请去重缓存时间（秒）
 processed_friend_requests_expire: 3
 
@@ -123,9 +123,9 @@ max_listen_age: 86400  # 24 小时
 
 # 夜间免打扰时段（新增）
 night_mode:
-  start: "22:00"        # 夜间模式开始时间
-  end: "08:00"          # 夜间模式结束时间（跨天）
-  summary_time: "08:00" # 汇总通知发送时间
+  start: "23:30"        # 夜间模式开始时间
+  end: "07:00"          # 夜间模式结束时间（跨天）
+  summary_time: "07:00" # 汇总通知发送时间
 
 # 状态持久化文件
 state_file: "archives/state.json"
@@ -134,4 +134,4 @@ state_file: "archives/state.json"
 archive_dir: "archives"
 
 # 获取最近消息的最大时限（秒），用于构造合并转发
-recent_message_max_age: 86400
+recent_message_max_age: 7200

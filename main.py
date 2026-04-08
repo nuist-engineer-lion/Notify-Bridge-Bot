@@ -494,6 +494,23 @@ async def send_status_panel(group_id: int):
     except Exception as e:
         log.error("发送状态面板失败: %s", e, exc_info=True)
 
+async def get_nicknames_batch(user_ids: list[int], delay: float = 0.2) -> dict[int, str]:
+    """
+    批量获取用户昵称，返回 {qq: nickname} 映射。
+    逐次调用 get_stranger_info 并加入延迟以避免限流。
+    """
+    nicknames: dict[int, str] = {}
+    for uid in user_ids:
+        try:
+            info = await client.get_stranger_info(user_id=str(uid))
+            # napcat 返回的昵称字段为 "nickname"
+            nickname = info.get("nickname", "未知昵称")
+            nicknames[uid] = str(nickname)
+        except Exception as e:
+            log.error("获取用户 %d 昵称失败: %s", uid, e)
+            nicknames[uid] = "获取失败"
+        await asyncio.sleep(delay)
+    return nicknames
 
 # ================= 辅助函数：获取客户最近的消息ID列表 =================
 async def get_recent_message_ids(user_id: int, count: int = 200, max_age_seconds: int = RECENT_MESSAGE_MAX_AGE) -> list[int]:
@@ -1026,6 +1043,7 @@ async def main():
                             "• .bye – 向客户发送结束语并关闭会话\n"
                             "• .close – 关闭会话但不发送结束语\n"
                             "• .more – 获取客户的最近100条历史消息\n"
+                            "• .list – 列出所有未回复客户及其等待时间\n"
                             "• .help – 显示此帮助信息\n"
                             "\n"
                             "使用方法：回复一条合并转发消息，然后输入对应命令。"
@@ -1035,6 +1053,74 @@ async def main():
                             message=[Text(text=help_text)],
                         )
                         continue
+                    elif cmd_text.startswith(".list"):
+                        # 显式获取当前时间，避免使用外部定义的 now
+                        now = time.time()
+                        # 防抖检查
+                        key = (msg_id, "list")
+                        debounce_list = DEBOUNCE_SECONDS.get("list", 5)
+                        last_time = last_command_time.get(key, 0.0)
+                        if now - last_time < debounce_list:
+                            await client.send_group_msg(
+                                group_id=str(gid),
+                                message=[
+                                    Reply(id=str(msg_id)),
+                                    Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {debounce_list:.0f} 秒）")
+                                ],
+                            )
+                            continue
+
+                        # 检查是否有未回复客户
+                        if not unreplied_customers:
+                            await client.send_group_msg(
+                                group_id=str(gid),
+                                message=[Reply(id=str(msg_id)), Text(text="📭 当前没有待回复的客户。")],
+                            )
+                            continue
+
+                        # 获取待回复客户列表（按最新活跃时间倒序）
+                        sorted_customers = sorted(
+                            unreplied_customers.items(),
+                            key=lambda item: item[1]["last_active"],
+                            reverse=True
+                        )
+                        customer_ids: list[int] = [qq for qq, _ in sorted_customers]
+
+                        # 批量获取昵称
+                        nicknames: dict[int, str] = await get_nicknames_batch(customer_ids)
+
+                        # 构造列表文本
+                        lines: list[str] = ["📋 待回复客户列表："]
+                        now_ts = time.time()
+                        for idx, (qq, data) in enumerate(sorted_customers, 1):
+                            nickname = nicknames.get(qq, "未知昵称")
+                            wait_seconds = now_ts - data["pending_since"]
+                            wait_str = format_duration(wait_seconds)
+                            lines.append(f"{idx}. {nickname}（{qq}）已等待 {wait_str}")
+
+                        # 防止消息过长（最多显示20条客户记录）
+                        full_text: str
+                        if len(lines) > 22:  # 头部1行 + 最多20条客户记录
+                            full_text = "\n".join(lines[:21]) + f"\n... 共 {len(customer_ids)} 人，仅显示前20条"
+                        else:
+                            full_text = "\n".join(lines)
+
+                        try:
+                            resp = await client.send_group_msg(
+                                group_id=str(gid),
+                                message=[Reply(id=str(msg_id)), Text(text=full_text)],
+                            )
+                            feedback_msg_id = resp.get("message_id")
+                            # 使用 truthy 检查替代 is not None
+                            if feedback_msg_id:
+                                track_forward_message(feedback_msg_id, [], gid)
+
+                            # 更新防抖时间
+                            last_command_time[key] = now
+                            log.info(".list 命令执行成功，返回 %d 名客户", len(customer_ids))
+                        except Exception as e:
+                            log.error("发送 .list 结果失败: %s", e, exc_info=True)
+                    
                     if reply_id is None or not cmd_parts:
                         continue
                     # 解析目标客户
@@ -1065,6 +1151,7 @@ async def main():
                     now = time.time()
 
                     # 根据命令分发
+                    
                     if cmd_text.startswith(".say"):
                         # 提取 .say 后的内容
                         content = cmd_text[4:].strip()
