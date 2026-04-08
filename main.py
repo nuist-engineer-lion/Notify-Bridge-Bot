@@ -4,9 +4,11 @@ import logging
 import statistics
 import random
 import yaml
-from datetime import datetime
+import json
+import os
+from datetime import datetime, timedelta
 from collections import deque
-from typing import Any, TypedDict, Iterable, Union
+from typing import Any, TypedDict, Iterable, Union, cast
 
 from napcat import (
     NapCatClient,
@@ -61,6 +63,15 @@ REPLY_DURATION_MAXLEN = config["reply_duration_maxlen"]
 AVAILABILITY = config["availability"]
 MAX_LISTEN_AGE = config.get("max_listen_age", 86400)   # 24小时
 
+# ================= 夜间模式配置 =================
+NIGHT_MODE = config.get("night_mode", {})
+NIGHT_START = NIGHT_MODE.get("start", "22:00")
+NIGHT_END = NIGHT_MODE.get("end", "08:00")
+NIGHT_SUMMARY_TIME = NIGHT_MODE.get("summary_time", "08:00")
+
+# ================= 存档目录 =================
+ARCHIVE_DIR = "archives"
+
 # ================= 星期映射 =================
 WEEKDAY_MAP = {
     0: "monday",
@@ -74,8 +85,6 @@ WEEKDAY_MAP = {
 
 # ================= 程序启动时间 =================
 STARTED_AT = time.time()
-
-# 防抖间隔（秒）已在配置中，直接使用 DEBOUNCE_SECONDS 字典
 
 # 好友申请去重缓存（flag -> 处理时间戳）
 processed_friend_requests: dict[str, float] = {}
@@ -99,11 +108,24 @@ class ForwardMonitorData(TypedDict):
     group_id: int
     created_at: float
 
+class DelayedNotification(TypedDict):
+    type: str                      # "new_customers" 或 "milestone"
+    customers: list[tuple[int, CustomerData]]
+    milestone: int | None
+    timestamp: float
+
+# 用于存档的消息记录类型（简化）
+MessageRecord = dict[str, Any]
+
 # 内存字典：存储未回复的客户状态
 unreplied_customers: dict[int, CustomerData] = {}
 monitored_forward_order: deque[int] = deque()
 monitored_forwards: dict[int, ForwardMonitorData] = {}
-last_command_time: dict[tuple[int, str], float] = {}  # 记录每条消息上各指令的最后执行时间
+last_command_time: dict[tuple[int, str], float] = {}
+
+# 夜间通知延后缓存
+delayed_notifications: list[DelayedNotification] = []
+last_night_summary_sent_date: str = ""
 
 # 客户端对象
 client: NapCatClient = NapCatClient(WS_URL, WS_TOKEN)
@@ -172,6 +194,62 @@ def format_duration(seconds: float) -> str:
         hours = int((seconds % 86400) // 3600)
         return f"{days}天{hours}小时"
 
+
+# ================= 本地存档 =================
+async def archive_session(user_id: int, msg_ids: list[int], pending_since: float) -> None:
+    """将会话记录存档到本地 JSON 文件"""
+    if not msg_ids:
+        log.warning(f"存档跳过：客户 {user_id} 无消息记录")
+        return
+
+    os.makedirs(ARCHIVE_DIR, exist_ok=True)
+    date_str = datetime.now().strftime("%Y%m%d")
+    filename = f"{user_id}_{date_str}.json"
+    filepath = os.path.join(ARCHIVE_DIR, filename)
+
+    messages_data: list[MessageRecord] = []
+    for msg_id in msg_ids:
+        try:
+            msg_detail = await client.get_msg(message_id=str(msg_id))
+            record: MessageRecord = {
+                "message_id": msg_id,
+                "time": msg_detail.get("time"),
+                "sender_nickname": msg_detail.get("sender", {}).get("nickname", ""),
+                "sender_id": msg_detail.get("sender", {}).get("user_id"),
+                "message": msg_detail.get("message", []),
+            }
+            messages_data.append(record)
+        except Exception as e:
+            log.error(f"存档时获取消息 {msg_id} 失败: {e}")
+
+    messages_data.sort(key=lambda x: x.get("time", 0))
+
+    existing_sessions: list[MessageRecord] = []
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, list):
+                    existing_sessions = cast(list[MessageRecord], loaded)
+        except Exception:
+            pass
+
+    session_record: MessageRecord = {
+        "session_closed_at": time.time(),
+        "pending_duration": time.time() - pending_since,
+        "message_count": len(messages_data),
+        "messages": messages_data
+    }
+    existing_sessions.append(session_record)
+
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(existing_sessions, f, ensure_ascii=False, indent=2)
+        log.info(f"会话已存档: {filepath}")
+    except Exception as e:
+        log.error(f"会话存档写入失败: {e}")
+
+
 # ================= 结束会话统一处理 =================
 async def close_session(user_id: int, send_closing: bool = False) -> bool:
     """
@@ -189,6 +267,9 @@ async def close_session(user_id: int, send_closing: bool = False) -> bool:
     reply_durations.append(elapsed)
     log.info("会话结束: user_id=%s, 耗时=%.1f秒", user_id, elapsed)
 
+    # 异步存档，不阻塞主流程
+    asyncio.create_task(archive_session(user_id, data["msg_ids"], pending))
+
     if send_closing:
         try:
             await client.send_private_msg(
@@ -200,6 +281,7 @@ async def close_session(user_id: int, send_closing: bool = False) -> bool:
             log.error("自动发送结束语失败: user_id=%s, err=%s", user_id, e, exc_info=True)
 
     return True
+
 
 # ================= 发送状态面板 =================
 async def send_status_panel(group_id: int):
@@ -336,7 +418,7 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         return None
 
 
-# ================= 新增：获取当前可用成员 =================
+# ================= 获取当前可用成员 =================
 def get_current_available_members() -> list[int]:
     """根据当前系统时间，返回所有可用的成员QQ列表"""
     now = datetime.now()
@@ -359,7 +441,7 @@ def get_current_available_members() -> list[int]:
     return available
 
 
-# ================= 新增：发送带 @ 的提醒 =================
+# ================= 发送带 @ 的提醒 =================
 async def send_reminder_with_at(group_id: int, summary: str, customer_list: list[tuple[int, CustomerData]]) -> int | None:
     """
     发送提醒：先尝试 @ 一位当前可用成员，再发送合并转发。
@@ -370,7 +452,7 @@ async def send_reminder_with_at(group_id: int, summary: str, customer_list: list
         chosen = random.choice(available)
         # 构造 @ 消息，使用库提供的消息段类
         at_msg: list[Message] = [
-            At(qq=str(chosen)),          # 假设 At 接受 qq 参数
+            At(qq=str(chosen)),
             Text(text=f" {summary}"),
         ]
         try:
@@ -391,9 +473,23 @@ async def send_reminder_with_at(group_id: int, summary: str, customer_list: list
         )
     return message_id
 
+
+# ================= 夜间模式辅助函数 =================
+def is_night_time() -> bool:
+    """判断当前时间是否处于夜间免打扰时段"""
+    now = datetime.now().time()
+    start = datetime.strptime(NIGHT_START, "%H:%M").time()
+    end = datetime.strptime(NIGHT_END, "%H:%M").time()
+
+    if start <= end:
+        return start <= now <= end
+    else:
+        return now >= start or now <= end
+
+
 # ================= 核心逻辑：定时巡检任务 =================
 async def monitor_loop():
-    """每分钟执行一次的巡检死循环"""
+    global last_night_summary_sent_date
     log.info("巡检任务已启动，每 60 秒执行一次")
     while True:
         await asyncio.sleep(60)
@@ -412,84 +508,111 @@ async def monitor_loop():
 
         if not unreplied_customers:
             log.debug("巡检跳过: 当前无未回复客户")
-            continue
+        else:
+            log.info("===== 巡检开始 =====\n当前未回复客户数: %d", len(unreplied_customers))
 
-        log.info("===== 巡检开始 =====\n当前未回复客户数: %d", len(unreplied_customers))
-        now = time.time()
-        new_customers_to_report: list[tuple[int, CustomerData]] = []
-
-        # ===== 清理过期好友申请缓存 =====
-        now = time.time()
+        # 清理过期好友申请缓存
         expired_flags = [flag for flag, ts in processed_friend_requests.items() if now - ts > PROCESSED_FRIEND_REQUESTS_EXPIRE]
         for flag in expired_flags:
             del processed_friend_requests[flag]
-        if expired_flags:
-            log.debug("已清理 %d 条过期好友申请缓存", len(expired_flags))
 
-        # ===== 清理过期的好友通过时间记录 =====
+        # 清理过期的好友通过时间记录
         expired_approves = [uid for uid, ts in friend_approve_time.items() if now - ts > PROCESSED_FRIEND_REQUESTS_EXPIRE]
         for uid in expired_approves:
             del friend_approve_time[uid]
-        if expired_approves:
-            log.debug("已清理 %d 条过期好友通过时间记录", len(expired_approves))
 
-        # ================= 阶段 1：新客户防抖通报 =================
-        # 筛选防抖时间 >= 1分钟且未报过的新客户
-        for qq, data in unreplied_customers.items():
-            elapsed_min = (now - data["last_active"]) / 60.0
-            if not data["is_newly_reported"] and elapsed_min >= 1.0:
-                new_customers_to_report.append((qq, data))
+        # 内部函数：处理通报（立即或延后）
+        def handle_notification(notify_type: str, customers: list[tuple[int, CustomerData]], milestone: int | None = None) -> None:
+            if is_night_time():
+                delayed_notifications.append({
+                    "type": notify_type,
+                    "customers": customers,
+                    "milestone": milestone,
+                    "timestamp": now,
+                })
+                log.info(f"夜间模式：{notify_type} 通知已延后，涉及 {len(customers)} 名客户")
+            else:
+                if notify_type == "new_customers":
+                    summary = f"📢 刚刚有 {len(customers)} 名客户发来消息，请及时回复！"
+                    asyncio.create_task(send_reminder_with_at(INTERNAL_GROUP_ID, summary, customers))
+                elif notify_type == "milestone":
+                    # 此处 milestone 一定不为 None，但类型检查器无法推断，使用断言或条件
+                    if milestone is None:
+                        log.error("里程碑通知缺少 milestone 参数，跳过")
+                        return
+                    unit = f"{milestone}分钟" if milestone < 60 else f"{milestone // 60}小时"
+                    summary = f"⚠️ 以下 {len(customers)} 名客户已等待长达 {unit}！"
+                    asyncio.create_task(send_reminder_with_at(INTERNAL_GROUP_ID, summary, customers))
 
-        if new_customers_to_report:
-            log.info("阶段1: 发现 %d 名新客户待通报: %s",
-                     len(new_customers_to_report),
-                     [qq for qq, _ in new_customers_to_report])
-            # 标记已通报
-            for qq, data in new_customers_to_report:
-                data["is_newly_reported"] = True
+        if unreplied_customers:
+            # ===== 阶段 1：新客户防抖通报 =====
+            new_customers_to_report: list[tuple[int, CustomerData]] = []
+            for qq, data in unreplied_customers.items():
+                elapsed_min = (now - data["last_active"]) / 60.0
+                if not data["is_newly_reported"] and elapsed_min >= 1.0:
+                    new_customers_to_report.append((qq, data))
+                    data["is_newly_reported"] = True
 
-            # 按时间更近的优先排序 (last_active 越大越靠前)
-            new_customers_to_report.sort(key=lambda x: x[1]["last_active"], reverse=True)
+            if new_customers_to_report:
+                new_customers_to_report.sort(key=lambda x: x[1]["last_active"], reverse=True)
+                handle_notification("new_customers", new_customers_to_report)
+            else:
+                log.debug("阶段1: 无新客户需要通报")
 
-            # 只通报新触发的客户，避免每次都全量刷屏
-            summary = f"📢 刚刚有 {len(new_customers_to_report)} 名客户发来消息，请及时回复！"
-            # 替换为带 @ 的提醒
-            await send_reminder_with_at(INTERNAL_GROUP_ID, summary, new_customers_to_report)
-        else:
-            log.debug("阶段1: 无新客户需要通报")
+            # ===== 阶段 2：迟滞里程碑通报 =====
+            milestone_groups: dict[int, list[tuple[int, CustomerData]]] = {m: [] for m in MILESTONES}
+            for qq, data in unreplied_customers.items():
+                elapsed_min = (now - data["last_active"]) / 60.0
+                for m in sorted(MILESTONES, reverse=True):
+                    if elapsed_min >= m:
+                        if m not in data["reported_milestones"]:
+                            data["reported_milestones"].add(m)
+                            milestone_groups[m].append((qq, data))
+                        break
 
-        # ================= 阶段 2：迟滞里程碑通报 =================
+            for m, delay_list in milestone_groups.items():
+                if delay_list:
+                    delay_list.sort(key=lambda x: x[1]["last_active"], reverse=True)
+                    handle_notification("milestone", delay_list, milestone=m)
 
-        # 初始化按里程碑分组的字典
-        milestone_groups: dict[int, list[tuple[int, CustomerData]]] = {m: [] for m in MILESTONES}
+            log.info("===== 巡检结束 =====")
 
-        for qq, data in unreplied_customers.items():
-            elapsed_min = (now - data["last_active"]) / 60.0
-            log.debug("  客户 %d: 已等待 %.1f 分钟, 消息数 %d", qq, elapsed_min, len(data["msg_ids"]))
+        # ===== 夜间汇总发送检查 =====
+        summary_time = datetime.strptime(NIGHT_SUMMARY_TIME, "%H:%M").time()
+        now_time = datetime.now().time()
+        today_str = datetime.now().strftime("%Y%m%d")
 
-            # 找到当前已达到的最大里程碑，仅在该里程碑尚未播报时触发
-            for m in sorted(MILESTONES, reverse=True):
-                if elapsed_min >= m:
-                    if m not in data["reported_milestones"]:
-                        data["reported_milestones"].add(m)
-                        log.debug("    -> 命中里程碑 %d 分钟", m)
-                        milestone_groups[m].append((qq, data))
-                    break
+        # 允许在汇总时间点前后5分钟内触发一次
+        summary_dt = datetime.combine(datetime.today(), summary_time)
+        lower_bound = (summary_dt - timedelta(minutes=5)).time()
+        upper_bound = (summary_dt + timedelta(minutes=5)).time()
 
-        # 检查各列表，如果不为空则单独通报
-        for m, delay_list in milestone_groups.items():
-            if delay_list:
-                # 排序：时间更近的优先
-                delay_list.sort(key=lambda x: x[1]["last_active"], reverse=True)
+        in_summary_window = False
+        if lower_bound <= upper_bound:
+            in_summary_window = lower_bound <= now_time <= upper_bound
+        else:  # 跨天情况（极少）
+            in_summary_window = now_time >= lower_bound or now_time <= upper_bound
 
-                unit = f"{m}分钟" if m < 60 else f"{m//60}小时"
-                log.warning("阶段2: 里程碑 %s 触发, 涉及 %d 名客户: %s",
-                            unit, len(delay_list), [qq for qq, _ in delay_list])
-                summary = f"⚠️ 以下 {len(delay_list)} 名客户已等待长达 {unit}！"
-                # 替换为带 @ 的提醒
-                await send_reminder_with_at(INTERNAL_GROUP_ID, summary, delay_list)
+        if in_summary_window and last_night_summary_sent_date != today_str:
+            if delayed_notifications:
+                total_customers: set[int] = set()
+                for notif in delayed_notifications:
+                    for qq, _ in notif["customers"]:
+                        total_customers.add(qq)
 
-        log.info("===== 巡检结束 =====")
+                summary_text = f"🌙 夜间免打扰时段汇总：共有 {len(total_customers)} 名客户发来消息，请及时处理。"
+                try:
+                    await client.send_group_msg(group_id=str(INTERNAL_GROUP_ID), message=summary_text)
+                    log.info(f"夜间汇总已发送：{summary_text}")
+                except Exception as e:
+                    log.error(f"发送夜间汇总失败: {e}")
+
+                delayed_notifications.clear()
+            else:
+                log.debug("夜间汇总时间到，但无延后通知")
+
+            last_night_summary_sent_date = today_str
+
 
 async def resolve_target_from_reply(reply_id: int) -> tuple[list[int] | None, str | None]:
     """
@@ -622,9 +745,6 @@ async def main():
                             customer_id = customer_ids[0]
                             # 结束会话（发送结束语并移除）
                             closed = await close_session(customer_id, send_closing=True)
-                            if not closed:
-                                log.warning("客户 %s 不在待回复队列中，但已发送结束语", customer_id)
-
                             feedback_text = (
                                 f"✅ 已对客户 {customer_id} 发送结束语。"
                                 if closed
@@ -708,6 +828,7 @@ async def main():
                     log.info("内部群戳一戳触发状态面板: group=%d", gid)
                     await send_status_panel(gid)
 
+                # 6. 内部群命令处理
                 case GroupMessageEvent(group_id=gid, message=segments, message_id=msg_id, user_id=uid) if gid == INTERNAL_GROUP_ID and uid != client.self_id:
                     # 解析引用和命令
                     reply_id = None
@@ -730,6 +851,7 @@ async def main():
                             "📖 可用命令列表：\n"
                             "• .say <内容> – 向客户发送私聊消息\n"
                             "• .bye – 向客户发送结束语并关闭会话\n"
+                            "• .close – 关闭会话但不发送结束语\n"
                             "• .more – 获取客户的最近100条历史消息\n"
                             "• .help – 显示此帮助信息\n"
                             "\n"
@@ -840,7 +962,37 @@ async def main():
                         except Exception as e:
                             log.error("发送结束语失败: customer=%s, err=%s", customer_id, e, exc_info=True)
                             feedback = f"❌ 发送失败：{e}"
-                        # 发送群反馈，并将其加入监听
+
+                        resp = await client.send_group_msg(
+                            group_id=str(gid),
+                            message=[Reply(id=str(msg_id)), Text(text=feedback)],
+                        )
+                        feedback_msg_id = resp.get("message_id")
+                        if feedback_msg_id:
+                            track_forward_message(feedback_msg_id, [customer_id], gid)
+
+                    elif cmd_text.startswith(".close"):
+                        key = (reply_id, "close")
+                        last_time = last_command_time.get(key, 0)
+                        debounce_sec = DEBOUNCE_SECONDS.get("close", 5)
+                        if now - last_time < debounce_sec:
+                            await client.send_group_msg(
+                                group_id=str(gid),
+                                message=[
+                                    Reply(id=str(msg_id)),
+                                    Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {debounce_sec} 秒）")
+                                ],
+                            )
+                            continue
+
+                        try:
+                            closed = await close_session(customer_id, send_closing=False)
+                            last_command_time[key] = now
+                            feedback = f"✅ 已关闭客户 {customer_id} 的会话（未发送结束语）。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
+                        except Exception as e:
+                            log.error("关闭会话失败: customer=%s, err=%s", customer_id, e, exc_info=True)
+                            feedback = f"❌ 关闭失败：{e}"
+
                         resp = await client.send_group_msg(
                             group_id=str(gid),
                             message=[Reply(id=str(msg_id)), Text(text=feedback)],

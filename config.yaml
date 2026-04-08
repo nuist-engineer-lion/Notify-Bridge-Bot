@@ -36,6 +36,7 @@ debounce_seconds:
   say: 5
   more: 5
   bye: 5
+  close: 5   # 新增：.close 命令防抖间隔
 
 # 好友申请去重缓存时间（秒）
 processed_friend_requests_expire: 3
@@ -119,3 +120,9 @@ availability:
 
 # 过期监听消息保留时长（秒），用于清理
 max_listen_age: 86400  # 24 小时
+
+# 夜间免打扰时段（新增）
+night_mode:
+  start: "22:00"        # 夜间模式开始时间
+  end: "08:00"          # 夜间模式结束时间（跨天）
+  summary_time: "08:00" # 汇总通知发送时间
