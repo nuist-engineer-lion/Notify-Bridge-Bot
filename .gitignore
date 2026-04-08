@@ -11,3 +11,6 @@ wheels/
 
 #vscode settings
 .vscode/settings.json
+
+#state files
+archives/
