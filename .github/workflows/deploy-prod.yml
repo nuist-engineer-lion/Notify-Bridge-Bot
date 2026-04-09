@@ -1,31 +1,40 @@
-name: Deploy To Production
+name: Auto Deploy
 
 on:
   push:
-    branches:
-      - main
-  workflow_dispatch:
-
-concurrency:
-  group: production-deploy
-  cancel-in-progress: true
+    branches: [ main ]          # 当 main 分支有推送时触发
+  workflow_dispatch:            # 支持手动触发
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.PROD_HOST }}
-          username: root
-          key: ${{ secrets.PROD_SSH_KEY }}
-          port: ${{ secrets.PROD_PORT }}
-          script_stop: true
-          script: |
-            set -e
-            cd /root/Notify-Bridge-Bot
-            git pull --ff-only origin main
-            chmod +x ./bot-mgr.sh
-            ./bot-mgr.sh restart
-            SYSTEMD_PAGER=cat ./bot-mgr.sh status
+      - name: Install cloudflared
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared-linux-amd64
+          sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
+          cloudflared --version
+
+      - name: Setup SSH private key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          # 自动接受未知主机密钥（适用于隧道场景）
+          echo "Host *" >> ~/.ssh/config
+          echo "    StrictHostKeyChecking accept-new" >> ~/.ssh/config
+
+      - name: Deploy via cloudflared SSH
+        env:
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
+          REMOTE_PORT: ${{ secrets.REMOTE_PORT || 22 }}
+        run: |
+          ssh -v -p ${{ env.REMOTE_PORT }} \
+            -o ProxyCommand="cloudflared access ssh --hostname %h" \
+            ${{ env.REMOTE_USER }}@${{ env.REMOTE_HOST }} \
+            "cd /DATA/Documents/Notify-Bridge-Bot && \
+             git pull --ff-only origin main && \
+             uv sync && \
+             sudo systemctl restart notifybot"
