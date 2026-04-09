@@ -6,7 +6,7 @@ on:
   workflow_dispatch:            # 支持手动触发
 
 jobs:
-  deploy:
+  deploy-and-verify:
     runs-on: ubuntu-latest
     steps:
       - name: Install cloudflared
@@ -21,20 +21,57 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          # 自动接受未知主机密钥（适用于隧道场景）
-          echo "Host *" >> ~/.ssh/config
-          echo "    StrictHostKeyChecking accept-new" >> ~/.ssh/config
+          cat >> ~/.ssh/config << 'EOF'
+          Host *
+            StrictHostKeyChecking accept-new
+          EOF
 
+      # 4. 执行部署：git pull, uv sync, restart service
       - name: Deploy via cloudflared SSH
-        env:
-          REMOTE_USER: ${{ secrets.REMOTE_USER }}
-          REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
-          REMOTE_PORT: ${{ secrets.REMOTE_PORT || 22 }}
+        id: deploy
         run: |
-          ssh -v -p ${{ env.REMOTE_PORT }} \
+          ssh -v -p ${{ secrets.REMOTE_PORT || 22 }} \
             -o ProxyCommand="cloudflared access ssh --hostname %h" \
-            ${{ env.REMOTE_USER }}@${{ env.REMOTE_HOST }} \
+            ${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }} \
             "cd /DATA/Documents/Notify-Bridge-Bot && \
              git pull --ff-only origin main && \
              uv sync && \
              sudo systemctl restart notifybot"
+
+      # 5. 验证部署结果（Git commit + service status）
+      - name: Verify deployment
+        run: |
+          SSH_CMD="ssh -p ${{ secrets.REMOTE_PORT || 22 }} -o ProxyCommand='cloudflared access ssh --hostname %h' ${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}"
+
+          echo "=== 1. Checking Git commit on remote ==="
+          REMOTE_COMMIT=$(eval $SSH_CMD "cd /DATA/Documents/Notify-Bridge-Bot && git rev-parse HEAD")
+          echo "Remote commit: $REMOTE_COMMIT"
+
+          # 可选：与当前 GitHub 仓库的 commit 对比（确保部署的版本就是刚刚推送的）
+          LOCAL_COMMIT=$(git rev-parse HEAD)
+          echo "Local commit : $LOCAL_COMMIT"
+          if [ "$REMOTE_COMMIT" != "$LOCAL_COMMIT" ]; then
+            echo "❌ Commit mismatch! Remote is not updated to the latest commit."
+            exit 1
+          fi
+          echo "✅ Git commit matches."
+
+          echo ""
+          echo "=== 2. Checking service status ==="
+          # 检查服务是否 active (running)
+          if ! eval $SSH_CMD "sudo systemctl is-active --quiet notifybot"; then
+            echo "❌ Service notifybot is NOT active"
+            # 输出详细状态帮助排查
+            eval $SSH_CMD "sudo systemctl status notifybot --no-pager -l" || true
+            exit 1
+          fi
+          # 额外检查 ActiveState
+          ACTIVE_STATE=$(eval $SSH_CMD "sudo systemctl show notifybot -p ActiveState --value")
+          if [ "$ACTIVE_STATE" != "active" ]; then
+            echo "❌ Service ActiveState is '$ACTIVE_STATE' (expected 'active')"
+            exit 1
+          fi
+          echo "✅ Service is active and running."
+
+          echo ""
+          echo "=== Deployment verification passed ==="
