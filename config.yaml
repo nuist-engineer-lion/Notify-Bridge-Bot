@@ -1,6 +1,6 @@
 # WebSocket 连接配置
-ws_url: "ws://10.254.100.21:3001"
-ws_token: "TYnR3DXCeM9H~O.W"
+ws_url: "ws://127.0.0.1:3001"
+ws_token: "7KVZZWBVizTc-ipV"
 
 # 内部客服通知群号
 internal_group_id: 1056221119
