@@ -1,0 +1,137 @@
+# WebSocket 连接配置
+ws_url: "ws://127.0.0.1:3001"
+ws_token: "7KVZZWBVizTc-ipV"
+
+# 内部客服通知群号
+internal_group_id: 1056221119
+
+# 免监控白名单（列表）
+whitelist:
+  - 123456789
+  - 987654321
+
+# 迟滞里程碑（分钟）
+milestones:
+  - 5
+  - 15
+  - 30
+  - 60
+  - 120
+  - 180
+  - 360
+  - 720
+  - 1440
+  - 2880
+  - 4320
+
+# 监听合并转发数量上限
+monitored_forward_limit: 10
+
+# 结束会话时发送的消息（支持多行）
+closing_message: |
+  本次会话暂时结束。感谢您的支持与信任，再见。（请勿回复）
+
+# 各命令防抖间隔（秒）
+debounce_seconds:
+  say: 5
+  more: 5
+  bye: 5
+  close: 5
+  list: 5
+# 好友申请去重缓存时间（秒）
+processed_friend_requests_expire: 3
+
+# 回复耗时记录最大保留条数
+reply_duration_maxlen: 1000
+
+# 成员可用时间段配置
+# 格式：qq号 -> 星期几 -> 时段列表（每个时段为 ["HH:MM", "HH:MM"]）
+availability:
+  234666220:   # yjx
+    monday:
+      - ["00:00", "11:59"]
+      - ["12:00", "23:59"]
+    tuesday: []
+    wednesday: []
+    thursday: []
+    friday: []
+    saturday: []
+    sunday: []
+  1284656930:   # cz
+    monday: []
+    tuesday:
+      - ["00:00", "11:59"]
+      - ["12:00", "23:59"]
+    wednesday: []
+    thursday: []
+    friday: []
+    saturday: []
+    sunday: []
+  3499737435:   # hyn
+    monday: []
+    tuesday: []
+    wednesday:
+      - ["00:00", "11:59"]
+      - ["12:00", "23:59"]
+    thursday: []
+    friday: []
+    saturday: []
+    sunday: []
+  3525362286:   # djh
+    monday: []
+    tuesday: []
+    wednesday: []
+    thursday:
+      - ["00:00", "11:59"]
+      - ["12:00", "23:59"]
+    friday: []
+    saturday: []
+    sunday: []
+  1372438873:   # ljh
+    monday: []
+    tuesday: []
+    wednesday: []
+    thursday: []
+    friday:
+      - ["00:00", "11:59"]
+      - ["12:00", "23:59"]
+    saturday: []
+    sunday: []
+  3026425376:   # pwy
+    monday: []
+    tuesday: []
+    wednesday: []
+    thursday: []
+    friday: []
+    saturday:
+      - ["00:00", "11:59"]
+      - ["12:00", "23:59"]
+    sunday: []
+  2018160654:   # yyx
+    monday: []
+    tuesday: []
+    wednesday: []
+    thursday: []
+    friday: []
+    saturday: []
+    sunday:
+      - ["00:00", "11:59"]
+      - ["12:00", "23:59"]
+
+# 过期监听消息保留时长（秒），用于清理
+max_listen_age: 86400  # 24 小时
+
+# 夜间免打扰时段（新增）
+night_mode:
+  start: "23:30"        # 夜间模式开始时间
+  end: "07:00"          # 夜间模式结束时间（跨天）
+  summary_time: "07:00" # 汇总通知发送时间
+
+# 状态持久化文件
+state_file: "archives/state.json"
+
+# 存档目录名称
+archive_dir: "archives"
+
+# 获取最近消息的最大时限（秒），用于构造合并转发
+recent_message_max_age: 7200
