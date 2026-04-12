@@ -62,6 +62,7 @@ PROCESSED_FRIEND_REQUESTS_EXPIRE = config["processed_friend_requests_expire"]
 REPLY_DURATION_MAXLEN = config["reply_duration_maxlen"]
 AVAILABILITY = config["availability"]
 MAX_LISTEN_AGE = config.get("max_listen_age", 86400)   # 24小时
+EMOJI_MAPPING = config.get("emoji_mapping", {"close": 128, "more": 127, "bye": 100})
 
 # ================= 夜间模式配置 =================
 NIGHT_MODE = config.get("night_mode", {})
@@ -592,6 +593,7 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         )
         message_id = response["message_id"]
         log.info("合并转发发送成功 -> 群 %d, message_id=%s", group_id, message_id)
+        asyncio.create_task(add_emoji_to_message(message_id, list(EMOJI_MAPPING.values())))
         return message_id
     except Exception as e:
         log.error("发送合并转发失败: %s", e, exc_info=True)
@@ -863,6 +865,15 @@ def extract_message_text(segments: Iterable[Union[Message, UnknownMessageSegment
     if len(full) > 100:
         full = full[:100] + '…'
     return full or '<无文本内容>'
+
+async def add_emoji_to_message(message_id: int, emoji_ids: list[int]) -> None:
+    """为指定消息添加多个表情贴纸"""
+    for emoji_id in emoji_ids:
+        try:
+            await client.set_msg_emoji_like(message_id=str(message_id), emoji_id=str(emoji_id))
+            log.debug("已为消息 %s 添加表情 %s", message_id, emoji_id)
+        except Exception as e:
+            log.error("添加表情失败: message_id=%s, emoji_id=%s, err=%s", message_id, emoji_id, e)
 
 async def main():
     log.info("程序启动, WS_URL=%s, 通知群=%d, 白名单=%s", WS_URL, INTERNAL_GROUP_ID, WHITELIST)
