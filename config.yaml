@@ -138,6 +138,6 @@ recent_message_max_age: 7200
 
 # 表情映射：命令 -> 表情ID（常用QQ表情ID）
 emoji_mapping:
-  close: 75	   # 月亮
-  more: 289	   # 睁眼
-  bye: 124     # OK
+  close: 75 # 月亮
+  more: 289 # 睁眼
+  bye: 124  # OK

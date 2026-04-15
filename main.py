@@ -1008,8 +1008,25 @@ async def main():
 
                 # 1. 侦听内部群表情操作（点击预设表情执行对应命令）
                 case GroupMsgEmojiLikeEvent(group_id=gid, message_id=mid, user_id=uid) if gid == INTERNAL_GROUP_ID and uid != client.self_id:
-                    eid = getattr(event, 'emoji_id', None)
-                    is_add = getattr(event, 'is_add', True)
+                    # 动态提取表情 ID，忽略所有类型警告
+                    eid = None
+                    try:
+                        likes = getattr(event, 'likes', [])
+                        if likes and len(likes) > 0:
+                            first = likes[0]
+                            for field in ('emoji_id', 'face_id', 'id'):
+                                if hasattr(first, field):
+                                    eid = getattr(first, field, None)
+                                    break
+                            if eid is None and isinstance(first, dict):
+                                eid = first.get('emoji_id') or first.get('face_id') or first.get('id')
+                            if eid is not None:
+                                eid = int(eid)
+                    except Exception:
+                        pass
+
+                    is_add = bool(getattr(event, 'is_add', True))
+
                     if eid is None or not is_add:
                         continue
 
@@ -1019,13 +1036,6 @@ async def main():
 
                     customer_ids = tracked_data["customer_ids"]
                     if len(customer_ids) != 1:
-                        try:
-                            await client.send_group_msg(
-                                group_id=str(gid),
-                                message=[Reply(id=str(mid)), Text(text="暂不支持：该合并转发包含多个客户，请手动处理。")],
-                            )
-                        except Exception as e:
-                            log.error("多客户反馈失败: %s", e)
                         continue
 
                     customer_id = customer_ids[0]
@@ -1033,25 +1043,26 @@ async def main():
                     if cmd is None:
                         continue
 
-                    log.info("表情触发命令: cmd=%s, user=%d, customer=%d", cmd, uid, customer_id)
-
-                    if cmd == "close":
-                        feedback = await handle_close_command(gid, mid, customer_id)
-                        asyncio.create_task(send_and_track_feedback(gid, mid, feedback, customer_id))
-                    elif cmd == "bye":
-                        feedback = await handle_bye_command(gid, mid, customer_id)
-                        asyncio.create_task(send_and_track_feedback(gid, mid, feedback, customer_id))
-                    elif cmd == "more":
-                        success, feedback, new_fwd_id = await handle_more_command(gid, mid, customer_id)
-                        if success:
-                            if new_fwd_id:
-                                track_forward_message(new_fwd_id, [customer_id], gid)
-                                asyncio.create_task(add_emoji_to_message(new_fwd_id, list(EMOJI_MAPPING.values())))
-                            if feedback:
-                                asyncio.create_task(send_and_track_feedback(gid, mid, feedback, customer_id))
-                        else:
-                            if feedback:
-                                asyncio.create_task(send_and_track_feedback(gid, mid, feedback, customer_id))
+                    try:
+                        if cmd == "close":
+                            feedback = await handle_close_command(gid, mid, customer_id)
+                            await send_and_track_feedback(gid, mid, feedback, customer_id)
+                        elif cmd == "bye":
+                            feedback = await handle_bye_command(gid, mid, customer_id)
+                            await send_and_track_feedback(gid, mid, feedback, customer_id)
+                        elif cmd == "more":
+                            success, feedback, new_fwd_id = await handle_more_command(gid, mid, customer_id)
+                            if success:
+                                if new_fwd_id:
+                                    track_forward_message(new_fwd_id, [customer_id], gid)
+                                    await add_emoji_to_message(new_fwd_id, list(EMOJI_MAPPING.values()))
+                                if feedback:
+                                    await send_and_track_feedback(gid, mid, feedback, customer_id)
+                            else:
+                                if feedback:
+                                    await send_and_track_feedback(gid, mid, feedback, customer_id)
+                    except Exception:
+                        pass
 
                 # 2. 侦听客服的回复（清理字典并记录耗时）
                 case PrivateMessageEvent(post_type="message_sent", target_id=tid) if tid in unreplied_customers:
