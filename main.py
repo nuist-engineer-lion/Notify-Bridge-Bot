@@ -63,6 +63,7 @@ REPLY_DURATION_MAXLEN = config["reply_duration_maxlen"]
 AVAILABILITY = config["availability"]
 MAX_LISTEN_AGE = config.get("max_listen_age", 86400)   # 24小时
 EMOJI_MAPPING = config.get("emoji_mapping", {"close": 128, "more": 127, "bye": 100})
+EMOJI_TO_CMD = {v: k for k, v in EMOJI_MAPPING.items()}
 
 # ================= 夜间模式配置 =================
 NIGHT_MODE = config.get("night_mode", {})
@@ -504,7 +505,6 @@ async def get_nicknames_batch(user_ids: list[int], delay: float = 0.2) -> dict[i
     for uid in user_ids:
         try:
             info = await client.get_stranger_info(user_id=str(uid))
-            # napcat 返回的昵称字段为 "nickname"
             nickname = info.get("nickname", "未知昵称")
             nicknames[uid] = str(nickname)
         except Exception as e:
@@ -607,7 +607,7 @@ def get_current_available_members() -> list[int]:
     weekday_name = WEEKDAY_MAP[now.weekday()]
     current_time = now.time()
 
-    available: list[int] = []   # 明确类型为整数列表
+    available: list[int] = []
     for qq, schedule in AVAILABILITY.items():
         time_slots = schedule.get(weekday_name, [])
         for start_str, end_str in time_slots:
@@ -615,7 +615,7 @@ def get_current_available_members() -> list[int]:
                 start = datetime.strptime(start_str, "%H:%M").time()
                 end = datetime.strptime(end_str, "%H:%M").time()
                 if start <= current_time <= end:
-                    available.append(qq)   # 现在类型检查器知道 qq 是 int
+                    available.append(qq)
                     break
             except Exception as e:
                 log.error("解析时间段失败: qq=%s, slot=%s-%s, err=%s", qq, start_str, end_str, e)
@@ -719,7 +719,6 @@ async def monitor_loop():
                     summary = f"📢 刚刚有 {len(customers)} 名客户发来消息，请及时回复！"
                     asyncio.create_task(send_reminder_with_at(INTERNAL_GROUP_ID, summary, customers))
                 elif notify_type == "milestone":
-                    # 此处 milestone 一定不为 None，但类型检查器无法推断，使用条件检查
                     if milestone is None:
                         log.error("里程碑通知缺少 milestone 参数，跳过")
                         return
@@ -765,7 +764,6 @@ async def monitor_loop():
         now_time = datetime.now().time()
         today_str = datetime.now().strftime("%Y%m%d")
 
-        # 允许在汇总时间点前后5分钟内触发一次
         summary_dt = datetime.combine(datetime.today(), summary_time)
         lower_bound = (summary_dt - timedelta(minutes=5)).time()
         upper_bound = (summary_dt + timedelta(minutes=5)).time()
@@ -773,7 +771,7 @@ async def monitor_loop():
         in_summary_window = False
         if lower_bound <= upper_bound:
             in_summary_window = lower_bound <= now_time <= upper_bound
-        else:  # 跨天情况（极少）
+        else:
             in_summary_window = now_time >= lower_bound or now_time <= upper_bound
 
         if in_summary_window and last_night_summary_sent_date != today_str:
@@ -875,6 +873,79 @@ async def add_emoji_to_message(message_id: int, emoji_ids: list[int]) -> None:
         except Exception as e:
             log.error("添加表情失败: message_id=%s, emoji_id=%s, err=%s", message_id, emoji_id, e)
 
+
+# ================= 命令处理复用函数 =================
+async def handle_bye_command(gid: int, reply_id: int, customer_id: int) -> str:
+    """执行 .bye 命令：发送结束语并关闭会话，返回反馈文本"""
+    try:
+        await client.send_private_msg(
+            user_id=str(customer_id),
+            message=CLOSING_MESSAGE,
+        )
+        closed = await close_session(customer_id, send_closing=False)
+        return f"✅ 已向客户 {customer_id} 发送结束语。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
+    except Exception as e:
+        log.error("发送结束语失败: customer=%s, err=%s", customer_id, e, exc_info=True)
+        return f"❌ 发送失败：{e}"
+
+
+async def handle_close_command(gid: int, reply_id: int, customer_id: int) -> str:
+    """执行 .close 命令：仅关闭会话，不发送结束语，返回反馈文本"""
+    try:
+        closed = await close_session(customer_id, send_closing=False)
+        return f"✅ 已关闭客户 {customer_id} 的会话（未发送结束语）。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
+    except Exception as e:
+        log.error("关闭会话失败: customer=%s, err=%s", customer_id, e, exc_info=True)
+        return f"❌ 关闭失败：{e}"
+
+
+async def handle_more_command(gid: int, reply_id: int, customer_id: int) -> tuple[bool, str | None, int | None]:
+    """
+    执行 .more 命令：获取历史消息并发送合并转发。
+    返回 (成功标志, 反馈文本或 None, 新合并转发的消息ID或 None)
+    """
+    try:
+        resp = await client.get_friend_msg_history(
+            user_id=str(customer_id),
+            count=100,
+            parse_mult_msg=True,
+        )
+        messages = resp.get("messages", [])
+        if not messages:
+            return True, f"客户 {customer_id} 暂无更多历史消息", None
+
+        messages.sort(key=lambda m: m.get("time", 0))
+        msg_ids = [m["message_id"] for m in messages if "message_id" in m]
+        title = f"客户 {customer_id} 的最近 {len(msg_ids)} 条消息"
+        new_fwd_id = await send_forward_from_message_ids(
+            group_id=gid,
+            title=title,
+            user_id=customer_id,
+            message_ids=msg_ids,
+        )
+        if new_fwd_id:
+            return True, None, new_fwd_id
+        else:
+            return False, f"❌ 构造合并转发失败", None
+    except Exception as e:
+        log.error("获取历史消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
+        return False, f"❌ 获取历史消息失败：{e}", None
+
+
+async def send_and_track_feedback(gid: int, reply_id: int, feedback: str, customer_id: int) -> None:
+    """发送带引用的反馈消息，并将其加入监听列表"""
+    try:
+        resp = await client.send_group_msg(
+            group_id=str(gid),
+            message=[Reply(id=str(reply_id)), Text(text=feedback)],
+        )
+        feedback_msg_id = resp.get("message_id")
+        if feedback_msg_id:
+            track_forward_message(feedback_msg_id, [customer_id], gid)
+    except Exception as e:
+        log.error("发送反馈消息失败: %s", e)
+
+
 async def main():
     log.info("程序启动, WS_URL=%s, 通知群=%d, 白名单=%s", WS_URL, INTERNAL_GROUP_ID, WHITELIST)
     log.info("里程碑阈值(分钟): %s", MILESTONES)
@@ -935,51 +1006,56 @@ async def main():
                     except Exception as e:
                         log.error("自动通过好友申请失败: user_id=%s, err=%s", uid, e, exc_info=True)
 
-                # 1. 侦听内部群贴表情操作
-                case GroupMsgEmojiLikeEvent(group_id=gid, message_id=mid, is_add=True) if gid == INTERNAL_GROUP_ID:
-                    tracked_data = pop_tracked_forward(mid)
-                    if tracked_data is not None:
-                        customer_ids = tracked_data["customer_ids"]
-                        if len(customer_ids) == 1:
-                            customer_id = customer_ids[0]
-                            # 结束会话（发送结束语并移除）
-                            closed = await close_session(customer_id, send_closing=True)
-                            feedback_text = (
-                                f"✅ 已对客户 {customer_id} 发送结束语。"
-                                if closed
-                                else f"⚠️ 客户 {customer_id} 不在待回复队列，但已发送结束语。"
-                            )
-                            try:
-                                await client.send_group_msg(
-                                    group_id=str(gid),
-                                    message=[Reply(id=str(mid)), Text(text=feedback_text)],
-                                )
-                            except Exception as feedback_err:
-                                log.error("结束语群反馈失败: source_mid=%s, err=%s", mid, feedback_err, exc_info=True)
-                        else:
-                            try:
-                                await client.send_group_msg(
-                                    group_id=str(gid),
-                                    message=[Reply(id=str(mid)), Text(text="暂不支持：该合并转发包含多个客户，请手动处理。")],
-                                )
-                            except Exception as unsupported_err:
-                                log.error("多客户暂不支持反馈失败: source_mid=%s, err=%s", mid, unsupported_err, exc_info=True)
-                    else:
+                # 1. 侦听内部群表情操作（点击预设表情执行对应命令）
+                case GroupMsgEmojiLikeEvent(group_id=gid, message_id=mid, user_id=uid) if gid == INTERNAL_GROUP_ID and uid != client.self_id:
+                    eid = getattr(event, 'emoji_id', None)
+                    is_add = getattr(event, 'is_add', True)
+                    if eid is None or not is_add:
+                        continue
+
+                    tracked_data = monitored_forwards.get(mid)
+                    if tracked_data is None:
+                        continue
+
+                    customer_ids = tracked_data["customer_ids"]
+                    if len(customer_ids) != 1:
                         try:
-                            msg_detail = await client.get_msg(message_id=str(mid))
-                            source_uid = int(str(msg_detail.get("user_id", 0)))
-                            self_uid = int(str(client.self_id))
-                            if source_uid == self_uid:
-                                await client.send_group_msg(
-                                    group_id=str(gid),
-                                    message=[Reply(id=str(mid)), Text(text="操作已过期")],
-                                )
-                        except Exception as expired_err:
-                            log.error("过期操作检测/反馈失败: source_mid=%s, err=%s", mid, expired_err, exc_info=True)
+                            await client.send_group_msg(
+                                group_id=str(gid),
+                                message=[Reply(id=str(mid)), Text(text="暂不支持：该合并转发包含多个客户，请手动处理。")],
+                            )
+                        except Exception as e:
+                            log.error("多客户反馈失败: %s", e)
+                        continue
+
+                    customer_id = customer_ids[0]
+                    cmd = EMOJI_TO_CMD.get(eid)
+                    if cmd is None:
+                        continue
+
+                    log.info("表情触发命令: cmd=%s, user=%d, customer=%d", cmd, uid, customer_id)
+
+                    if cmd == "close":
+                        feedback = await handle_close_command(gid, mid, customer_id)
+                        asyncio.create_task(send_and_track_feedback(gid, mid, feedback, customer_id))
+                    elif cmd == "bye":
+                        feedback = await handle_bye_command(gid, mid, customer_id)
+                        asyncio.create_task(send_and_track_feedback(gid, mid, feedback, customer_id))
+                    elif cmd == "more":
+                        success, feedback, new_fwd_id = await handle_more_command(gid, mid, customer_id)
+                        if success:
+                            if new_fwd_id:
+                                track_forward_message(new_fwd_id, [customer_id], gid)
+                                asyncio.create_task(add_emoji_to_message(new_fwd_id, list(EMOJI_MAPPING.values())))
+                            if feedback:
+                                asyncio.create_task(send_and_track_feedback(gid, mid, feedback, customer_id))
+                        else:
+                            if feedback:
+                                asyncio.create_task(send_and_track_feedback(gid, mid, feedback, customer_id))
 
                 # 2. 侦听客服的回复（清理字典并记录耗时）
                 case PrivateMessageEvent(post_type="message_sent", target_id=tid) if tid in unreplied_customers:
-                    await close_session(tid, send_closing=False)   # 客服已经回复，无需再次发送结束语
+                    await close_session(tid, send_closing=False)
                     log.info("客服已回复 %s，移除提醒并记录耗时。剩余未回复: %d", tid, len(unreplied_customers))
 
                 # 3. 接收客户消息 (加入/更新字典)
@@ -1064,6 +1140,7 @@ async def main():
                             message=[Text(text=help_text)],
                         )
                         continue
+
                     elif cmd_text.startswith(".list"):
                         # 显式获取当前时间，避免使用外部定义的 now
                         now = time.time()
@@ -1122,16 +1199,13 @@ async def main():
                                 message=[Reply(id=str(msg_id)), Text(text=full_text)],
                             )
                             feedback_msg_id = resp.get("message_id")
-                            # 使用 truthy 检查替代 is not None
                             if feedback_msg_id:
                                 track_forward_message(feedback_msg_id, [], gid)
-
-                            # 更新防抖时间
                             last_command_time[key] = now
                             log.info(".list 命令执行成功，返回 %d 名客户", len(customer_ids))
                         except Exception as e:
                             log.error("发送 .list 结果失败: %s", e, exc_info=True)
-                    
+
                     if reply_id is None or not cmd_parts:
                         continue
                     # 解析目标客户
@@ -1164,7 +1238,6 @@ async def main():
                     # 根据命令分发
                     
                     if cmd_text.startswith(".say"):
-                        # 提取 .say 后的内容
                         content = cmd_text[4:].strip()
                         if not content:
                             await client.send_group_msg(
@@ -1173,7 +1246,6 @@ async def main():
                             )
                             continue
 
-                        # 防抖检查
                         key = (reply_id, "say")
                         last_time = last_command_time.get(key, 0)
                         if now - last_time < DEBOUNCE_SECONDS["say"]:
@@ -1222,25 +1294,9 @@ async def main():
                             )
                             continue
 
-                        try:
-                            await client.send_private_msg(
-                                user_id=str(customer_id),
-                                message=CLOSING_MESSAGE,
-                            )
-                            closed = await close_session(customer_id, send_closing=False)
-                            last_command_time[key] = now
-                            feedback = f"✅ 已向客户 {customer_id} 发送结束语。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
-                        except Exception as e:
-                            log.error("发送结束语失败: customer=%s, err=%s", customer_id, e, exc_info=True)
-                            feedback = f"❌ 发送失败：{e}"
-
-                        resp = await client.send_group_msg(
-                            group_id=str(gid),
-                            message=[Reply(id=str(msg_id)), Text(text=feedback)],
-                        )
-                        feedback_msg_id = resp.get("message_id")
-                        if feedback_msg_id:
-                            track_forward_message(feedback_msg_id, [customer_id], gid)
+                        feedback = await handle_bye_command(gid, msg_id, customer_id)
+                        last_command_time[key] = now
+                        asyncio.create_task(send_and_track_feedback(gid, msg_id, feedback, customer_id))
 
                     elif cmd_text.startswith(".close"):
                         key = (reply_id, "close")
@@ -1256,24 +1312,11 @@ async def main():
                             )
                             continue
 
-                        try:
-                            closed = await close_session(customer_id, send_closing=False)
-                            last_command_time[key] = now
-                            feedback = f"✅ 已关闭客户 {customer_id} 的会话（未发送结束语）。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
-                        except Exception as e:
-                            log.error("关闭会话失败: customer=%s, err=%s", customer_id, e, exc_info=True)
-                            feedback = f"❌ 关闭失败：{e}"
-
-                        resp = await client.send_group_msg(
-                            group_id=str(gid),
-                            message=[Reply(id=str(msg_id)), Text(text=feedback)],
-                        )
-                        feedback_msg_id = resp.get("message_id")
-                        if feedback_msg_id:
-                            track_forward_message(feedback_msg_id, [customer_id], gid)
+                        feedback = await handle_close_command(gid, msg_id, customer_id)
+                        last_command_time[key] = now
+                        asyncio.create_task(send_and_track_feedback(gid, msg_id, feedback, customer_id))
 
                     elif cmd_text.startswith(".more"):
-                        # 防抖检查
                         key = (reply_id, "more")
                         last_time = last_command_time.get(key, 0)
                         if now - last_time < DEBOUNCE_SECONDS["more"]:
@@ -1286,50 +1329,17 @@ async def main():
                             )
                             continue
 
-                        try:
-                            resp = await client.get_friend_msg_history(
-                                user_id=str(customer_id),
-                                count=100,
-                                parse_mult_msg=True,       # 确保合并转发被解析
-                            )
-                            messages = resp.get("messages", [])
-                            if not messages:
-                                await client.send_group_msg(
-                                    group_id=str(gid),
-                                    message=[Reply(id=str(msg_id)), Text(text=f"客户 {customer_id} 暂无更多历史消息")],
-                                )
-                                continue
-
-                            # 按时间正序排序
-                            messages.sort(key=lambda m: m.get("time", 0))
-                            msg_ids = [m["message_id"] for m in messages if "message_id" in m]
-
-                            # 构造合并转发
-                            title = f"客户 {customer_id} 的最近 {len(msg_ids)} 条消息"
-                            new_fwd_id = await send_forward_from_message_ids(
-                                group_id=gid,
-                                title=title,
-                                user_id=customer_id,
-                                message_ids=msg_ids,
-                            )
+                        success, feedback, new_fwd_id = await handle_more_command(gid, msg_id, customer_id)
+                        if success:
+                            last_command_time[key] = now
                             if new_fwd_id:
-                                # 成功发送合并转发，更新防抖记录，并将新消息加入监听
-                                last_command_time[key] = now
                                 track_forward_message(new_fwd_id, [customer_id], gid)
-                                continue
-                            else:
-                                feedback = f"❌ 构造合并转发失败"
-                        except Exception as e:
-                            log.error("获取历史消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
-                            feedback = f"❌ 获取历史消息失败：{e}"
-                        # 发送群反馈，并将其加入监听
-                        resp = await client.send_group_msg(
-                            group_id=str(gid),
-                            message=[Reply(id=str(msg_id)), Text(text=feedback)],
-                        )
-                        feedback_msg_id = resp.get("message_id")
-                        if feedback_msg_id:
-                            track_forward_message(feedback_msg_id, [customer_id], gid)
+                                asyncio.create_task(add_emoji_to_message(new_fwd_id, list(EMOJI_MAPPING.values())))
+                            if feedback:
+                                asyncio.create_task(send_and_track_feedback(gid, msg_id, feedback, customer_id))
+                        else:
+                            if feedback:
+                                asyncio.create_task(send_and_track_feedback(gid, msg_id, feedback, customer_id))
 
                     else:
                         # 不是我们关心的命令，忽略
