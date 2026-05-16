@@ -776,18 +776,19 @@ async def monitor_loop():
 
         if in_summary_window and last_night_summary_sent_date != today_str:
             if delayed_notifications:
-                total_customers: set[int] = set()
+                # 合并所有延后通知中的客户（按 QQ 去重，保留后出现的 data）
+                customers_aggregated: dict[int, CustomerData] = {}
                 for notif in delayed_notifications:
-                    for qq, _ in notif["customers"]:
-                        total_customers.add(qq)
-
-                summary_text = f"🌙 夜间免打扰时段汇总：共有 {len(total_customers)} 名客户发来消息，请及时处理。"
-                try:
-                    await client.send_group_msg(group_id=str(INTERNAL_GROUP_ID), message=summary_text)
-                    log.info(f"夜间汇总已发送：{summary_text}")
-                except Exception as e:
-                    log.error(f"发送夜间汇总失败: {e}")
-
+                    for qq, data in notif["customers"]:
+                        customers_aggregated[qq] = data
+                if customers_aggregated:
+                    customers_list = list(customers_aggregated.items())
+                    summary_text = f"🌙 夜间免打扰时段汇总：共有 {len(customers_list)} 名客户发来消息，请及时处理。"
+                    # 使用带 @ 和合并转发的提醒
+                    asyncio.create_task(send_reminder_with_at(INTERNAL_GROUP_ID, summary_text, customers_list))
+                    log.info(f"夜间汇总已发送（带@合并转发）：{summary_text}")
+                else:
+                    log.debug("夜间汇总时没有有效客户，跳过发送")
                 delayed_notifications.clear()
             else:
                 log.debug("夜间汇总时间到，但无延后通知")
