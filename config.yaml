@@ -28,8 +28,22 @@ milestones:
 monitored_forward_limit: 10
 
 # 结束会话时发送的消息（支持多行）
-closing_message: |
+closing_message: |-
   本次会话暂时结束。感谢您的支持与信任，再见。（请勿回复）
+
+# 新好友通过申请后发送的欢迎消息（支持多行）
+# 可以是纯文本字符串，也可以是结构化消息列表，例如：
+# welcome_message:
+#   - type: text
+#     data:
+#       text: "您好，感谢您添加好友。"
+#   - type: image
+#     data:
+#       file: "https://example.com/welcome.png"
+welcome_message: |-
+  您好，感谢您添加好友。清灰/换硅脂可添加活动通知群1087312046，按照发布的通知参加修机活动，目前无需预约
+  如果你对修机师的活动感兴趣，也欢迎加入交流群：152300121
+  如有其他问题可随时留言，我们会在工作时间尽快回复。
 
 # 各命令防抖间隔（秒）
 debounce_seconds:
@@ -39,7 +53,14 @@ debounce_seconds:
   close: 5
   list: 5
 # 好友申请去重缓存时间（秒）
-processed_friend_requests_expire: 3
+processed_friend_requests_expire: 5
+
+# 好友通过后发送欢迎消息的延迟（秒），等待好友关系生效
+friend_welcome_delay: 5
+
+# 欢迎消息发送失败后重试
+friend_welcome_retries: 3
+friend_welcome_retry_interval: 3
 
 # 回复耗时记录最大保留条数
 reply_duration_maxlen: 1000

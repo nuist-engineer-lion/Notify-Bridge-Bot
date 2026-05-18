@@ -1,7 +1,7 @@
 [project]
-name = "qq-redot"
-version = "0.1.0"
-description = "Add your description here"
+name = "Notify-Bridge-Bot"
+version = "1.1.0"
+description = "海上修机师客服系统"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
