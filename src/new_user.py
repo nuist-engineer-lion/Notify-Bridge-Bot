@@ -56,6 +56,8 @@ async def handle_friend_request(event: FriendRequestEvent) -> bool:
         except Exception as notify_err:
             log.error("好友申请群通知发送失败: user_id=%s, err=%s", uid, notify_err, exc_info=True)
         log.info("已自动通过好友申请: user_id=%s, comment=%s", uid, comment)
+        processed_friend_requests[flag] = time.time()
     except Exception as e:
         log.error("自动通过好友申请失败: user_id=%s, err=%s", uid, e, exc_info=True)
+        processed_friend_requests[flag] = time.time()
     return True
