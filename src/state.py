@@ -133,6 +133,7 @@ def save_state() -> None:
     }
 
     try:
+        os.makedirs(os.path.dirname(STATE_FILE) or ".", exist_ok=True)
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
         log.debug("状态已保存至 %s", STATE_FILE)

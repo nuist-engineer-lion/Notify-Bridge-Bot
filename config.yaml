@@ -31,6 +31,10 @@ monitored_forward_limit: 10
 closing_message: |
   本次会话暂时结束。感谢您的支持与信任，再见。（请勿回复）
 
+# 新好友通过申请后发送的欢迎消息（支持多行）
+welcome_message: |
+  您好，感谢您添加好友。如有问题请随时留言，我们会尽快回复。
+
 # 各命令防抖间隔（秒）
 debounce_seconds:
   say: 5

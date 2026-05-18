@@ -5,6 +5,7 @@ from napcat import FriendRequestEvent
 from .config import (
     log,
     INTERNAL_GROUP_ID,
+    WELCOME_MESSAGE,
     PROCESSED_FRIEND_REQUESTS_EXPIRE,
     processed_friend_requests,
     friend_approve_time,
@@ -30,6 +31,15 @@ async def handle_friend_request(event: FriendRequestEvent) -> bool:
     try:
         await event.approve()
         friend_approve_time[uid] = time.time()
+
+        try:
+            await client.send_private_msg(
+                user_id=str(uid),
+                message=WELCOME_MESSAGE,
+            )
+        except Exception as welcome_err:
+            log.error("欢迎消息发送失败: user_id=%s, err=%s", uid, welcome_err, exc_info=True)
+
         notify_text = (
             "✅ 已自动通过好友申请\n"
             f"QQ: {uid}\n"

@@ -9,8 +9,11 @@ wheels/
 # Virtual environments
 .venv
 
-#vscode settings
+# VS Code settings
 .vscode/settings.json
 
-#state files
+# State files
 archives/
+
+# Vibe
+.claude/
