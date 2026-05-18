@@ -28,11 +28,19 @@ milestones:
 monitored_forward_limit: 10
 
 # 结束会话时发送的消息（支持多行）
-closing_message: |
+closing_message: |-
   本次会话暂时结束。感谢您的支持与信任，再见。（请勿回复）
 
 # 新好友通过申请后发送的欢迎消息（支持多行）
-welcome_message: |
+# 可以是纯文本字符串，也可以是结构化消息列表，例如：
+# welcome_message:
+#   - type: text
+#     data:
+#       text: "您好，感谢您添加好友。"
+#   - type: image
+#     data:
+#       file: "https://example.com/welcome.png"
+welcome_message: |-
   您好，感谢您添加好友。如有问题请随时留言，我们会尽快回复。
 
 # 各命令防抖间隔（秒）

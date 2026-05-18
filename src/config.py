@@ -5,6 +5,7 @@ from collections import deque
 import yaml
 
 from napcat import NapCatClient
+from napcat.types import Text, Image, Face, At, Poke
 
 from .models import CustomerData, ForwardMonitorData, DelayedNotification
 
@@ -42,6 +43,40 @@ MILESTONES = config["milestones"]
 MONITORED_FORWARD_LIMIT = config["monitored_forward_limit"]
 CLOSING_MESSAGE = config["closing_message"]
 WELCOME_MESSAGE = config["welcome_message"]
+
+# ================= 结构化消息类型映射 =================
+SEGMENT_TYPE_MAP = {
+    "text": Text,
+    "image": Image,
+    "face": Face,
+    "at": At,
+    "poke": Poke,
+}
+
+
+def parse_message_config(raw):
+    """将配置中的消息值转换为 napcat SDK 可接受的格式。
+
+    支持两种格式：
+    - 字符串：直接返回字符串（去除末尾多余换行）
+    - 列表：每个元素为 {"type": "text", "data": {...}}，返回 napcat 消息段对象列表
+    """
+    if isinstance(raw, str):
+        return raw.rstrip("\n")
+    if isinstance(raw, list):
+        segments = []
+        for item in raw:
+            seg_type = item["type"]
+            seg_data = item.get("data", {})
+            cls = SEGMENT_TYPE_MAP[seg_type.lower()]
+            segments.append(cls(**seg_data))
+        return segments
+    return raw
+
+
+# 解析消息配置（支持字符串和结构化消息）
+CLOSING_MESSAGE = parse_message_config(CLOSING_MESSAGE)
+WELCOME_MESSAGE = parse_message_config(WELCOME_MESSAGE)
 DEBOUNCE_SECONDS = config["debounce_seconds"]
 PROCESSED_FRIEND_REQUESTS_EXPIRE = config["processed_friend_requests_expire"]
 REPLY_DURATION_MAXLEN = config["reply_duration_maxlen"]
