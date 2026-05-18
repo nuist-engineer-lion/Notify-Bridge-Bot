@@ -41,8 +41,6 @@ INTERNAL_GROUP_ID = config["internal_group_id"]
 WHITELIST = config["whitelist"]
 MILESTONES = config["milestones"]
 MONITORED_FORWARD_LIMIT = config["monitored_forward_limit"]
-CLOSING_MESSAGE = config["closing_message"]
-WELCOME_MESSAGE = config["welcome_message"]
 
 # ================= 结构化消息类型映射 =================
 SEGMENT_TYPE_MAP = {
@@ -74,11 +72,11 @@ def parse_message_config(raw):
     return raw
 
 
-# 解析消息配置（支持字符串和结构化消息）
-CLOSING_MESSAGE = parse_message_config(CLOSING_MESSAGE)
-WELCOME_MESSAGE = parse_message_config(WELCOME_MESSAGE)
+CLOSING_MESSAGE = parse_message_config(config["closing_message"])
+WELCOME_MESSAGE = parse_message_config(config["welcome_message"])
 DEBOUNCE_SECONDS = config["debounce_seconds"]
 PROCESSED_FRIEND_REQUESTS_EXPIRE = config["processed_friend_requests_expire"]
+FRIEND_WELCOME_DELAY = config.get("friend_welcome_delay", 3)
 REPLY_DURATION_MAXLEN = config["reply_duration_maxlen"]
 AVAILABILITY = config["availability"]
 MAX_LISTEN_AGE = config.get("max_listen_age", 86400)   # 24小时

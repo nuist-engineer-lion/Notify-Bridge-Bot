@@ -1,4 +1,5 @@
 import time
+import asyncio
 
 from napcat import FriendRequestEvent
 
@@ -6,6 +7,7 @@ from .config import (
     log,
     INTERNAL_GROUP_ID,
     WELCOME_MESSAGE,
+    FRIEND_WELCOME_DELAY,
     PROCESSED_FRIEND_REQUESTS_EXPIRE,
     processed_friend_requests,
     friend_approve_time,
@@ -32,6 +34,7 @@ async def handle_friend_request(event: FriendRequestEvent) -> bool:
         await event.approve()
         friend_approve_time[uid] = time.time()
 
+        await asyncio.sleep(FRIEND_WELCOME_DELAY)
         try:
             await client.send_private_msg(
                 user_id=str(uid),
