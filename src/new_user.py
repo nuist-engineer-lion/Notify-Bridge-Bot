@@ -2,12 +2,15 @@ import time
 import asyncio
 
 from napcat import FriendRequestEvent
+from napcat.exceptions import NapCatAPIError
 
 from .config import (
     log,
     INTERNAL_GROUP_ID,
     WELCOME_MESSAGE,
     FRIEND_WELCOME_DELAY,
+    FRIEND_WELCOME_RETRIES,
+    FRIEND_WELCOME_RETRY_INTERVAL,
     PROCESSED_FRIEND_REQUESTS_EXPIRE,
     processed_friend_requests,
     friend_approve_time,
@@ -35,13 +38,29 @@ async def handle_friend_request(event: FriendRequestEvent) -> bool:
         friend_approve_time[uid] = time.time()
 
         await asyncio.sleep(FRIEND_WELCOME_DELAY)
-        try:
-            await client.send_private_msg(
-                user_id=str(uid),
-                message=WELCOME_MESSAGE,
-            )
-        except Exception as welcome_err:
-            log.error("欢迎消息发送失败: user_id=%s, err=%s", uid, welcome_err, exc_info=True)
+
+        for attempt in range(FRIEND_WELCOME_RETRIES):
+            try:
+                await client.send_private_msg(
+                    user_id=str(uid),
+                    message=WELCOME_MESSAGE,
+                )
+                break
+            except NapCatAPIError as e:
+                if attempt < FRIEND_WELCOME_RETRIES - 1:
+                    log.warning(
+                        "欢迎消息发送失败，重试 %d/%d: user_id=%s, retcode=%s",
+                        attempt + 1, FRIEND_WELCOME_RETRIES, uid, e.retcode,
+                    )
+                    await asyncio.sleep(FRIEND_WELCOME_RETRY_INTERVAL)
+                else:
+                    log.error(
+                        "欢迎消息全部重试失败: user_id=%s, retcode=%s, err=%s",
+                        uid, e.retcode, e, exc_info=True,
+                    )
+            except Exception as welcome_err:
+                log.error("欢迎消息发送失败: user_id=%s, err=%s", uid, welcome_err, exc_info=True)
+                break
 
         notify_text = (
             "✅ 已自动通过好友申请\n"
