@@ -1,18 +1,14 @@
 import time
 import asyncio
-import statistics
 from datetime import datetime, timedelta
 
 from .config import (
     log,
-    STARTED_AT,
     INTERNAL_GROUP_ID,
-    CLOSING_MESSAGE,
     MILESTONES,
     MAX_LISTEN_AGE,
     NIGHT_SUMMARY_TIME,
     PROCESSED_FRIEND_REQUESTS_EXPIRE,
-    reply_durations,
     unreplied_customers,
     monitored_forwards,
     processed_friend_requests,
@@ -22,90 +18,9 @@ from .config import (
     client,
 )
 from .models import CustomerData, DelayedNotification
-from .utils import format_duration, is_night_time
-from .forward import send_reminder_with_at, pop_tracked_forward
-from .state import save_state, archive_session
-
-
-async def close_session(user_id: int, send_closing: bool = False) -> bool:
-    """
-    从 unreplied_customers 中移除客户，记录耗时（如果存在）。
-    如果 send_closing=True，则向该客户发送结束语。
-    返回是否成功结束（即客户原本在队列中）。
-    """
-    data = unreplied_customers.pop(user_id, None)
-    if data is None:
-        return False
-
-    # 记录回复耗时
-    pending = data["pending_since"]
-    elapsed = time.time() - pending
-    reply_durations.append(elapsed)
-    log.info("会话结束: user_id=%s, 耗时=%.1f秒", user_id, elapsed)
-
-    # 异步存档，不阻塞主流程
-    asyncio.create_task(archive_session(user_id, data["msg_ids"], pending))
-
-    if send_closing:
-        try:
-            await client.send_private_msg(
-                user_id=str(user_id),
-                message=CLOSING_MESSAGE,
-            )
-            log.info("自动发送结束语成功: user_id=%s", user_id)
-        except Exception as e:
-            log.error("自动发送结束语失败: user_id=%s, err=%s", user_id, e, exc_info=True)
-
-    save_state()  # 状态变更后持久化
-    return True
-
-
-async def send_status_panel(group_id: int):
-    """向指定群发送机器人状态统计面板"""
-    uptime = time.time() - STARTED_AT
-    uptime_str = format_duration(uptime)
-
-    pending_count = len(unreplied_customers)
-    total_replies = len(reply_durations)
-
-    # 计算统计值
-    if total_replies > 0:
-        min_dur = min(reply_durations)
-        max_dur = max(reply_durations)
-        avg_dur = statistics.mean(reply_durations)
-        median_dur = statistics.median(reply_durations)
-
-        min_str = format_duration(min_dur)
-        max_str = format_duration(max_dur)
-        avg_str = format_duration(avg_dur)
-        median_str = format_duration(median_dur)
-    else:
-        min_str = max_str = avg_str = median_str = "暂无数据"
-
-    # 当前监听中的合并转发数量
-    monitored_count = len(monitored_forwards)
-
-    panel = (
-        "🤖 机器人状态面板\n"
-        f"• 运行时长：{uptime_str}\n"
-        f"• 待回复客户数：{pending_count}\n"
-        f"• 已完结会话数：{total_replies}\n"
-        f"• 最短回复耗时：{min_str}\n"
-        f"• 最长回复耗时：{max_str}\n"
-        f"• 平均回复耗时：{avg_str}\n"
-        f"• 中位数耗时：{median_str}\n"
-        f"• 监听合并转发：{monitored_count}\n"
-        f"使用 .help 查看可用命令"
-    )
-
-    try:
-        await client.send_group_msg(
-            group_id=str(group_id),
-            message=panel,
-        )
-        log.info("状态面板已发送至群 %d", group_id)
-    except Exception as e:
-        log.error("发送状态面板失败: %s", e, exc_info=True)
+from .utils import is_night_time
+from .message_sender import send_reminder_with_at, pop_tracked_forward
+from .state import save_state
 
 
 async def monitor_loop():
@@ -141,7 +56,6 @@ async def monitor_loop():
         for uid in expired_approves:
             del friend_approve_time[uid]
 
-        # 内部函数：处理通报（立即或延后）
         def handle_notification(notify_type: str, customers: list[tuple[int, CustomerData]], milestone: int | None = None) -> None:
             if is_night_time():
                 notif: DelayedNotification = {
@@ -214,7 +128,6 @@ async def monitor_loop():
 
         if in_summary_window and last_night_summary_sent_date != today_str:
             if delayed_notifications:
-                # 合并所有延后通知中的客户（按 QQ 去重，保留后出现的 data）
                 customers_aggregated: dict[int, CustomerData] = {}
                 for notif in delayed_notifications:
                     for qq, data in notif["customers"]:
@@ -222,7 +135,6 @@ async def monitor_loop():
                 if customers_aggregated:
                     customers_list = list(customers_aggregated.items())
                     summary_text = f"🌙 夜间免打扰时段汇总：共有 {len(customers_list)} 名客户发来消息，请及时处理。"
-                    # 使用带 @ 和合并转发的提醒
                     asyncio.create_task(send_reminder_with_at(INTERNAL_GROUP_ID, summary_text, customers_list))
                     log.info(f"夜间汇总已发送（带@合并转发）：{summary_text}")
                 else:
@@ -234,5 +146,4 @@ async def monitor_loop():
             import src.config as cfg
             cfg.last_night_summary_sent_date = today_str
 
-        # 定期保存状态（每轮巡检后）
         save_state()
