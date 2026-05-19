@@ -230,7 +230,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
     cmd_text = ''.join(cmd_parts).strip()
     log.debug("群命令: reply_id=%s, cmd=%s", reply_id, cmd_text)
 
-    if not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help', '.close')):
+    if not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help', '.close', '.list')):
         return True
 
     if cmd_text.startswith(".help"):

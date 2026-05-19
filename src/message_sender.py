@@ -115,10 +115,13 @@ def pop_tracked_forward(message_id: int) -> dict | None:
 
 # ======================= 合并转发构造 =======================
 
-async def send_nested_forward(group_id: int, customer_list: list[tuple[int, CustomerData]], summary_text: str) -> int | None:
+async def send_nested_forward(group_id: int, customer_list: list[tuple[int, CustomerData]], summary_text: str, max_age_seconds: int | None = None) -> int | None:
     """
     构造嵌套合并转发并发送，每个客户的消息通过 get_recent_message_ids 获取最近指定时间内的消息
     """
+    if max_age_seconds is None:
+        max_age_seconds = RECENT_MESSAGE_MAX_AGE
+
     if not customer_list:
         log.debug("send_nested_forward: customer_list 为空，跳过发送")
         return None
@@ -133,9 +136,9 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
     ]
 
     for qq, _ in customer_list:
-        msg_ids = await get_recent_message_ids(qq, count=200, max_age_seconds=RECENT_MESSAGE_MAX_AGE)
+        msg_ids = await get_recent_message_ids(qq, count=200, max_age_seconds=max_age_seconds)
         if not msg_ids:
-            log.warning("客户 %d 无%d秒内消息，跳过该客户节点", qq, RECENT_MESSAGE_MAX_AGE)
+            log.warning("客户 %d 无%d秒内消息，跳过该客户节点", qq, max_age_seconds)
             continue
 
         inner_nodes: list[Message] = [
@@ -152,7 +155,7 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         )
 
     if len(outer_nodes) <= 1:
-        log.warning("所有客户均无%d秒内消息，取消发送合并转发", RECENT_MESSAGE_MAX_AGE)
+        log.warning("所有客户均无%d秒内消息，取消发送合并转发", max_age_seconds)
         return None
 
     try:
@@ -208,7 +211,7 @@ async def add_emoji_to_message(message_id: int, emoji_ids: list[int]) -> None:
             log.error("添加表情失败: message_id=%s, emoji_id=%s, err=%s", message_id, emoji_id, e)
 
 
-async def send_reminder_with_at(group_id: int, summary: str, customer_list: list[tuple[int, CustomerData]]) -> int | None:
+async def send_reminder_with_at(group_id: int, summary: str, customer_list: list[tuple[int, CustomerData]], max_age_seconds: int | None = None) -> int | None:
     """
     发送提醒：先尝试 @ 一位当前可用成员，再发送合并转发。
     若无可用成员，则直接发送合并转发（无 @）。
@@ -228,7 +231,7 @@ async def send_reminder_with_at(group_id: int, summary: str, customer_list: list
     else:
         log.debug("当前无可用成员，直接发送合并转发")
 
-    message_id = await send_nested_forward(group_id, customer_list, summary)
+    message_id = await send_nested_forward(group_id, customer_list, summary, max_age_seconds=max_age_seconds)
     if message_id is not None:
         track_forward_message(
             message_id=message_id,

@@ -7,6 +7,7 @@ from .config import (
     INTERNAL_GROUP_ID,
     MILESTONES,
     MAX_LISTEN_AGE,
+    NIGHT_START,
     NIGHT_SUMMARY_TIME,
     PROCESSED_FRIEND_REQUESTS_EXPIRE,
     unreplied_customers,
@@ -135,7 +136,17 @@ async def monitor_loop():
                 if customers_aggregated:
                     customers_list = list(customers_aggregated.items())
                     summary_text = f"🌙 夜间免打扰时段汇总：共有 {len(customers_list)} 名客户发来消息，请及时处理。"
-                    asyncio.create_task(send_reminder_with_at(INTERNAL_GROUP_ID, summary_text, customers_list))
+
+                    # 计算覆盖整个夜间窗口所需的 max_age_seconds
+                    night_start_t = datetime.strptime(NIGHT_START, "%H:%M").time()
+                    night_summary_t = datetime.strptime(NIGHT_SUMMARY_TIME, "%H:%M").time()
+                    night_start_dt = datetime.combine(datetime.today(), night_start_t)
+                    night_summary_dt = datetime.combine(datetime.today(), night_summary_t)
+                    if night_summary_dt <= night_start_dt:
+                        night_summary_dt += timedelta(days=1)
+                    night_max_age = int((night_summary_dt - night_start_dt).total_seconds()) + 300  # +5分钟缓冲
+
+                    asyncio.create_task(send_reminder_with_at(INTERNAL_GROUP_ID, summary_text, customers_list, max_age_seconds=night_max_age))
                     log.info(f"夜间汇总已发送（带@合并转发）：{summary_text}")
                 else:
                     log.debug("夜间汇总时没有有效客户，跳过发送")
