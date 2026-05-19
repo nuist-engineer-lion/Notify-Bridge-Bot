@@ -110,7 +110,7 @@ async def handle_more_command(gid: int, reply_id: int, customer_id: int) -> tupl
         resp = await client.get_friend_msg_history(
             user_id=str(customer_id),
             count=100,
-            parse_mult_msg=True,
+            parse_mult_msg=False,
         )
         messages = resp.get("messages", [])
         if not messages:

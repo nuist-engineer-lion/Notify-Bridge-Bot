@@ -51,7 +51,7 @@ async def get_recent_message_ids(user_id: int, count: int = 200, max_age_seconds
         resp = await client.get_friend_msg_history(
             user_id=str(user_id),
             count=count,
-            parse_mult_msg=True,
+            parse_mult_msg=False,
         )
         messages = resp.get("messages", [])
         if not messages:
