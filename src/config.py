@@ -79,6 +79,7 @@ PROCESSED_FRIEND_REQUESTS_EXPIRE = config["processed_friend_requests_expire"]
 FRIEND_WELCOME_DELAY = config.get("friend_welcome_delay", 3)
 FRIEND_WELCOME_RETRIES = config.get("friend_welcome_retries", 3)
 FRIEND_WELCOME_RETRY_INTERVAL = config.get("friend_welcome_retry_interval", 3)
+FRIEND_COUNT_LIMIT = config.get("friend_count_limit", 3000)
 REPLY_DURATION_MAXLEN = config["reply_duration_maxlen"]
 AVAILABILITY = config["availability"]
 MAX_LISTEN_AGE = config.get("max_listen_age", 86400)   # 24小时
