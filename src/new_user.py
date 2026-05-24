@@ -11,6 +11,7 @@ from .config import (
     FRIEND_WELCOME_DELAY,
     FRIEND_WELCOME_RETRIES,
     FRIEND_WELCOME_RETRY_INTERVAL,
+    FRIEND_COUNT_LIMIT,
     PROCESSED_FRIEND_REQUESTS_EXPIRE,
     processed_friend_requests,
     friend_approve_time,
@@ -37,6 +38,13 @@ async def handle_friend_request(event: FriendRequestEvent) -> bool:
         await event.approve()
         friend_approve_time[uid] = time.time()
 
+        friend_count = 0
+        try:
+            friend_list = await client.get_friend_list()
+            friend_count = len(friend_list)
+        except Exception as e:
+            log.warning("获取好友列表失败: %s", e, exc_info=True)
+
         await asyncio.sleep(FRIEND_WELCOME_DELAY)
 
         for attempt in range(FRIEND_WELCOME_RETRIES):
@@ -49,14 +57,14 @@ async def handle_friend_request(event: FriendRequestEvent) -> bool:
             except NapCatAPIError as e:
                 if attempt < FRIEND_WELCOME_RETRIES - 1:
                     log.warning(
-                        "欢迎消息发送失败，重试 %d/%d: user_id=%s, retcode=%s",
-                        attempt + 1, FRIEND_WELCOME_RETRIES, uid, e.retcode,
+                        "欢迎消息发送失败，重试 %d/%d: user_id=%s, retcode=%s, friend_count=%s",
+                        attempt + 1, FRIEND_WELCOME_RETRIES, uid, e.retcode, friend_count,
                     )
                     await asyncio.sleep(FRIEND_WELCOME_RETRY_INTERVAL)
                 else:
                     log.error(
-                        "欢迎消息全部重试失败: user_id=%s, retcode=%s, err=%s",
-                        uid, e.retcode, e, exc_info=True,
+                        "欢迎消息全部重试失败: user_id=%s, retcode=%s, friend_count=%s, err=%s",
+                        uid, e.retcode, friend_count, e, exc_info=True,
                     )
             except Exception as welcome_err:
                 log.error("欢迎消息发送失败: user_id=%s, err=%s", uid, welcome_err, exc_info=True)
@@ -65,8 +73,17 @@ async def handle_friend_request(event: FriendRequestEvent) -> bool:
         notify_text = (
             "✅ 已自动通过好友申请\n"
             f"QQ: {uid}\n"
-            f"备注: {comment or '（无）'}"
+            f"备注: {comment or '（无）'}\n"
+            f"当前好友数: {friend_count}"
         )
+        if friend_count >= FRIEND_COUNT_LIMIT:
+            notify_text += (
+                f"\n⚠️ 警告: 好友数量已达 {friend_count}/{FRIEND_COUNT_LIMIT} 上限，请及时清理！"
+            )
+            log.error(
+                "好友数量已达上限: friend_count=%s, limit=%s, user_id=%s",
+                friend_count, FRIEND_COUNT_LIMIT, uid,
+            )
         try:
             await client.send_group_msg(
                 group_id=str(INTERNAL_GROUP_ID),
