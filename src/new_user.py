@@ -17,6 +17,7 @@ from .config import (
     friend_approve_time,
     client,
 )
+from . import config as cfg
 
 
 async def handle_friend_request(event: FriendRequestEvent) -> bool:
@@ -38,12 +39,8 @@ async def handle_friend_request(event: FriendRequestEvent) -> bool:
         await event.approve()
         friend_approve_time[uid] = time.time()
 
-        friend_count = 0
-        try:
-            friend_list = await client.get_friend_list()
-            friend_count = len(friend_list)
-        except Exception as e:
-            log.warning("获取好友列表失败: %s", e, exc_info=True)
+        cfg.friend_count += 1
+        friend_count = cfg.friend_count
 
         await asyncio.sleep(FRIEND_WELCOME_DELAY)
 

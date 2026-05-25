@@ -117,6 +117,9 @@ processed_friend_requests: dict[str, float] = {}
 # 记录用户通过好友申请的时间戳（用于忽略刚通过申请后的第一条消息）
 friend_approve_time: dict[int, float] = {}
 
+# 好友数量缓存（启动时初始化，通过事件增量更新）
+friend_count: int = 0
+
 # ================= 回复耗时记录（秒） =================
 reply_durations: deque[float] = deque(maxlen=REPLY_DURATION_MAXLEN)
 

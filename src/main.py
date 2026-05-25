@@ -1,6 +1,7 @@
 import asyncio
 
 from napcat import (
+    FriendAddNoticeEvent,
     FriendRequestEvent,
     GroupMsgEmojiLikeEvent,
     PrivateMessageEvent,
@@ -17,6 +18,7 @@ from .config import (
     MILESTONES,
     client,
 )
+from . import config as cfg
 from .state import load_state
 from .monitor import monitor_loop
 from .private_msg import handle_private_msg, handle_sent_msg, handle_friend_poke
@@ -46,9 +48,21 @@ async def main():
                 except Exception as e:
                     log.error("发送启动通知失败: %s", e, exc_info=True)
 
+                try:
+                    friend_list = await client.get_friend_list()
+                    cfg.friend_count = len(friend_list)
+                    log.info("好友数量已初始化: %d", cfg.friend_count)
+                except Exception as e:
+                    log.warning("初始化好友数量失败: %s", e, exc_info=True)
+
             log.debug("收到事件: type=%s, post_type=%s", type(event).__name__, getattr(event, 'post_type', '?'))
 
             match event:
+                case FriendAddNoticeEvent():
+                    if event.user_id not in cfg.friend_approve_time:
+                        cfg.friend_count += 1
+                    log.info("好友增加通知: user_id=%s, 当前好友数=%d", event.user_id, cfg.friend_count)
+
                 case FriendRequestEvent():
                     await handle_friend_request(event)
 
