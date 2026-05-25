@@ -48,12 +48,21 @@ async def main():
                 except Exception as e:
                     log.error("发送启动通知失败: %s", e, exc_info=True)
 
-                try:
-                    friend_list = await client.get_friend_list()
-                    cfg.friend_count = len(friend_list)
-                    log.info("好友数量已初始化: %d", cfg.friend_count)
-                except Exception as e:
-                    log.warning("初始化好友数量失败: %s", e, exc_info=True)
+                for attempt in range(3):
+                    try:
+                        resp = await client.send(
+                            {"action": "get_friend_list", "params": {}},
+                            timeout=60.0,
+                        )
+                        if resp.get("status") == "ok" and resp.get("retcode") == 0:
+                            cfg.friend_count = len(resp.get("data", []))
+                            log.info("好友数量已初始化: %d", cfg.friend_count)
+                            break
+                        log.warning("初始化好友数量失败 (尝试 %d/3): %s", attempt + 1, resp)
+                    except Exception as e:
+                        log.warning("初始化好友数量失败 (尝试 %d/3): %s", attempt + 1, e)
+                        if attempt < 2:
+                            await asyncio.sleep(10)
 
             log.debug("收到事件: type=%s, post_type=%s", type(event).__name__, getattr(event, 'post_type', '?'))
 
