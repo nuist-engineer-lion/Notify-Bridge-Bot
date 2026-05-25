@@ -50,18 +50,12 @@ async def main():
 
                 for attempt in range(3):
                     try:
-                        resp = await client.send(
-                            {"action": "get_friend_count", "params": {}},
+                        friend_list = await client.send(
+                            {"action": "get_friend_list", "params": {}},
                             timeout=30.0,
                         )
-                        if resp.get("status") == "ok" and resp.get("retcode") == 0:
-                            data = resp.get("data")
-                            if isinstance(data, int):
-                                cfg.friend_count = data
-                            elif isinstance(data, dict) and "count" in data:
-                                cfg.friend_count = data["count"]
-                            else:
-                                cfg.friend_count = data
+                        if friend_list.get("status") == "ok" and friend_list.get("retcode") == 0:
+                            cfg.friend_count = len(friend_list.get("data", []))
                             log.info("好友数量已初始化: %d", cfg.friend_count)
                             break
                     except Exception as e:
