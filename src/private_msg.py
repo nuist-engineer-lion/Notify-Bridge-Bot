@@ -78,6 +78,7 @@ async def handle_sent_msg(event: PrivateMessageEvent) -> bool:
     """处理客服发出的私聊消息：若目标在队列中则结束会话"""
     tid = event.target_id
     if tid in unreplied_customers:
+        unreplied_customers[tid]["msg_ids"].append(event.message_id)
         await close_session(tid, send_closing=False)
         log.info("客服已回复 %s，移除提醒并记录耗时。剩余未回复: %d", tid, len(unreplied_customers))
         return True

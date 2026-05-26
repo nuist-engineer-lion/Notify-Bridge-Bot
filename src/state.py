@@ -25,8 +25,12 @@ from .models import (
 )
 
 
-async def archive_session(user_id: int, pending_since: float) -> None:
-    """获取双方完整对话历史并存档到本地 JSON 文件"""
+async def archive_session(user_id: int, pending_since: float, msg_ids: list[int] | None = None) -> None:
+    """获取双方完整对话历史并存档到本地 JSON 文件。
+
+    优先使用 get_friend_msg_history 获取双方对话；若 API 返回空，
+    则降级为逐条拉取客户侧消息（msg_ids 参数作为保底）。
+    """
     os.makedirs(ARCHIVE_DIR, exist_ok=True)
     from datetime import datetime
     date_str = datetime.fromtimestamp(pending_since).strftime("%Y%m%d")
@@ -41,6 +45,7 @@ async def archive_session(user_id: int, pending_since: float) -> None:
             parse_mult_msg=True,
         )
         all_messages = resp.get("messages", [])
+        log.debug("客户 %d get_friend_msg_history 返回 %d 条消息", user_id, len(all_messages))
     except Exception as e:
         log.error(f"获取客户 {user_id} 历史消息失败: {e}")
         all_messages = []
@@ -58,6 +63,22 @@ async def archive_session(user_id: int, pending_since: float) -> None:
             "message": msg.get("message", []),
         }
         messages_data.append(record)
+
+    if not messages_data and msg_ids:
+        log.warning("get_friend_msg_history 未覆盖到会话消息，降级逐条拉取 %d 条", len(msg_ids))
+        for msg_id in msg_ids:
+            try:
+                msg_detail = await client.get_msg(message_id=str(msg_id))
+                record: MessageRecord = {
+                    "message_id": msg_id,
+                    "time": msg_detail.get("time"),
+                    "sender_nickname": msg_detail.get("sender", {}).get("nickname", ""),
+                    "sender_id": msg_detail.get("sender", {}).get("user_id"),
+                    "message": msg_detail.get("message", []),
+                }
+                messages_data.append(record)
+            except Exception as e:
+                log.error(f"降级拉取消息 {msg_id} 失败: {e}")
 
     if not messages_data:
         log.warning(f"存档跳过：客户 {user_id} 在会话窗口内无消息记录")
