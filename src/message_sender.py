@@ -272,7 +272,7 @@ async def close_session(user_id: int, send_closing: bool = False) -> bool:
     reply_durations.append(elapsed)
     log.info("会话结束: user_id=%s, 耗时=%.1f秒", user_id, elapsed)
 
-    asyncio.create_task(archive_session(user_id, data["msg_ids"], pending))
+    asyncio.create_task(archive_session(user_id, pending))
 
     if send_closing:
         try:

@@ -25,34 +25,53 @@ from .models import (
 )
 
 
-async def archive_session(user_id: int, msg_ids: list[int], pending_since: float) -> None:
-    """将会话记录存档到本地 JSON 文件"""
-    if not msg_ids:
-        log.warning(f"存档跳过：客户 {user_id} 无消息记录")
-        return
-
+async def archive_session(user_id: int, pending_since: float) -> None:
+    """获取双方完整对话历史并存档到本地 JSON 文件"""
     os.makedirs(ARCHIVE_DIR, exist_ok=True)
     from datetime import datetime
-    date_str = datetime.now().strftime("%Y%m%d")
+    date_str = datetime.fromtimestamp(pending_since).strftime("%Y%m%d")
     filename = f"{user_id}_{date_str}.json"
     filepath = os.path.join(ARCHIVE_DIR, filename)
 
+    now = time.time()
+    try:
+        resp = await client.get_friend_msg_history(
+            user_id=str(user_id),
+            count=500,
+            parse_mult_msg=True,
+        )
+        all_messages = resp.get("messages", [])
+    except Exception as e:
+        log.error(f"获取客户 {user_id} 历史消息失败: {e}")
+        all_messages = []
+
     messages_data: list[MessageRecord] = []
-    for msg_id in msg_ids:
-        try:
-            msg_detail = await client.get_msg(message_id=str(msg_id))
-            record: MessageRecord = {
-                "message_id": msg_id,
-                "time": msg_detail.get("time"),
-                "sender_nickname": msg_detail.get("sender", {}).get("nickname", ""),
-                "sender_id": msg_detail.get("sender", {}).get("user_id"),
-                "message": msg_detail.get("message", []),
-            }
-            messages_data.append(record)
-        except Exception as e:
-            log.error(f"存档时获取消息 {msg_id} 失败: {e}")
+    for msg in all_messages:
+        msg_time = msg.get("time", 0)
+        if msg_time < pending_since or msg_time > now:
+            continue
+        record: MessageRecord = {
+            "message_id": msg.get("message_id"),
+            "time": msg_time,
+            "sender_nickname": msg.get("sender", {}).get("nickname", ""),
+            "sender_id": msg.get("sender", {}).get("user_id"),
+            "message": msg.get("message", []),
+        }
+        messages_data.append(record)
+
+    if not messages_data:
+        log.warning(f"存档跳过：客户 {user_id} 在会话窗口内无消息记录")
+        return
 
     messages_data.sort(key=lambda x: x.get("time", 0))
+
+    session_record: MessageRecord = {
+        "session_closed_at": time.time(),
+        "pending_since": pending_since,
+        "pending_duration": time.time() - pending_since,
+        "message_count": len(messages_data),
+        "messages": messages_data,
+    }
 
     existing_sessions: list[MessageRecord] = []
     if os.path.exists(filepath):
@@ -64,18 +83,13 @@ async def archive_session(user_id: int, msg_ids: list[int], pending_since: float
         except Exception:
             pass
 
-    session_record: MessageRecord = {
-        "session_closed_at": time.time(),
-        "pending_duration": time.time() - pending_since,
-        "message_count": len(messages_data),
-        "messages": messages_data
-    }
     existing_sessions.append(session_record)
-
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(existing_sessions, f, ensure_ascii=False, indent=2)
         log.info(f"会话已存档: {filepath}")
+    except Exception as e:
+        log.error(f"会话存档写入失败: {e}")
     except Exception as e:
         log.error(f"会话存档写入失败: {e}")
 
