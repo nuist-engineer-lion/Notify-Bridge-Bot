@@ -15,7 +15,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-log = logging.getLogger("qq-redot")
+log = logging.getLogger("Notify-Bridge-Bot")
 
 # ================= 加载配置 =================
 
