@@ -165,7 +165,7 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         )
         message_id = response["message_id"]
         log.info("合并转发发送成功 -> 群 %d, message_id=%s", group_id, message_id)
-        asyncio.create_task(add_emoji_to_message(message_id, list(EMOJI_MAPPING.values())))
+        asyncio.create_task(add_emoji_to_message(message_id, [eid for cmd, eid in EMOJI_MAPPING.items() if cmd not in ("confirm", "cancel")]))
         return message_id
     except Exception as e:
         log.error("发送合并转发失败: %s", e, exc_info=True)

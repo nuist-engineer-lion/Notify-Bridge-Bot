@@ -165,4 +165,6 @@ emoji_mapping:
   close: 75 # 月亮
   more: 289 # 睁眼
   bye: 124  # OK
-  say: 123  # 举手
+  say: 123  # NO
+  confirm: 124  # OK（确认发送）
+  cancel: 96  # 冷汗（取消发送）
