@@ -21,96 +21,80 @@ from .models import (
     StateForwardData,
     StateDelayedNotification,
     AppState,
-    MessageRecord,
 )
 
 
-async def archive_session(user_id: int, pending_since: float, msg_ids: list[int] | None = None) -> None:
-    """获取双方完整对话历史并存档到本地 JSON 文件。
+def _simplify_message(msg: dict) -> dict:
+    """精简消息记录，保留完整 msg 段。"""
+    return {
+        "id": msg.get("message_id"),
+        "t": msg.get("time"),
+        "u": msg.get("sender", {}).get("user_id"),
+        "n": msg.get("sender", {}).get("nickname", ""),
+        "msg": msg.get("message", []),
+    }
 
-    优先使用 get_friend_msg_history 获取双方对话；若 API 返回空，
-    则降级为逐条拉取客户侧消息（msg_ids 参数作为保底）。
+
+async def archive_session(user_id: int, pending_since: float, msg_ids: list[int] | None = None) -> None:
+    """获取双方对话历史并以 JSONL 格式追加存档。
+
+    以 msg_ids 为基础逐条拉取客户消息（保证不遗漏），
+    再用 get_friend_msg_history 补充客服侧回复消息。
     """
     os.makedirs(ARCHIVE_DIR, exist_ok=True)
     from datetime import datetime
     date_str = datetime.fromtimestamp(pending_since).strftime("%Y%m%d")
-    filename = f"{user_id}_{date_str}.json"
-    filepath = os.path.join(ARCHIVE_DIR, filename)
+    filepath = os.path.join(ARCHIVE_DIR, f"{user_id}_{date_str}.jsonl")
 
     now = time.time()
+    seen_ids: set[int] = set()
+    messages: list[dict] = []
+    fetch_failed: list[int] = []
+
+    # 1) 逐条拉取已知的客户消息（保证每条都被记录）
+    if msg_ids:
+        for msg_id in msg_ids:
+            if msg_id in seen_ids:
+                continue
+            try:
+                msg_detail = await client.get_msg(message_id=str(msg_id))
+                seen_ids.add(msg_id)
+                messages.append(_simplify_message(msg_detail))
+            except Exception as e:
+                fetch_failed.append(msg_id)
+                log.error("拉取客户消息 %s 失败: %s", msg_id, e)
+        if fetch_failed:
+            log.warning("存档客户消息拉取失败 %d/%d 条: %s", len(fetch_failed), len(msg_ids), fetch_failed)
+
+    # 2) 从历史记录补充客服回复（以及可能遗漏的消息）
     try:
         resp = await client.get_friend_msg_history(
             user_id=str(user_id),
             count=500,
             parse_mult_msg=True,
         )
-        all_messages = resp.get("messages", [])
-        log.debug("客户 %d get_friend_msg_history 返回 %d 条消息", user_id, len(all_messages))
+        for msg in resp.get("messages", []):
+            mid = msg.get("message_id")
+            if mid is not None and mid not in seen_ids:
+                msg_time = msg.get("time", 0)
+                if msg_time >= pending_since and msg_time <= now:
+                    seen_ids.add(mid)
+                    messages.append(_simplify_message(msg))
     except Exception as e:
-        log.error(f"获取客户 {user_id} 历史消息失败: {e}")
-        all_messages = []
+        log.error("获取历史消息补充失败: %s", e)
 
-    messages_data: list[MessageRecord] = []
-    for msg in all_messages:
-        msg_time = msg.get("time", 0)
-        if msg_time < pending_since or msg_time > now:
-            continue
-        record: MessageRecord = {
-            "message_id": msg.get("message_id"),
-            "time": msg_time,
-            "sender_nickname": msg.get("sender", {}).get("nickname", ""),
-            "sender_id": msg.get("sender", {}).get("user_id"),
-            "message": msg.get("message", []),
-        }
-        messages_data.append(record)
-
-    if not messages_data and msg_ids:
-        log.warning("get_friend_msg_history 未覆盖到会话消息，降级逐条拉取 %d 条", len(msg_ids))
-        for msg_id in msg_ids:
-            try:
-                msg_detail = await client.get_msg(message_id=str(msg_id))
-                record: MessageRecord = {
-                    "message_id": msg_id,
-                    "time": msg_detail.get("time"),
-                    "sender_nickname": msg_detail.get("sender", {}).get("nickname", ""),
-                    "sender_id": msg_detail.get("sender", {}).get("user_id"),
-                    "message": msg_detail.get("message", []),
-                }
-                messages_data.append(record)
-            except Exception as e:
-                log.error(f"降级拉取消息 {msg_id} 失败: {e}")
-
-    if not messages_data:
+    if not messages:
         log.warning(f"存档跳过：客户 {user_id} 在会话窗口内无消息记录")
         return
 
-    messages_data.sort(key=lambda x: x.get("time", 0))
+    messages.sort(key=lambda x: x.get("t", 0))
 
-    session_record: MessageRecord = {
-        "session_closed_at": time.time(),
-        "pending_since": pending_since,
-        "pending_duration": time.time() - pending_since,
-        "message_count": len(messages_data),
-        "messages": messages_data,
-    }
-
-    existing_sessions: list[MessageRecord] = []
-    if os.path.exists(filepath):
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-                if isinstance(loaded, list):
-                    existing_sessions = cast(list[MessageRecord], loaded)
-        except Exception:
-            pass
-
-    existing_sessions.append(session_record)
     try:
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(existing_sessions, f, ensure_ascii=False, indent=2)
-        log.info(f"会话已存档: {filepath}")
-    except Exception as e:
-        log.error(f"会话存档写入失败: {e}")
+        with open(filepath, "a", encoding="utf-8") as f:
+            for msg in messages:
+                msg["_s"] = {"uid": user_id, "start": pending_since, "end": now, "dur": round(now - pending_since, 1)}
+                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        log.info(f"会话已存档: {filepath} ({len(messages)} 条消息)")
     except Exception as e:
         log.error(f"会话存档写入失败: {e}")
 
