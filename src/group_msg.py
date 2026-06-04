@@ -184,6 +184,18 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
     if eid is None or not is_add:
         return True
 
+    # 检查是否是 pending say 提示消息上的确认/取消
+    pending = pending_say.get(event.user_id)
+    if pending and mid == pending["prompt_msg_id"]:
+        cmd = EMOJI_TO_CMD.get(eid)
+        if cmd == "cancel":
+            pending_say.pop(event.user_id, None)
+            await client.send_group_msg(
+                group_id=str(gid),
+                message=[Reply(id=str(mid)), Text(text="❌ 已取消发送。")],
+            )
+        return True
+
     tracked_data = monitored_forwards.get(mid)
     if tracked_data is None:
         return True
@@ -199,11 +211,21 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
 
     try:
         if cmd == "say":
-            pending_say[event.user_id] = (customer_id, mid, gid)
-            await client.send_group_msg(
+            resp = await client.send_group_msg(
                 group_id=str(gid),
                 message=[Reply(id=str(mid)), Text(text="📝 请发送要回复给客户的消息内容：")],
             )
+            prompt_msg_id = resp.get("message_id")
+            pending_say[event.user_id] = {
+                "prompt_msg_id": prompt_msg_id,
+                "customer_id": customer_id,
+                "reply_id": mid,
+                "group_id": gid,
+            }
+            if prompt_msg_id:
+                await add_emoji_to_message(prompt_msg_id, [
+                    EMOJI_MAPPING["cancel"],
+                ])
         elif cmd == "close":
             feedback = await handle_close_command(gid, mid, customer_id)
             await send_and_track_feedback(gid, mid, feedback, customer_id)
@@ -215,7 +237,7 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
             if success:
                 if new_fwd_id:
                     track_forward_message(new_fwd_id, [customer_id], gid)
-                    await add_emoji_to_message(new_fwd_id, list(EMOJI_MAPPING.values()))
+                    await add_emoji_to_message(new_fwd_id, [eid for cmd, eid in EMOJI_MAPPING.items() if cmd != "cancel"])
                 if feedback:
                     await send_and_track_feedback(gid, mid, feedback, customer_id)
             else:
@@ -255,26 +277,26 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
     cmd_text = ''.join(cmd_parts).strip()
     log.debug("群命令: reply_id=%s, cmd=%s", reply_id, cmd_text)
 
-    # 检查是否处于等待 .say 内容的状态
+    # 检查是否处于等待 .say 内容的状态：收到消息立即发送
     if event.user_id in pending_say and not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help', '.close', '.list')):
-        customer_id, orig_reply_id, _ = pending_say.pop(event.user_id)
         segments = extract_sendable_segments(event.message)
         if not segments:
             await client.send_group_msg(
                 group_id=str(gid),
-                message=[Reply(id=str(msg_id)), Text(text="⚠️ 消息内容为空，已取消发送。")],
+                message=[Reply(id=str(msg_id)), Text(text="⚠️ 消息内容为空，已忽略。")],
             )
             return True
 
-        now = time.time()
-        key = (orig_reply_id, "say")
+        pending = pending_say.pop(event.user_id)
+        customer_id = pending["customer_id"]
+        orig_reply_id = pending["reply_id"]
         try:
             await client.send_private_msg(
                 user_id=str(customer_id),
                 message=segments,
             )
             closed = await close_session(customer_id, send_closing=False)
-            last_command_time[key] = now
+            last_command_time[(orig_reply_id, "say")] = time.time()
             feedback = f"✅ 已向客户 {customer_id} 发送消息。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
         except Exception as e:
             log.error("发送私聊消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
@@ -399,12 +421,22 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
     if cmd_text.startswith(".say"):
         segments = extract_sendable_segments(event.message, strip_prefix=".say")
         if not segments:
-            # 无内容：进入等待模式，侦听用户下一条消息
-            pending_say[event.user_id] = (customer_id, reply_id, gid)
-            await client.send_group_msg(
+            # 无内容：进入等待模式，收集用户后续消息
+            resp = await client.send_group_msg(
                 group_id=str(gid),
                 message=[Reply(id=str(msg_id)), Text(text="📝 请发送要回复给客户的消息内容：")],
             )
+            prompt_msg_id = resp.get("message_id")
+            pending_say[event.user_id] = {
+                "prompt_msg_id": prompt_msg_id,
+                "customer_id": customer_id,
+                "reply_id": reply_id,
+                "group_id": gid,
+            }
+            if prompt_msg_id:
+                await add_emoji_to_message(prompt_msg_id, [
+                    EMOJI_MAPPING["cancel"],
+                ])
             return True
 
         key = (reply_id, "say")
@@ -498,7 +530,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             last_command_time[key] = now
             if new_fwd_id:
                 track_forward_message(new_fwd_id, [customer_id], gid)
-                asyncio.create_task(add_emoji_to_message(new_fwd_id, list(EMOJI_MAPPING.values())))
+                asyncio.create_task(add_emoji_to_message(new_fwd_id, [eid for cmd, eid in EMOJI_MAPPING.items() if cmd != "cancel"]))
             if feedback:
                 asyncio.create_task(send_and_track_feedback(gid, msg_id, feedback, customer_id))
         else:
