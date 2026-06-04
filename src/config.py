@@ -83,7 +83,7 @@ FRIEND_COUNT_LIMIT = config.get("friend_count_limit", 3000)
 REPLY_DURATION_MAXLEN = config["reply_duration_maxlen"]
 AVAILABILITY = config["availability"]
 MAX_LISTEN_AGE = config.get("max_listen_age", 86400)   # 24小时
-EMOJI_MAPPING = config.get("emoji_mapping", {"close": 128, "more": 127, "bye": 100, "say": 144})
+EMOJI_MAPPING = config.get("emoji_mapping", {"close": 128, "more": 127, "bye": 100, "say": 123, "cancel": 32})
 EMOJI_TO_CMD = {v: k for k, v in EMOJI_MAPPING.items()}
 
 # ================= 夜间模式配置 =================
@@ -129,8 +129,8 @@ unreplied_customers: dict[int, CustomerData] = {}
 monitored_forward_order: deque[int] = deque()
 monitored_forwards: dict[int, ForwardMonitorData] = {}
 last_command_time: dict[tuple[int, str], float] = {}
-# 等待 .say 内容的用户：{user_id: (customer_id, reply_id, group_id)}
-pending_say: dict[int, tuple[int, int, int]] = {}
+# 等待 .say 内容的用户：{user_id: {prompt_msg_id, customer_id, reply_id, group_id}}
+pending_say: dict[int, dict] = {}
 
 # 夜间通知延后缓存
 delayed_notifications: list[DelayedNotification] = []
