@@ -188,9 +188,7 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
     pending = pending_say.get(event.user_id)
     if pending and mid == pending["prompt_msg_id"]:
         cmd = EMOJI_TO_CMD.get(eid)
-        if cmd == "confirm":
-            await _do_send_pending_say(event.user_id, gid, mid)
-        elif cmd == "cancel":
+        if cmd == "cancel":
             pending_say.pop(event.user_id, None)
             await client.send_group_msg(
                 group_id=str(gid),
@@ -223,11 +221,9 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
                 "customer_id": customer_id,
                 "reply_id": mid,
                 "group_id": gid,
-                "messages": [],
             }
             if prompt_msg_id:
                 await add_emoji_to_message(prompt_msg_id, [
-                    EMOJI_MAPPING["confirm"],
                     EMOJI_MAPPING["cancel"],
                 ])
         elif cmd == "close":
@@ -241,7 +237,7 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
             if success:
                 if new_fwd_id:
                     track_forward_message(new_fwd_id, [customer_id], gid)
-                    await add_emoji_to_message(new_fwd_id, [eid for cmd, eid in EMOJI_MAPPING.items() if cmd not in ("confirm", "cancel")])
+                    await add_emoji_to_message(new_fwd_id, [eid for cmd, eid in EMOJI_MAPPING.items() if cmd != "cancel"])
                 if feedback:
                     await send_and_track_feedback(gid, mid, feedback, customer_id)
             else:
@@ -250,44 +246,6 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
     except Exception:
         pass
     return True
-
-
-async def _do_send_pending_say(user_id: int, gid: int, reply_msg_id: int) -> None:
-    """发送 pending_say 中累积的消息给客户，并清理状态"""
-    pending = pending_say.pop(user_id, None)
-    if not pending:
-        return
-
-    messages = pending["messages"]
-    if not messages:
-        await client.send_group_msg(
-            group_id=str(gid),
-            message=[Reply(id=str(reply_msg_id)), Text(text="⚠️ 没有可发送的内容。")],
-        )
-        return
-
-    customer_id = pending["customer_id"]
-    orig_reply_id = pending["reply_id"]
-    try:
-        for segments in messages:
-            await client.send_private_msg(
-                user_id=str(customer_id),
-                message=segments,
-            )
-        closed = await close_session(customer_id, send_closing=False)
-        last_command_time[(orig_reply_id, "say")] = time.time()
-        feedback = f"✅ 已向客户 {customer_id} 发送消息。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
-    except Exception as e:
-        log.error("发送私聊消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
-        feedback = f"❌ 发送失败：{e}"
-
-    resp = await client.send_group_msg(
-        group_id=str(gid),
-        message=[Reply(id=str(reply_msg_id)), Text(text=feedback)],
-    )
-    feedback_msg_id = resp.get("message_id")
-    if feedback_msg_id:
-        track_forward_message(feedback_msg_id, [customer_id], gid)
 
 
 async def handle_group_poke(event: GroupPokeEvent) -> bool:
@@ -319,7 +277,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
     cmd_text = ''.join(cmd_parts).strip()
     log.debug("群命令: reply_id=%s, cmd=%s", reply_id, cmd_text)
 
-    # 检查是否处于等待 .say 内容的状态
+    # 检查是否处于等待 .say 内容的状态：收到消息立即发送
     if event.user_id in pending_say and not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help', '.close', '.list')):
         segments = extract_sendable_segments(event.message)
         if not segments:
@@ -329,8 +287,28 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             )
             return True
 
-        pending = pending_say[event.user_id]
-        pending["messages"].append(segments)
+        pending = pending_say.pop(event.user_id)
+        customer_id = pending["customer_id"]
+        orig_reply_id = pending["reply_id"]
+        try:
+            await client.send_private_msg(
+                user_id=str(customer_id),
+                message=segments,
+            )
+            closed = await close_session(customer_id, send_closing=False)
+            last_command_time[(orig_reply_id, "say")] = time.time()
+            feedback = f"✅ 已向客户 {customer_id} 发送消息。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
+        except Exception as e:
+            log.error("发送私聊消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
+            feedback = f"❌ 发送失败：{e}"
+
+        resp = await client.send_group_msg(
+            group_id=str(gid),
+            message=[Reply(id=str(msg_id)), Text(text=feedback)],
+        )
+        feedback_msg_id = resp.get("message_id")
+        if feedback_msg_id:
+            track_forward_message(feedback_msg_id, [customer_id], gid)
         return True
 
     if not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help', '.close', '.list')):
@@ -454,11 +432,9 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
                 "customer_id": customer_id,
                 "reply_id": reply_id,
                 "group_id": gid,
-                "messages": [],
             }
             if prompt_msg_id:
                 await add_emoji_to_message(prompt_msg_id, [
-                    EMOJI_MAPPING["confirm"],
                     EMOJI_MAPPING["cancel"],
                 ])
             return True
@@ -554,7 +530,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             last_command_time[key] = now
             if new_fwd_id:
                 track_forward_message(new_fwd_id, [customer_id], gid)
-                asyncio.create_task(add_emoji_to_message(new_fwd_id, [eid for cmd, eid in EMOJI_MAPPING.items() if cmd not in ("confirm", "cancel")]))
+                asyncio.create_task(add_emoji_to_message(new_fwd_id, [eid for cmd, eid in EMOJI_MAPPING.items() if cmd != "cancel"]))
             if feedback:
                 asyncio.create_task(send_and_track_feedback(gid, msg_id, feedback, customer_id))
         else:

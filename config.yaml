@@ -166,5 +166,4 @@ emoji_mapping:
   more: 289 # 睁眼
   bye: 124  # OK
   say: 123  # NO
-  confirm: 124  # OK（确认发送）
   cancel: 96  # 冷汗（取消发送）
