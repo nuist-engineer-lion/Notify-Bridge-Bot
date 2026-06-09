@@ -12,7 +12,6 @@ whitelist:
 
 # 迟滞里程碑（分钟）
 milestones:
-  - 5
   - 15
   - 30
   - 60
@@ -25,7 +24,7 @@ milestones:
   - 4320
 
 # 监听合并转发数量上限
-monitored_forward_limit: 10
+monitored_forward_limit: 15
 
 # 结束会话时发送的消息（支持多行）
 closing_message: |-
@@ -41,7 +40,7 @@ closing_message: |-
 #     data:
 #       file: "https://example.com/welcome.png"
 welcome_message: |-
-  [自动回复]您好，感谢您添加好友。清灰/换硅脂可添加活动通知群1087312046，按照发布的时间地点参加修机活动，目前无需预约
+  [自动回复]您好，感谢您添加好友。清灰/换硅脂/疑难问题解答等可添加活动通知群1087312046，按照发布的时间地点参加修机活动，目前无需预约
   如果你对修机师的活动感兴趣，也欢迎加入交流群：152300121
   如有其他问题可随时留言，我们会在工作时间尽快回复。
 
@@ -158,7 +157,7 @@ state_file: "archives/state.json"
 archive_dir: "archives"
 
 # 获取最近消息的最大时限（秒），用于构造合并转发
-recent_message_max_age: 7200
+recent_message_max_age: 86400  # 24 小时
 
 # 表情映射：命令 -> 表情ID（常用QQ表情ID）
 emoji_mapping:
