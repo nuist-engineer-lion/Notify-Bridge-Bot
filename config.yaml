@@ -70,7 +70,7 @@ reply_duration_maxlen: 1000
 # 成员可用时间段配置
 # 格式：qq号 -> 星期几 -> 时段列表（每个时段为 ["HH:MM", "HH:MM"]）
 availability:
-  234666220:   # yjx
+  2871584965:   # wsy
     monday:
       - ["00:00", "11:59"]
       - ["12:00", "23:59"]
@@ -80,7 +80,7 @@ availability:
     friday: []
     saturday: []
     sunday: []
-  1284656930:   # cz
+  234666220:   # yjx
     monday: []
     tuesday:
       - ["00:00", "11:59"]
@@ -142,7 +142,7 @@ availability:
       - ["12:00", "23:59"]
 
 # 过期监听消息保留时长（秒），用于清理
-max_listen_age: 86400  # 24 小时
+max_listen_age: 86405  # 24 小时
 
 # 夜间免打扰时段（新增）
 night_mode:
