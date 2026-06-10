@@ -278,6 +278,27 @@ uv run python main.py
 python main.py
 ```
 
+如果已经通过 wheel 或源码包安装，也可以直接运行：
+
+```bash
+notify-bridge-bot
+```
+
+如果配置文件不在当前工作目录，可通过环境变量指定。
+
+PowerShell:
+
+```bash
+$env:NOTIFY_BRIDGE_BOT_CONFIG = "D:\path\to\config.yaml"
+notify-bridge-bot
+```
+
+Bash:
+
+```bash
+NOTIFY_BRIDGE_BOT_CONFIG=/path/to/config.yaml notify-bridge-bot
+```
+
 启动后程序会：
 
 - 加载 `config.yaml`

@@ -1,6 +1,8 @@
 import time
 import logging
+import os
 from collections import deque
+from pathlib import Path
 
 import yaml
 
@@ -20,8 +22,32 @@ log = logging.getLogger("Notify-Bridge-Bot")
 # ================= 加载配置 =================
 
 
-def load_config(path: str = "config.yaml"):
-    with open(path, "r", encoding="utf-8") as f:
+def load_config(path: str | None = None):
+    candidates: list[Path] = []
+
+    if path:
+        candidates.append(Path(path))
+
+    env_path = os.getenv("NOTIFY_BRIDGE_BOT_CONFIG")
+    if env_path:
+        candidates.append(Path(env_path))
+
+    candidates.append(Path.cwd() / "config.yaml")
+
+    repo_root_config = Path(__file__).resolve().parents[1] / "config.yaml"
+    if repo_root_config not in candidates:
+        candidates.append(repo_root_config)
+
+    config_path = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if config_path is None:
+        searched = "\n".join(f"- {candidate}" for candidate in candidates)
+        raise FileNotFoundError(
+            "未找到配置文件 config.yaml。请在当前工作目录放置 config.yaml，"
+            "或设置环境变量 NOTIFY_BRIDGE_BOT_CONFIG 指向配置文件。\n"
+            f"已搜索路径:\n{searched}"
+        )
+
+    with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     # 转换 availability 中的时段列表为元组
     avail = {}
@@ -30,6 +56,7 @@ def load_config(path: str = "config.yaml"):
         for day, slots in days.items():
             avail[int(qq)][day] = [tuple(slot) for slot in slots]
     cfg["availability"] = avail
+    log.info("已加载配置文件: %s", config_path)
     return cfg
 
 
