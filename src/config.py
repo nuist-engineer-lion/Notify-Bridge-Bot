@@ -1,4 +1,3 @@
-import asyncio
 import time
 import logging
 import os
@@ -23,7 +22,6 @@ log = logging.getLogger("Notify-Bridge-Bot")
 
 # ================= 加载配置 =================
 CONFIG_PATH = "config.yaml"
-CONFIG_POLL_INTERVAL = 2.0
 RESTART_REQUIRED_KEYS = {"ws_url", "ws_token", "archive_dir", "state_file"}
 GIT_LOG_LIMIT = 8
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -205,11 +203,13 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     EMOJI_MAPPING = dict(config.get("emoji_mapping", {"close": 128, "more": 127, "bye": 100, "say": 123, "cancel": 32}))
     EMOJI_TO_CMD = {v: k for k, v in EMOJI_MAPPING.items()}
 
+    # ================= 夜间模式配置 =================
     NIGHT_MODE = dict(config.get("night_mode", {}))
     NIGHT_START = NIGHT_MODE.get("start", "22:00")
     NIGHT_END = NIGHT_MODE.get("end", "08:00")
     NIGHT_SUMMARY_TIME = NIGHT_MODE.get("summary_time", "08:00")
 
+    # ================= 可配置的存档与状态持久化 =================
     ARCHIVE_DIR = config.get("archive_dir", "archives")
     STATE_FILE = config.get("state_file", "state.json")
     RECENT_MESSAGE_MAX_AGE = config.get("recent_message_max_age", 86400)  # 默认1天
@@ -303,31 +303,57 @@ _failed_config_mtime: float | None = None
 _last_git_head = get_current_git_head()
 
 
-async def watch_config_loop(poll_interval: float = CONFIG_POLL_INTERVAL, path: str = CONFIG_PATH) -> None:
-    global _last_git_head
+def pull_updates() -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            ["git", "pull"],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+    except Exception as e:
+        return False, str(e)
 
-    log.info("配置热更新已启用，每 %.1f 秒检查一次 %s", poll_interval, path)
-    while True:
-        await asyncio.sleep(poll_interval)
-        reloaded = reload_config_if_changed(path)
-        if not reloaded:
-            continue
+    output = (result.stdout or "").strip()
+    error_output = (result.stderr or "").strip()
+    text = output if output else error_output
+    return result.returncode == 0, text
 
-        new_git_head = get_current_git_head()
-        git_update_message = build_git_update_message(_last_git_head, new_git_head)
-        _last_git_head = new_git_head
 
-        if not client.is_running:
-            continue
+def apply_config_reload_after_pull() -> tuple[bool, list[str], str | None]:
+    global _config_mtime, _failed_config_mtime
 
-        message_lines = ["🔄 配置热更新已生效"]
-        if git_update_message:
-            message_lines.extend(["", git_update_message])
+    current_mtime = _get_config_mtime(CONFIG_PATH)
+    restart_only_changes: list[str] = []
 
-        try:
-            await client.send_group_msg(
-                group_id=str(INTERNAL_GROUP_ID),
-                message="\n".join(message_lines),
-            )
-        except Exception as e:
-            log.warning("配置热更新通知发送失败: %s", e, exc_info=True)
+    try:
+        restart_only_changes = reload_config(CONFIG_PATH)
+    except Exception as e:
+        _failed_config_mtime = current_mtime
+        return False, [], str(e)
+
+    _config_mtime = current_mtime
+    _failed_config_mtime = None
+    return True, restart_only_changes, None
+
+
+async def run_update_cfg() -> tuple[bool, str]:
+    old_head = get_current_git_head()
+    success, pull_text = pull_updates()
+    if not success:
+        return False, f"❌ 更新失败：{pull_text}"
+
+    new_head = get_current_git_head()
+    git_update_message = build_git_update_message(old_head, new_head)
+    reload_ok, restart_only_changes, reload_error = apply_config_reload_after_pull()
+    if not reload_ok:
+        return False, f"❌ 配置重载失败：{reload_error}"
+
+    lines = ["🔄 配置更新已生效"]
+    if git_update_message:
+        lines.extend(["", git_update_message])
+    if restart_only_changes:
+        lines.extend(["", "以下配置需重启后生效：", ", ".join(sorted(restart_only_changes))])
+    return True, "\n".join(lines)

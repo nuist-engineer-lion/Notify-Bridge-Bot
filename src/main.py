@@ -26,7 +26,6 @@ async def main():
     load_state()
     startup_notified = False
     asyncio.create_task(monitor_loop())
-    asyncio.create_task(cfg.watch_config_loop())
 
     while True:
         log.info("正在连接 WebSocket...")
