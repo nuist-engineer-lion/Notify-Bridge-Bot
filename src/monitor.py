@@ -2,21 +2,16 @@ import time
 import asyncio
 from datetime import datetime, timedelta
 
+from . import config as cfg
 from .config import (
     log,
     INTERNAL_GROUP_ID,
     MILESTONES,
-    MAX_LISTEN_AGE,
-    NIGHT_START,
-    NIGHT_SUMMARY_TIME,
     PROCESSED_FRIEND_REQUESTS_EXPIRE,
     unreplied_customers,
-    monitored_forwards,
     processed_friend_requests,
     friend_approve_time,
     delayed_notifications,
-    last_night_summary_sent_date,
-    client,
 )
 from .models import CustomerData, DelayedNotification
 from .utils import is_night_time
@@ -25,18 +20,17 @@ from .state import save_state
 
 
 async def monitor_loop():
-    global last_night_summary_sent_date
     log.info("巡检任务已启动，每 60 秒执行一次")
     while True:
         await asyncio.sleep(60)
 
-        if not client.is_running:
+        if not cfg.client.is_running:
             log.debug("巡检跳过: 客户端未运行")
             continue
 
         # ===== 清理超时的监听消息 =====
         now = time.time()
-        to_remove = [mid for mid, data in monitored_forwards.items() if now - data["created_at"] > MAX_LISTEN_AGE]
+        to_remove = [mid for mid, data in cfg.monitored_forwards.items() if now - data["created_at"] > cfg.MAX_LISTEN_AGE]
         for mid in to_remove:
             pop_tracked_forward(mid)
         if to_remove:
@@ -113,7 +107,7 @@ async def monitor_loop():
             log.info("===== 巡检结束 =====")
 
         # ===== 夜间汇总发送检查 =====
-        summary_time = datetime.strptime(NIGHT_SUMMARY_TIME, "%H:%M").time()
+        summary_time = datetime.strptime(cfg.NIGHT_SUMMARY_TIME, "%H:%M").time()
         now_time = datetime.now().time()
         today_str = datetime.now().strftime("%Y%m%d")
 
@@ -127,7 +121,7 @@ async def monitor_loop():
         else:
             in_summary_window = now_time >= lower_bound or now_time <= upper_bound
 
-        if in_summary_window and last_night_summary_sent_date != today_str:
+        if in_summary_window and cfg.last_night_summary_sent_date != today_str:
             if delayed_notifications:
                 customers_aggregated: dict[int, CustomerData] = {}
                 for notif in delayed_notifications:
@@ -138,8 +132,8 @@ async def monitor_loop():
                     summary_text = f"🌙 夜间免打扰时段汇总：共有 {len(customers_list)} 名客户发来消息，请及时处理。"
 
                     # 计算覆盖整个夜间窗口所需的 max_age_seconds
-                    night_start_t = datetime.strptime(NIGHT_START, "%H:%M").time()
-                    night_summary_t = datetime.strptime(NIGHT_SUMMARY_TIME, "%H:%M").time()
+                    night_start_t = datetime.strptime(cfg.NIGHT_START, "%H:%M").time()
+                    night_summary_t = datetime.strptime(cfg.NIGHT_SUMMARY_TIME, "%H:%M").time()
                     night_start_dt = datetime.combine(datetime.today(), night_start_t)
                     night_summary_dt = datetime.combine(datetime.today(), night_summary_t)
                     if night_summary_dt <= night_start_dt:
@@ -154,12 +148,11 @@ async def monitor_loop():
             else:
                 log.debug("夜间汇总时间到，但无延后通知")
 
-            import src.config as cfg
             cfg.last_night_summary_sent_date = today_str
 
             # 夜间模式结束后刷新好友人数
             try:
-                friend_list = await client.send(
+                friend_list = await cfg.client.send(
                     {"action": "get_friend_list", "params": {}},
                     timeout=30.0,
                 )

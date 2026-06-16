@@ -12,17 +12,10 @@ from napcat import (
     Reply,
 )
 
+from . import config as cfg
 from .config import (
     log,
     STARTED_AT,
-    INTERNAL_GROUP_ID,
-    CLOSING_MESSAGE,
-    MONITORED_FORWARD_LIMIT,
-    EMOJI_MAPPING,
-    RECENT_MESSAGE_MAX_AGE,
-    reply_durations,
-    unreplied_customers,
-    monitored_forwards,
     monitored_forward_order,
     last_command_time,
     client,
@@ -41,12 +34,14 @@ def serialize_message_segments(segments: list[Message]) -> list[dict]:
 
 # ======================= 历史消息获取 =======================
 
-async def get_recent_message_ids(user_id: int, count: int = 200, max_age_seconds: int = RECENT_MESSAGE_MAX_AGE) -> list[int]:
+async def get_recent_message_ids(user_id: int, count: int = 200, max_age_seconds: int | None = None) -> list[int]:
     """
     通过 API 获取与指定用户的最近消息，筛选出最近 max_age_seconds 秒内的消息（双方消息）。
     返回按时间正序排列的 message_id 列表。
     """
     now = time.time()
+    if max_age_seconds is None:
+        max_age_seconds = cfg.RECENT_MESSAGE_MAX_AGE
     try:
         resp = await client.get_friend_msg_history(
             user_id=str(user_id),
@@ -73,22 +68,22 @@ async def get_recent_message_ids(user_id: int, count: int = 200, max_age_seconds
 # ======================= 合并转发监听管理 =======================
 
 def track_forward_message(message_id: int, customer_ids: list[int], group_id: int) -> None:
-    if message_id in monitored_forwards:
+    if message_id in cfg.monitored_forwards:
         try:
             monitored_forward_order.remove(message_id)
         except ValueError:
             pass
 
     monitored_forward_order.append(message_id)
-    monitored_forwards[message_id] = {
+    cfg.monitored_forwards[message_id] = {
         "customer_ids": customer_ids,
         "group_id": group_id,
         "created_at": time.time(),
     }
 
-    while len(monitored_forward_order) > MONITORED_FORWARD_LIMIT:
+    while len(monitored_forward_order) > cfg.MONITORED_FORWARD_LIMIT:
         expired_id = monitored_forward_order.popleft()
-        monitored_forwards.pop(expired_id, None)
+        cfg.monitored_forwards.pop(expired_id, None)
 
     log.debug("监听合并转发已更新: message_id=%s, 当前监听数=%d", message_id, len(monitored_forward_order))
     save_state()
@@ -96,7 +91,7 @@ def track_forward_message(message_id: int, customer_ids: list[int], group_id: in
 
 def pop_tracked_forward(message_id: int) -> dict | None:
     """移除监听的合并转发，并清理其防抖记录"""
-    data = monitored_forwards.pop(message_id, None)
+    data = cfg.monitored_forwards.pop(message_id, None)
     if data is None:
         return None
 
@@ -120,7 +115,7 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
     构造嵌套合并转发并发送，每个客户的消息通过 get_recent_message_ids 获取最近指定时间内的消息
     """
     if max_age_seconds is None:
-        max_age_seconds = RECENT_MESSAGE_MAX_AGE
+        max_age_seconds = cfg.RECENT_MESSAGE_MAX_AGE
 
     if not customer_list:
         log.debug("send_nested_forward: customer_list 为空，跳过发送")
@@ -165,7 +160,7 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         )
         message_id = response["message_id"]
         log.info("合并转发发送成功 -> 群 %d, message_id=%s", group_id, message_id)
-        asyncio.create_task(add_emoji_to_message(message_id, [eid for cmd, eid in EMOJI_MAPPING.items() if cmd != "cancel"]))
+        asyncio.create_task(add_emoji_to_message(message_id, [eid for cmd, eid in cfg.EMOJI_MAPPING.items() if cmd != "cancel"]))
         return message_id
     except Exception as e:
         log.error("发送合并转发失败: %s", e, exc_info=True)
@@ -263,13 +258,13 @@ async def close_session(user_id: int, send_closing: bool = False) -> bool:
     如果 send_closing=True，则向该客户发送结束语。
     返回是否成功结束（即客户原本在队列中）。
     """
-    data = unreplied_customers.pop(user_id, None)
+    data = cfg.unreplied_customers.pop(user_id, None)
     if data is None:
         return False
 
     pending = data["pending_since"]
     elapsed = time.time() - pending
-    reply_durations.append(elapsed)
+    cfg.reply_durations.append(elapsed)
     log.info("会话结束: user_id=%s, 耗时=%.1f秒", user_id, elapsed)
 
     asyncio.create_task(archive_session(user_id, pending, data["msg_ids"]))
@@ -278,7 +273,7 @@ async def close_session(user_id: int, send_closing: bool = False) -> bool:
         try:
             await client.send_private_msg(
                 user_id=str(user_id),
-                message=CLOSING_MESSAGE,
+                message=cfg.CLOSING_MESSAGE,
             )
             log.info("自动发送结束语成功: user_id=%s", user_id)
         except Exception as e:
@@ -293,18 +288,18 @@ async def send_status_panel(group_id: int):
     uptime = time.time() - STARTED_AT
     uptime_str = format_duration(uptime)
 
-    pending_count = len(unreplied_customers)
-    total_replies = len(reply_durations)
+    pending_count = len(cfg.unreplied_customers)
+    total_replies = len(cfg.reply_durations)
 
     if total_replies > 0:
-        min_str = format_duration(min(reply_durations))
-        max_str = format_duration(max(reply_durations))
-        avg_str = format_duration(statistics.mean(reply_durations))
-        median_str = format_duration(statistics.median(reply_durations))
+        min_str = format_duration(min(cfg.reply_durations))
+        max_str = format_duration(max(cfg.reply_durations))
+        avg_str = format_duration(statistics.mean(cfg.reply_durations))
+        median_str = format_duration(statistics.median(cfg.reply_durations))
     else:
         min_str = max_str = avg_str = median_str = "暂无数据"
 
-    monitored_count = len(monitored_forwards)
+    monitored_count = len(cfg.monitored_forwards)
 
     panel = (
         "🤖 机器人状态面板\n"

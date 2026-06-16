@@ -3,16 +3,13 @@ import json
 import os
 from typing import cast
 
+from . import config as cfg
 from .config import (
     log,
-    ARCHIVE_DIR,
-    STATE_FILE,
     unreplied_customers,
-    monitored_forwards,
     monitored_forward_order,
     last_command_time,
     delayed_notifications,
-    last_night_summary_sent_date,
     client,
 )
 from .models import (
@@ -41,10 +38,10 @@ async def archive_session(user_id: int, pending_since: float, msg_ids: list[int]
     以 msg_ids 为基础逐条拉取客户消息（保证不遗漏），
     再用 get_friend_msg_history 补充客服侧回复消息。
     """
-    os.makedirs(ARCHIVE_DIR, exist_ok=True)
+    os.makedirs(cfg.ARCHIVE_DIR, exist_ok=True)
     from datetime import datetime
     date_str = datetime.fromtimestamp(pending_since).strftime("%Y%m%d")
-    filepath = os.path.join(ARCHIVE_DIR, f"{user_id}_{date_str}.jsonl")
+    filepath = os.path.join(cfg.ARCHIVE_DIR, f"{user_id}_{date_str}.jsonl")
 
     now = time.time()
     seen_ids: set[int] = set()
@@ -114,7 +111,7 @@ def save_state() -> None:
 
     # 转换 monitored_forwards 的键为字符串
     serializable_forwards: dict[str, StateForwardData] = {
-        str(mid): data for mid, data in monitored_forwards.items()
+        str(mid): data for mid, data in cfg.monitored_forwards.items()
     }
 
     # 转换 last_command_time 的键为字符串
@@ -148,27 +145,26 @@ def save_state() -> None:
         "monitored_forward_order": list(monitored_forward_order),
         "last_command_time": serializable_last_cmd,
         "delayed_notifications": serializable_delayed,
-        "last_night_summary_sent_date": last_night_summary_sent_date,
+        "last_night_summary_sent_date": cfg.last_night_summary_sent_date,
     }
 
     try:
-        os.makedirs(os.path.dirname(STATE_FILE) or ".", exist_ok=True)
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
+        os.makedirs(os.path.dirname(cfg.STATE_FILE) or ".", exist_ok=True)
+        with open(cfg.STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
-        log.debug("状态已保存至 %s", STATE_FILE)
+        log.debug("状态已保存至 %s", cfg.STATE_FILE)
     except Exception as e:
         log.error("状态保存失败: %s", e, exc_info=True)
 
 
 def load_state() -> None:
     """从本地文件恢复状态"""
-    global last_night_summary_sent_date
-    if not os.path.exists(STATE_FILE):
-        log.info("未找到状态文件 %s，将使用全新状态启动", STATE_FILE)
+    if not os.path.exists(cfg.STATE_FILE):
+        log.info("未找到状态文件 %s，将使用全新状态启动", cfg.STATE_FILE)
         return
 
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+        with open(cfg.STATE_FILE, "r", encoding="utf-8") as f:
             raw = json.load(f)
         # 使用 TypedDict 进行类型断言
         state = cast(AppState, raw)
@@ -188,16 +184,19 @@ def load_state() -> None:
         }
 
     # 恢复 monitored_forwards
+    cfg.monitored_forwards.clear()
     for mid_str, fwd_state in state.get("monitored_forwards", {}).items():
         mid = int(mid_str)
-        monitored_forwards[mid] = {
+        cfg.monitored_forwards[mid] = {
             "customer_ids": fwd_state["customer_ids"],
             "group_id": fwd_state["group_id"],
             "created_at": fwd_state["created_at"],
         }
+    monitored_forward_order.clear()
     monitored_forward_order.extend(state.get("monitored_forward_order", []))
 
     # 恢复 last_command_time
+    last_command_time.clear()
     for key_str, ts in state.get("last_command_time", {}).items():
         parts = key_str.split("_")
         if len(parts) == 2:
@@ -206,6 +205,7 @@ def load_state() -> None:
             last_command_time[(msg_id, cmd)] = ts
 
     # 恢复 delayed_notifications
+    delayed_notifications.clear()
     for notif_state in state.get("delayed_notifications", []):
         customers: list[tuple[int, CustomerData]] = []
         for qq, cust_state in notif_state["customers"]:
@@ -225,8 +225,7 @@ def load_state() -> None:
         })
 
     # 使用 global 声明以修改模块级变量
-    import src.config as cfg
     cfg.last_night_summary_sent_date = state.get("last_night_summary_sent_date", "")
 
     log.info("状态恢复完成：待回复客户 %d 人，监听转发 %d 条",
-             len(unreplied_customers), len(monitored_forwards))
+             len(unreplied_customers), len(cfg.monitored_forwards))
