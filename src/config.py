@@ -68,6 +68,19 @@ def _run_git_command(args: list[str]) -> str | None:
     return result.stdout.strip()
 
 
+def _combine_command_output(stdout: str | None, stderr: str | None) -> str:
+    parts = []
+    if stdout:
+        stdout = stdout.strip()
+        if stdout:
+            parts.append(stdout)
+    if stderr:
+        stderr = stderr.strip()
+        if stderr:
+            parts.append(stderr)
+    return "\n".join(parts)
+
+
 def get_current_git_head() -> str | None:
     return _run_git_command(["rev-parse", "HEAD"])
 
@@ -300,10 +313,7 @@ _apply_config(load_config(CONFIG_PATH), initial=True)
 client: NapCatClient = NapCatClient(WS_URL, WS_TOKEN)
 _config_mtime = _get_config_mtime(CONFIG_PATH)
 _failed_config_mtime: float | None = None
-_last_git_head = get_current_git_head()
-
-
-def pull_updates() -> tuple[bool, str]:
+def pull_updates() -> tuple[int, str]:
     try:
         result = subprocess.run(
             ["git", "pull"],
@@ -314,12 +324,10 @@ def pull_updates() -> tuple[bool, str]:
             encoding="utf-8",
         )
     except Exception as e:
-        return False, str(e)
+        return -1, str(e)
 
-    output = (result.stdout or "").strip()
-    error_output = (result.stderr or "").strip()
-    text = output if output else error_output
-    return result.returncode == 0, text
+    text = _combine_command_output(result.stdout, result.stderr)
+    return result.returncode, text
 
 
 def apply_config_reload_after_pull() -> tuple[bool, list[str], str | None]:
@@ -342,15 +350,24 @@ def apply_config_reload_after_pull() -> tuple[bool, list[str], str | None]:
 async def run_update_cfg() -> tuple[bool, str]:
     old_head = get_current_git_head()
     log.info(".update cfg 开始执行: old_head=%s", old_head)
-    success, pull_text = pull_updates()
-    if not success:
-        log.error(".update cfg 执行 git pull 失败: %s", pull_text)
+    pull_returncode, pull_text = pull_updates()
+    new_head = get_current_git_head()
+    head_changed = bool(old_head and new_head and old_head != new_head)
+    if pull_returncode != 0 and not head_changed:
+        log.error(".update cfg 执行 git pull 失败: code=%s, output=%s", pull_returncode, pull_text)
         return False, f"❌ 更新失败：{pull_text}"
 
-    new_head = get_current_git_head()
-    log.info(".update cfg git pull 完成: old_head=%s, new_head=%s", old_head, new_head)
+    if pull_returncode != 0:
+        log.warning(
+            ".update cfg git pull 返回非零，但 HEAD 已变化: code=%s, old_head=%s, new_head=%s",
+            pull_returncode,
+            old_head,
+            new_head,
+        )
+    else:
+        log.info(".update cfg git pull 完成: old_head=%s, new_head=%s", old_head, new_head)
     if pull_text:
-        log.info(".update cfg git pull 输出: %s", pull_text)
+        log.info(".update cfg git pull 输出: code=%s, output=%s", pull_returncode, pull_text)
     git_update_message = build_git_update_message(old_head, new_head)
     reload_ok, restart_only_changes, reload_error = apply_config_reload_after_pull()
     if not reload_ok:
