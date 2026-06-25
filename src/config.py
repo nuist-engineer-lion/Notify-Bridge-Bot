@@ -341,15 +341,22 @@ def apply_config_reload_after_pull() -> tuple[bool, list[str], str | None]:
 
 async def run_update_cfg() -> tuple[bool, str]:
     old_head = get_current_git_head()
+    log.info(".update cfg 开始执行: old_head=%s", old_head)
     success, pull_text = pull_updates()
     if not success:
+        log.error(".update cfg 执行 git pull 失败: %s", pull_text)
         return False, f"❌ 更新失败：{pull_text}"
 
     new_head = get_current_git_head()
+    log.info(".update cfg git pull 完成: old_head=%s, new_head=%s", old_head, new_head)
+    if pull_text:
+        log.info(".update cfg git pull 输出: %s", pull_text)
     git_update_message = build_git_update_message(old_head, new_head)
     reload_ok, restart_only_changes, reload_error = apply_config_reload_after_pull()
     if not reload_ok:
+        log.error(".update cfg 配置重载失败: %s", reload_error)
         return False, f"❌ 配置重载失败：{reload_error}"
+    log.info(".update cfg 配置重载完成: restart_only_changes=%s", restart_only_changes)
 
     lines = ["🔄 配置更新已生效"]
     if git_update_message:

@@ -381,6 +381,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
 
     elif cmd_text.startswith(".update"):
         arg = cmd_text[len(".update"):].strip()
+        log.info(".update 命令触发: user_id=%s, group_id=%s, arg=%s", event.user_id, gid, arg)
         if arg != "cfg":
             await cfg.client.send_group_msg(
                 group_id=str(gid),
@@ -389,6 +390,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             return True
 
         success, update_message = await cfg.run_update_cfg()
+        log.info(".update cfg 执行结束: success=%s", success)
         await cfg.client.send_group_msg(
             group_id=str(gid),
             message=[Reply(id=str(msg_id)), Text(text=update_message)],
