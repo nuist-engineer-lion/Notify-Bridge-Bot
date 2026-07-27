@@ -267,7 +267,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
     log.debug("群命令: reply_id=%s, cmd=%s", reply_id, cmd_text)
 
     # 检查是否处于等待 .say 内容的状态：收到消息立即发送
-    if event.user_id in cfg.pending_say and not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help', '.close', '.list', '.update')):
+    if event.user_id in cfg.pending_say and not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help', '.close', '.list', '.reload', '.update')):
         segments = extract_sendable_segments(event.message)
         if not segments:
             await cfg.client.send_group_msg(
@@ -300,7 +300,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             track_forward_message(feedback_msg_id, [customer_id], gid)
         return True
 
-    if not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help', '.close', '.list', '.update')):
+    if not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help', '.close', '.list', '.reload', '.update')):
         return True
 
     if cmd_text.startswith(".help"):
@@ -311,7 +311,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             "• .close – 关闭会话但不发送结束语\n"
             "• .more – 获取客户的最近100条历史消息\n"
             "• .list – 列出所有未回复客户及其等待时间\n"
-            "• .update cfg – 在根目录执行 git pull 并重载配置\n"
+            "• .reload cfg – 重载当前明文配置（不拉代码、不展示内容）\n"
             "• .help – 显示此帮助信息\n"
             "\n"
             "使用方法：回复一条合并转发消息，然后输入对应命令。"
@@ -379,18 +379,24 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             log.error("发送 .list 结果失败: %s", e, exc_info=True)
         return True
 
-    elif cmd_text.startswith(".update"):
-        arg = cmd_text[len(".update"):].strip()
-        log.info(".update 命令触发: user_id=%s, group_id=%s, arg=%s", event.user_id, gid, arg)
+    elif cmd_text.startswith((".reload", ".update")):
+        raw = cmd_text[1:]  # drop leading dot
+        if raw.startswith("reload"):
+            arg = raw[len("reload"):].strip()
+            cmd_name = ".reload"
+        else:
+            arg = raw[len("update"):].strip()
+            cmd_name = ".update"
+        log.info("%s 命令触发: user_id=%s, group_id=%s, arg=%s", cmd_name, event.user_id, gid, arg)
         if arg != "cfg":
             await cfg.client.send_group_msg(
                 group_id=str(gid),
-                message=[Reply(id=str(msg_id)), Text(text="❌ 仅支持 .update cfg")],
+                message=[Reply(id=str(msg_id)), Text(text="❌ 仅支持 .reload cfg")],
             )
             return True
 
-        success, update_message = await cfg.run_update_cfg()
-        log.info(".update cfg 执行结束: success=%s", success)
+        success, update_message = await cfg.run_reload_cfg()
+        log.info("%s cfg 执行结束: success=%s", cmd_name, success)
         await cfg.client.send_group_msg(
             group_id=str(gid),
             message=[Reply(id=str(msg_id)), Text(text=update_message)],

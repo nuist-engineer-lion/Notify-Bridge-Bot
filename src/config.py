@@ -1,4 +1,5 @@
 import time
+import json
 import logging
 import os
 import subprocess
@@ -22,6 +23,7 @@ log = logging.getLogger("Notify-Bridge-Bot")
 
 # ================= 加载配置 =================
 CONFIG_PATH = "config.yaml"
+RELOAD_STATUS_PATH = "archives/reload-status.json"
 RESTART_REQUIRED_KEYS = {"ws_url", "ws_token", "archive_dir", "state_file"}
 GIT_LOG_LIMIT = 8
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -255,15 +257,17 @@ def reload_config_if_changed(path: str = CONFIG_PATH) -> bool:
         if _failed_config_mtime != current_mtime:
             log.error("配置重载失败，继续沿用旧配置: %s", e, exc_info=True)
             _failed_config_mtime = current_mtime
+        write_reload_status(ok=False, source="mtime_watch", error=str(e))
         return False
 
     _config_mtime = current_mtime
     _failed_config_mtime = None
+    write_reload_status(ok=True, source="mtime_watch", restart_only_changes=restart_only_changes)
 
     if restart_only_changes:
         log.warning("配置文件已重载，但以下配置需重启后生效: %s", ", ".join(sorted(restart_only_changes)))
     else:
-        log.info("配置文件已热更新生效")
+        log.info("配置文件已重载并生效")
     return True
 
 
@@ -309,75 +313,90 @@ last_night_summary_sent_date: str = ""
 
 _apply_config(load_config(CONFIG_PATH), initial=True)
 
-# 客户端对象
 client: NapCatClient = NapCatClient(WS_URL, WS_TOKEN)
 _config_mtime = _get_config_mtime(CONFIG_PATH)
 _failed_config_mtime: float | None = None
-def pull_updates() -> tuple[int, str]:
-    try:
-        result = subprocess.run(
-            ["git", "pull"],
-            cwd=REPO_ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
-    except Exception as e:
-        return -1, str(e)
-
-    text = _combine_command_output(result.stdout, result.stderr)
-    return result.returncode, text
 
 
-def apply_config_reload_after_pull() -> tuple[bool, list[str], str | None]:
+def _reload_status_file() -> str:
+    return os.path.join(REPO_ROOT, RELOAD_STATUS_PATH)
+
+
+def write_reload_status(
+    *,
+    ok: bool,
+    source: str,
+    restart_only_changes: list[str] | None = None,
+    error: str | None = None,
+) -> None:
+    """Write a small status file for deploy verification / ops checks."""
+    payload = {
+        "ok": ok,
+        "source": source,
+        "timestamp": time.time(),
+        "restart_only_changes": list(restart_only_changes or []),
+        "error": error,
+        "config_mtime": _get_config_mtime(CONFIG_PATH),
+    }
+    status_path = _reload_status_file()
+    os.makedirs(os.path.dirname(status_path), exist_ok=True)
+    tmp_path = f"{status_path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp_path, status_path)
+
+
+def force_reload_config(path: str = CONFIG_PATH, *, source: str = "manual") -> tuple[bool, list[str], str | None]:
+    """Reload config.yaml from disk without git pull/decrypt."""
     global _config_mtime, _failed_config_mtime
 
-    current_mtime = _get_config_mtime(CONFIG_PATH)
-    restart_only_changes: list[str] = []
+    current_mtime = _get_config_mtime(path)
+    if current_mtime is None:
+        err = f"config file not found: {path}"
+        write_reload_status(ok=False, source=source, error=err)
+        return False, [], err
 
     try:
-        restart_only_changes = reload_config(CONFIG_PATH)
+        restart_only_changes = reload_config(path)
     except Exception as e:
         _failed_config_mtime = current_mtime
-        return False, [], str(e)
+        err = str(e)
+        log.error("配置重载失败，继续沿用旧配置: %s", e, exc_info=True)
+        write_reload_status(ok=False, source=source, error=err)
+        return False, [], err
 
     _config_mtime = current_mtime
     _failed_config_mtime = None
+    write_reload_status(ok=True, source=source, restart_only_changes=restart_only_changes)
+    if restart_only_changes:
+        log.warning(
+            "配置文件已重载，但以下配置需重启后生效: %s",
+            ", ".join(sorted(restart_only_changes)),
+        )
+    else:
+        log.info("配置文件已重载并生效 (source=%s)", source)
     return True, restart_only_changes, None
 
 
-async def run_update_cfg() -> tuple[bool, str]:
-    old_head = get_current_git_head()
-    log.info(".update cfg 开始执行: old_head=%s", old_head)
-    pull_returncode, pull_text = pull_updates()
-    new_head = get_current_git_head()
-    head_changed = bool(old_head and new_head and old_head != new_head)
-    if pull_returncode != 0 and not head_changed:
-        log.error(".update cfg 执行 git pull 失败: code=%s, output=%s", pull_returncode, pull_text)
-        return False, f"❌ 更新失败：{pull_text}"
+def maybe_reload_config_from_disk() -> bool:
+    """Poll config mtime and reload when the plaintext file changes."""
+    return reload_config_if_changed()
 
-    if pull_returncode != 0:
-        log.warning(
-            ".update cfg git pull 返回非零，但 HEAD 已变化: code=%s, old_head=%s, new_head=%s",
-            pull_returncode,
-            old_head,
-            new_head,
-        )
-    else:
-        log.info(".update cfg git pull 完成: old_head=%s, new_head=%s", old_head, new_head)
-    if pull_text:
-        log.info(".update cfg git pull 输出: code=%s, output=%s", pull_returncode, pull_text)
-    git_update_message = build_git_update_message(old_head, new_head)
-    reload_ok, restart_only_changes, reload_error = apply_config_reload_after_pull()
-    if not reload_ok:
-        log.error(".update cfg 配置重载失败: %s", reload_error)
-        return False, f"❌ 配置重载失败：{reload_error}"
-    log.info(".update cfg 配置重载完成: restart_only_changes=%s", restart_only_changes)
 
-    lines = ["🔄 配置更新已生效"]
-    if git_update_message:
-        lines.extend(["", git_update_message])
+async def run_reload_cfg() -> tuple[bool, str]:
+    """Group-command entry: reload local plaintext config only."""
+    log.info(".reload cfg 开始执行")
+    ok, restart_only_changes, error = force_reload_config(source="group_command")
+    if not ok:
+        log.error(".reload cfg 失败: %s", error)
+        return False, f"❌ 配置重载失败：{error}"
+
+    lines = ["🔄 配置已重载"]
     if restart_only_changes:
-        lines.extend(["", "以下配置需重启后生效：", ", ".join(sorted(restart_only_changes))])
+        lines.extend([
+            "",
+            "以下配置需重启后生效：",
+            ", ".join(sorted(restart_only_changes)),
+        ])
     return True, "\n".join(lines)

@@ -28,6 +28,13 @@ async def monitor_loop():
             log.debug("巡检跳过: 客户端未运行")
             continue
 
+
+        # 检测明文配置是否被远端解密更新
+        try:
+            cfg.maybe_reload_config_from_disk()
+        except Exception as e:
+            log.error("巡检配置热重载异常: %s", e, exc_info=True)
+
         # ===== 清理超时的监听消息 =====
         now = time.time()
         to_remove = [mid for mid, data in cfg.monitored_forwards.items() if now - data["created_at"] > cfg.MAX_LISTEN_AGE]

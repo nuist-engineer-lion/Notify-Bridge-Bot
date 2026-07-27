@@ -1,0 +1,84 @@
+# WebSocket 连接配置
+ws_url: "ws://127.0.0.1:3001"
+ws_token: "your_ws_token"
+
+# 内部客服通知群号
+internal_group_id: 123456789
+
+# 免监控白名单（列表）
+whitelist:
+  - 123456789
+  - 987654321
+
+# 迟滞里程碑（分钟）
+milestones:
+  - 15
+  - 30
+  - 60
+  - 120
+  - 180
+  - 360
+  - 720
+  - 1440
+  - 2880
+  - 4320
+
+# 监听合并转发数量上限
+monitored_forward_limit: 15
+
+# 结束会话时发送的消息（支持多行）
+closing_message: |-
+  本次会话暂时结束。感谢您的支持与信任，再见。（请勿回复）
+
+# 新好友通过申请后发送的欢迎消息（支持多行）
+# 可以是纯文本字符串，也可以是结构化消息列表，例如：
+# welcome_message:
+#   - type: text
+#     data:
+#       text: "您好，感谢您添加好友。"
+#   - type: image
+#     data:
+#       file: "https://example.com/welcome.png"
+welcome_message: |-
+  [自动回复]您好，感谢您添加好友。清灰/换硅脂/疑难问题解答等可添加活动通知群1000000000，按照发布的时间地点参加修机活动，目前无需预约
+  如果你对修机师的活动感兴趣，也欢迎加入交流群：1000000001
+  如有其他问题可随时留言，我们会在工作时间尽快回复。
+  附：本学期修机活动已封箱
+
+# 各命令防抖间隔（秒）
+debounce_seconds:
+  say: 5
+  more: 5
+  bye: 5
+  close: 5
+  list: 5
+# 好友申请去重缓存时间（秒）
+processed_friend_requests_expire: 5
+
+# 好友通过后发送欢迎消息的延迟（秒），等待好友关系生效
+friend_welcome_delay: 5
+
+# 欢迎消息发送失败后重试
+friend_welcome_retries: 3
+friend_welcome_retry_interval: 3
+
+# 好友数量上限，达到时在群通知中附加警告
+friend_count_limit: 3000
+
+# 回复耗时记录最大保留条数
+reply_duration_maxlen: 1000
+
+# 成员可用时间段配置
+# 格式：qq号 -> 星期几 -> 时段列表（每个时段为 ["HH:MM", "HH:MM"]）
+availability:
+  123456789:   # example duty member
+    monday:
+      - ["09:00", "12:00"]
+      - ["13:00", "18:00"]
+    tuesday: []
+    wednesday: []
+    thursday: []
+    friday: []
+    saturday: []
+    sunday: []
+

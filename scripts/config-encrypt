@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+PLAINTEXT="${1:-config.yaml}"
+CIPHERTEXT="${2:-config.yaml.enc}"
+SOPS_BIN="${SOPS_BIN:-sops}"
+
+if [[ ! -f "$PLAINTEXT" ]]; then
+  echo "error: plaintext config not found: $PLAINTEXT" >&2
+  echo "Copy config.example.yaml to config.yaml and edit it first." >&2
+  exit 1
+fi
+
+if ! command -v "$SOPS_BIN" >/dev/null 2>&1; then
+  echo "error: sops not found in PATH (SOPS_BIN=$SOPS_BIN)" >&2
+  exit 1
+fi
+
+if [[ ! -f .sops.yaml ]]; then
+  echo "error: .sops.yaml missing" >&2
+  exit 1
+fi
+
+tmp="$(mktemp "${CIPHERTEXT}.tmp.XXXXXX")"
+cleanup() { rm -f "$tmp"; }
+trap cleanup EXIT
+
+# Whole-file encrypt (binary) so YAML integer map keys under availability are supported.
+"$SOPS_BIN" --encrypt --input-type binary --output-type yaml "$PLAINTEXT" >"$tmp"
+mv "$tmp" "$CIPHERTEXT"
+trap - EXIT
+echo "wrote $CIPHERTEXT"
