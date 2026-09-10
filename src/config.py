@@ -96,6 +96,8 @@ NIGHT_SUMMARY_TIME = NIGHT_MODE.get("summary_time", "08:00")
 ARCHIVE_DIR = config.get("archive_dir", "archives")
 STATE_FILE = config.get("state_file", "state.json")
 RECENT_MESSAGE_MAX_AGE = config.get("recent_message_max_age", 86400)  # 默认1天
+# 会话库保留期（天），0 = 永久保留；超期会话及其事件由巡检任务定期清理
+ARCHIVE_RETENTION_DAYS = int(config.get("archive_retention_days", 0))
 
 # ================= 星期映射 =================
 WEEKDAY_MAP = {

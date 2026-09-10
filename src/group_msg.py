@@ -32,6 +32,7 @@ from .message_sender import (
     track_forward_message,
     add_emoji_to_message,
 )
+from . import history
 
 
 # ======================= 昵称批量获取 =======================
@@ -96,24 +97,30 @@ async def resolve_target_from_reply(reply_id: int) -> tuple[list[int] | None, st
         return None, "查询消息失败"
 
 
-async def handle_bye_command(gid: int, reply_id: int, customer_id: int) -> str:
+async def handle_bye_command(gid: int, reply_id: int, customer_id: int, operator_uid: int | None = None) -> str:
     """执行 .bye 命令：发送结束语并关闭会话，返回反馈文本"""
     try:
-        await client.send_private_msg(
+        await history.record_command(customer_id, operator_uid, "bye", reply_id=reply_id, group_id=gid)
+        resp = await client.send_private_msg(
             user_id=str(customer_id),
             message=CLOSING_MESSAGE,
         )
-        closed = await close_session(customer_id, send_closing=False)
+        mid = resp.get("message_id") if resp else None
+        await history.record_bot_send(
+            customer_id, int(mid) if mid is not None else None, "closing_message", CLOSING_MESSAGE,
+        )
+        closed = await close_session(customer_id, send_closing=False, close_reason="bye")
         return f"✅ 已向客户 {customer_id} 发送结束语。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
     except Exception as e:
         log.error("发送结束语失败: customer=%s, err=%s", customer_id, e, exc_info=True)
         return f"❌ 发送失败：{e}"
 
 
-async def handle_close_command(gid: int, reply_id: int, customer_id: int) -> str:
+async def handle_close_command(gid: int, reply_id: int, customer_id: int, operator_uid: int | None = None) -> str:
     """执行 .close 命令：仅关闭会话，不发送结束语，返回反馈文本"""
     try:
-        closed = await close_session(customer_id, send_closing=False)
+        await history.record_command(customer_id, operator_uid, "close", reply_id=reply_id, group_id=gid)
+        closed = await close_session(customer_id, send_closing=False, close_reason="close")
         return f"✅ 已关闭客户 {customer_id} 的会话（未发送结束语）。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
     except Exception as e:
         log.error("关闭会话失败: customer=%s, err=%s", customer_id, e, exc_info=True)
@@ -222,15 +229,16 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
                 "reply_id": mid,
                 "group_id": gid,
             }
+            await history.record_command(customer_id, event.user_id, "say", mode="pending", via="emoji", reply_id=mid, group_id=gid)
             if prompt_msg_id:
                 await add_emoji_to_message(prompt_msg_id, [
                     EMOJI_MAPPING["cancel"],
                 ])
         elif cmd == "close":
-            feedback = await handle_close_command(gid, mid, customer_id)
+            feedback = await handle_close_command(gid, mid, customer_id, operator_uid=event.user_id)
             await send_and_track_feedback(gid, mid, feedback, customer_id)
         elif cmd == "bye":
-            feedback = await handle_bye_command(gid, mid, customer_id)
+            feedback = await handle_bye_command(gid, mid, customer_id, operator_uid=event.user_id)
             await send_and_track_feedback(gid, mid, feedback, customer_id)
         elif cmd == "more":
             success, feedback, new_fwd_id = await handle_more_command(gid, mid, customer_id)
@@ -291,11 +299,16 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         customer_id = pending["customer_id"]
         orig_reply_id = pending["reply_id"]
         try:
-            await client.send_private_msg(
+            send_resp = await client.send_private_msg(
                 user_id=str(customer_id),
                 message=segments,
             )
-            closed = await close_session(customer_id, send_closing=False)
+            raw_mid = send_resp.get("message_id") if send_resp else None
+            customer_msg_id = int(raw_mid) if raw_mid is not None else None
+            await history.record_command(customer_id, event.user_id, "say", mode="content", reply_id=orig_reply_id, group_id=gid)
+            if customer_msg_id is not None:
+                await history.record_staff_reply(customer_id, customer_msg_id, time.time(), segments, actor_uid=event.user_id)
+            closed = await close_session(customer_id, send_closing=False, close_reason="say")
             last_command_time[(orig_reply_id, "say")] = time.time()
             feedback = f"✅ 已向客户 {customer_id} 发送消息。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
         except Exception as e:
@@ -433,6 +446,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
                 "reply_id": reply_id,
                 "group_id": gid,
             }
+            await history.record_command(customer_id, event.user_id, "say", mode="pending", reply_id=reply_id, group_id=gid)
             if prompt_msg_id:
                 await add_emoji_to_message(prompt_msg_id, [
                     EMOJI_MAPPING["cancel"],
@@ -452,11 +466,16 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             return True
 
         try:
-            await client.send_private_msg(
+            send_resp = await client.send_private_msg(
                 user_id=str(customer_id),
                 message=segments,
             )
-            closed = await close_session(customer_id, send_closing=False)
+            raw_mid = send_resp.get("message_id") if send_resp else None
+            customer_msg_id = int(raw_mid) if raw_mid is not None else None
+            await history.record_command(customer_id, event.user_id, "say", mode="content", reply_id=reply_id, group_id=gid)
+            if customer_msg_id is not None:
+                await history.record_staff_reply(customer_id, customer_msg_id, time.time(), segments, actor_uid=event.user_id)
+            closed = await close_session(customer_id, send_closing=False, close_reason="say")
             last_command_time[key] = now
             feedback = f"✅ 已向客户 {customer_id} 发送消息。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
         except Exception as e:

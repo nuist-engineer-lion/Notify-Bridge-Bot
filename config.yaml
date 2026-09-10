@@ -153,8 +153,11 @@ night_mode:
 # 状态持久化文件
 state_file: "archives/state.json"
 
-# 存档目录名称
+# 存档目录名称（SQLite 会话库 archive.db 也存放在此）
 archive_dir: "archives"
+
+# 会话库保留期（天），0 = 永久保留
+archive_retention_days: 0
 
 # 获取最近消息的最大时限（秒），用于构造合并转发
 recent_message_max_age: 86400  # 24 小时

@@ -1,11 +1,9 @@
-import time
 import json
 import os
 from typing import cast
 
 from .config import (
     log,
-    ARCHIVE_DIR,
     STATE_FILE,
     unreplied_customers,
     monitored_forwards,
@@ -13,7 +11,6 @@ from .config import (
     last_command_time,
     delayed_notifications,
     last_night_summary_sent_date,
-    client,
 )
 from .models import (
     CustomerData,
@@ -22,81 +19,6 @@ from .models import (
     StateDelayedNotification,
     AppState,
 )
-
-
-def _simplify_message(msg: dict) -> dict:
-    """精简消息记录，保留完整 msg 段。"""
-    return {
-        "id": msg.get("message_id"),
-        "t": msg.get("time"),
-        "u": msg.get("sender", {}).get("user_id"),
-        "n": msg.get("sender", {}).get("nickname", ""),
-        "msg": msg.get("message", []),
-    }
-
-
-async def archive_session(user_id: int, pending_since: float, msg_ids: list[int] | None = None) -> None:
-    """获取双方对话历史并以 JSONL 格式追加存档。
-
-    以 msg_ids 为基础逐条拉取客户消息（保证不遗漏），
-    再用 get_friend_msg_history 补充客服侧回复消息。
-    """
-    os.makedirs(ARCHIVE_DIR, exist_ok=True)
-    from datetime import datetime
-    date_str = datetime.fromtimestamp(pending_since).strftime("%Y%m%d")
-    filepath = os.path.join(ARCHIVE_DIR, f"{user_id}_{date_str}.jsonl")
-
-    now = time.time()
-    seen_ids: set[int] = set()
-    messages: list[dict] = []
-    fetch_failed: list[int] = []
-
-    # 1) 逐条拉取已知的客户消息（保证每条都被记录）
-    if msg_ids:
-        for msg_id in msg_ids:
-            if msg_id in seen_ids:
-                continue
-            try:
-                msg_detail = await client.get_msg(message_id=str(msg_id))
-                seen_ids.add(msg_id)
-                messages.append(_simplify_message(msg_detail))
-            except Exception as e:
-                fetch_failed.append(msg_id)
-                log.error("拉取客户消息 %s 失败: %s", msg_id, e)
-        if fetch_failed:
-            log.warning("存档客户消息拉取失败 %d/%d 条: %s", len(fetch_failed), len(msg_ids), fetch_failed)
-
-    # 2) 从历史记录补充客服回复（以及可能遗漏的消息）
-    try:
-        resp = await client.get_friend_msg_history(
-            user_id=str(user_id),
-            count=500,
-            parse_mult_msg=True,
-        )
-        for msg in resp.get("messages", []):
-            mid = msg.get("message_id")
-            if mid is not None and mid not in seen_ids:
-                msg_time = msg.get("time", 0)
-                if msg_time >= pending_since and msg_time <= now:
-                    seen_ids.add(mid)
-                    messages.append(_simplify_message(msg))
-    except Exception as e:
-        log.error("获取历史消息补充失败: %s", e)
-
-    if not messages:
-        log.warning(f"存档跳过：客户 {user_id} 在会话窗口内无消息记录")
-        return
-
-    messages.sort(key=lambda x: x.get("t", 0))
-
-    try:
-        with open(filepath, "a", encoding="utf-8") as f:
-            for msg in messages:
-                msg["_s"] = {"uid": user_id, "start": pending_since, "end": now, "dur": round(now - pending_since, 1)}
-                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
-        log.info(f"会话已存档: {filepath} ({len(messages)} 条消息)")
-    except Exception as e:
-        log.error(f"会话存档写入失败: {e}")
 
 
 def save_state() -> None:
@@ -110,6 +32,7 @@ def save_state() -> None:
             "is_newly_reported": data["is_newly_reported"],
             "reported_milestones": list(data["reported_milestones"]),
             "pending_since": data["pending_since"],
+            "session_id": data.get("session_id"),
         }
 
     # 转换 monitored_forwards 的键为字符串
@@ -133,6 +56,7 @@ def save_state() -> None:
                 "is_newly_reported": cust["is_newly_reported"],
                 "reported_milestones": list(cust["reported_milestones"]),
                 "pending_since": cust["pending_since"],
+                "session_id": cust.get("session_id"),
             }
             customers_state.append((qq, cust_state))
         serializable_delayed.append({
@@ -176,7 +100,7 @@ def load_state() -> None:
         log.error("状态文件读取失败: %s", e, exc_info=True)
         return
 
-    # 恢复 unreplied_customers
+    # 恢复 unreplied_customers（旧版状态文件无 session_id 字段，恢复后由 history.recover_sessions 补建）
     for qq_str, cust_state in state.get("unreplied_customers", {}).items():
         qq = int(qq_str)
         unreplied_customers[qq] = {
@@ -185,6 +109,7 @@ def load_state() -> None:
             "is_newly_reported": cust_state["is_newly_reported"],
             "reported_milestones": set(cust_state["reported_milestones"]),
             "pending_since": cust_state["pending_since"],
+            "session_id": cust_state.get("session_id"),
         }
 
     # 恢复 monitored_forwards
@@ -215,6 +140,7 @@ def load_state() -> None:
                 "is_newly_reported": cust_state["is_newly_reported"],
                 "reported_milestones": set(cust_state["reported_milestones"]),
                 "pending_since": cust_state["pending_since"],
+                "session_id": cust_state.get("session_id"),
             }
             customers.append((qq, cust))
         delayed_notifications.append({
