@@ -43,6 +43,13 @@ async def monitor_loop():
         if to_remove:
             log.debug("已清理 %d 条过期监听消息", len(to_remove))
 
+        # 清理过期的可撤回发送记录
+        expired_recalls = [mid for mid, data in cfg.recallable_sends.items() if now - data["sent_at"] > cfg.RECALL_WINDOW_SECONDS]
+        for mid in expired_recalls:
+            cfg.recallable_sends.pop(mid, None)
+        if expired_recalls:
+            log.debug("已清理 %d 条过期可撤回记录", len(expired_recalls))
+
         if not unreplied_customers:
             log.debug("巡检跳过: 当前无未回复客户")
         else:

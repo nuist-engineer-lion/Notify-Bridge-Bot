@@ -22,6 +22,15 @@ class DelayedNotification(TypedDict):
     timestamp: float
 
 
+class RecallableSendData(TypedDict):
+    # .say 成功后可通过表情限时撤回的一次发送记录（以群内反馈消息 ID 为键）
+    customer_msg_id: int
+    customer_id: int
+    group_id: int
+    sent_at: float
+    operator_id: int
+
+
 # 用于存档的消息记录类型（简化）
 MessageRecord = dict[str, Any]
 

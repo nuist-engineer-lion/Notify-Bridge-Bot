@@ -82,3 +82,16 @@ availability:
     saturday: []
     sunday: []
 
+# 表情快捷操作映射：动作 -> QQ 表情 ID
+# recall 用于 .say 发送成功后限时撤回刚发送的私聊消息，ID 需与其他动作不同
+emoji_mapping:
+  close: 128
+  more: 127
+  bye: 100
+  say: 123
+  cancel: 32
+  recall: 89
+
+# .say 发送成功后允许通过点击撤回表情撤回消息的时间窗口（秒）
+recall_window_seconds: 60
+

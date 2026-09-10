@@ -11,7 +11,7 @@ import yaml
 from napcat import NapCatClient
 from napcat.types import Text, Image, Face, At, Poke
 
-from .models import CustomerData, ForwardMonitorData, DelayedNotification
+from .models import CustomerData, ForwardMonitorData, DelayedNotification, RecallableSendData
 
 # ================= 日志配置 =================
 logging.basicConfig(
@@ -159,8 +159,10 @@ FRIEND_COUNT_LIMIT = 3000
 REPLY_DURATION_MAXLEN = 0
 AVAILABILITY: dict[int, dict[str, list[tuple[str, str]]]] = {}
 MAX_LISTEN_AGE = 86400   # 24小时
-EMOJI_MAPPING = {"close": 128, "more": 127, "bye": 100, "say": 123, "cancel": 32}
+DEFAULT_EMOJI_MAPPING = {"close": 128, "more": 127, "bye": 100, "say": 123, "cancel": 32, "recall": 89}
+EMOJI_MAPPING = dict(DEFAULT_EMOJI_MAPPING)
 EMOJI_TO_CMD = {v: k for k, v in EMOJI_MAPPING.items()}
+RECALL_WINDOW_SECONDS = 60  # .say 发送成功后允许通过表情撤回的时间窗口（秒）
 
 # ================= 夜间模式配置 =================
 NIGHT_MODE: dict[str, str] = {}
@@ -181,7 +183,7 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     global DEBOUNCE_SECONDS, PROCESSED_FRIEND_REQUESTS_EXPIRE
     global FRIEND_WELCOME_DELAY, FRIEND_WELCOME_RETRIES, FRIEND_WELCOME_RETRY_INTERVAL
     global FRIEND_COUNT_LIMIT, REPLY_DURATION_MAXLEN, AVAILABILITY, MAX_LISTEN_AGE
-    global EMOJI_MAPPING, EMOJI_TO_CMD, NIGHT_MODE, NIGHT_START, NIGHT_END
+    global EMOJI_MAPPING, EMOJI_TO_CMD, RECALL_WINDOW_SECONDS, NIGHT_MODE, NIGHT_START, NIGHT_END
     global NIGHT_SUMMARY_TIME, ARCHIVE_DIR, STATE_FILE, RECENT_MESSAGE_MAX_AGE
     global reply_durations
 
@@ -215,8 +217,11 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     REPLY_DURATION_MAXLEN = config["reply_duration_maxlen"]
     AVAILABILITY = config["availability"]
     MAX_LISTEN_AGE = config.get("max_listen_age", 86400)   # 24小时
-    EMOJI_MAPPING = dict(config.get("emoji_mapping", {"close": 128, "more": 127, "bye": 100, "say": 123, "cancel": 32}))
+    EMOJI_MAPPING = dict(config.get("emoji_mapping", DEFAULT_EMOJI_MAPPING))
+    # 未显式配置撤回表情时回退到默认值，保证旧配置也能使用新功能
+    EMOJI_MAPPING.setdefault("recall", DEFAULT_EMOJI_MAPPING["recall"])
     EMOJI_TO_CMD = {v: k for k, v in EMOJI_MAPPING.items()}
+    RECALL_WINDOW_SECONDS = int(config.get("recall_window_seconds", 60))
 
     # ================= 夜间模式配置 =================
     NIGHT_MODE = dict(config.get("night_mode", {}))
@@ -306,6 +311,9 @@ monitored_forwards: dict[int, ForwardMonitorData] = {}
 last_command_time: dict[tuple[int, str], float] = {}
 # 等待 .say 内容的用户：{user_id: {prompt_msg_id, customer_id, reply_id, group_id}}
 pending_say: dict[int, dict] = {}
+
+# 可通过表情限时撤回的 .say 发送记录：{feedback_msg_id: RecallableSendData}
+recallable_sends: dict[int, RecallableSendData] = {}
 
 # 夜间通知延后缓存
 delayed_notifications: list[DelayedNotification] = []
