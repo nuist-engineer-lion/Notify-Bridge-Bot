@@ -170,6 +170,10 @@ NIGHT_START = "22:00"
 NIGHT_END = "08:00"
 NIGHT_SUMMARY_TIME = "08:00"
 
+# ================= AI 回复建议（OpenAI 兼容接口） =================
+# 空字典表示未启用；ai.py 每次调用时读取，可通过 .reload cfg 在线开关/换模型
+AI_SUGGESTION: dict[str, Any] = {}
+
 # ================= 可配置的存档与状态持久化 =================
 ARCHIVE_DIR = "archives"
 STATE_FILE = "state.json"
@@ -185,7 +189,7 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     global FRIEND_COUNT_LIMIT, REPLY_DURATION_MAXLEN, AVAILABILITY, MAX_LISTEN_AGE
     global EMOJI_MAPPING, EMOJI_TO_CMD, RECALL_WINDOW_SECONDS, NIGHT_MODE, NIGHT_START, NIGHT_END
     global NIGHT_SUMMARY_TIME, ARCHIVE_DIR, STATE_FILE, RECENT_MESSAGE_MAX_AGE
-    global reply_durations
+    global AI_SUGGESTION, reply_durations
 
     applied_config = dict(new_config)
     restart_only_changes: list[str] = []
@@ -228,6 +232,9 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     NIGHT_START = NIGHT_MODE.get("start", "22:00")
     NIGHT_END = NIGHT_MODE.get("end", "08:00")
     NIGHT_SUMMARY_TIME = NIGHT_MODE.get("summary_time", "08:00")
+
+    # ================= AI 回复建议 =================
+    AI_SUGGESTION = dict(config.get("ai_suggestion", {}) or {})
 
     # ================= 可配置的存档与状态持久化 =================
     ARCHIVE_DIR = config.get("archive_dir", "archives")

@@ -13,6 +13,7 @@ from napcat import (
 )
 
 from . import config as cfg
+from . import ai
 from .config import (
     log,
     STARTED_AT,
@@ -122,11 +123,27 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         return None
 
     log.info("开始构造合并转发 -> 群 %d, 共 %d 名客户", group_id, len(customer_list))
+
+    # AI 回复建议：未启用/失败/超时返回空，不影响提醒发送
+    try:
+        suggestions = await ai.suggest_for_customers(customer_list)
+    except Exception as e:
+        log.warning("AI建议生成失败，本次提醒不含建议: %s", e)
+        suggestions = {}
+
+    first_node_segments: list[Message] = [Text(text="https://lion-qq.laysath.cn")]
+    for qq, _ in customer_list:
+        suggestion = suggestions.get(qq)
+        if not suggestion:
+            continue
+        label = f"（{qq}）" if len(customer_list) > 1 else ""
+        first_node_segments.append(Text(text=f"\n🤖 AI建议回复{label}：\n{suggestion}"))
+
     outer_nodes: list[Message] = [
         NodeInline(
             nickname="快捷传送门",
             user_id=str(client.self_id),
-            content=serialize_message_segments([Text(text="https://lion-qq.laysath.cn")]),
+            content=serialize_message_segments(first_node_segments),
         ),
     ]
 
