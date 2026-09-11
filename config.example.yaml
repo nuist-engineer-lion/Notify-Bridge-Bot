@@ -95,3 +95,15 @@ emoji_mapping:
 # .say 发送成功后允许通过点击撤回表情撤回消息的时间窗口（秒）
 recall_window_seconds: 60
 
+# AI 回复建议：提醒合并转发的第一层附上根据客户最近对话生成的建议答复
+# 使用 OpenAI 兼容接口（DeepSeek / 通义 / GLM / one-api 等均可）
+# 注意：客户对话内容会发送给所配置的 LLM 服务；api_key 属敏感信息，真实配置请走加密流程
+ai_suggestion:
+  enabled: false
+  base_url: "https://api.deepseek.com/v1"
+  api_key: "sk-xxxx"
+  model: "deepseek-chat"
+  timeout_seconds: 12       # 单次生成超时，失败/超时不影响提醒正常发送
+  max_context_messages: 20  # 送入模型的最近对话条数
+  max_suggestion_chars: 300 # 建议文本截断长度
+
