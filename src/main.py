@@ -17,6 +17,8 @@ from .monitor import monitor_loop
 from .private_msg import handle_private_msg, handle_sent_msg, handle_friend_poke
 from .new_user import handle_friend_request
 from .group_msg import handle_group_emoji, handle_group_poke, handle_group_command
+from . import storage
+from . import history
 
 
 async def main():
@@ -24,6 +26,15 @@ async def main():
     log.info("里程碑阈值(分钟): %s", cfg.MILESTONES)
 
     load_state()
+
+    # 会话库初始化与启动恢复：队列客户补齐会话周期、清理孤儿会话、恢复耗时统计
+    try:
+        await storage.init_db()
+        await history.recover_sessions()
+        await history.restore_reply_durations()
+    except Exception as e:
+        log.error("会话库初始化失败，历史记录功能降级（事件将落盘兜底）: %s", e, exc_info=True)
+
     startup_notified = False
     asyncio.create_task(monitor_loop())
 

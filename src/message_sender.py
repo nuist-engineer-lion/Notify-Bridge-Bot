@@ -23,7 +23,8 @@ from .config import (
 )
 from .models import CustomerData
 from .utils import format_duration, get_current_available_members
-from .state import save_state, archive_session
+from .state import save_state
+from . import history
 
 
 # ======================= 消息序列化 =======================
@@ -252,10 +253,18 @@ def register_recallable_send(feedback_msg_id: int, customer_msg_id: int, custome
     }
 
 
-async def send_reminder_with_at(group_id: int, summary: str, customer_list: list[tuple[int, CustomerData]], max_age_seconds: int | None = None) -> int | None:
+async def send_reminder_with_at(
+    group_id: int,
+    summary: str,
+    customer_list: list[tuple[int, CustomerData]],
+    max_age_seconds: int | None = None,
+    notice_type: str | None = None,
+    milestone: int | None = None,
+) -> int | None:
     """
     发送提醒：先尝试 @ 一位当前可用成员，再发送合并转发。
     若无可用成员，则直接发送合并转发（无 @）。
+    notice_type 用于把本次通知作为 bot_notice 事件记入各客户的会话周期。
     """
     available = get_current_available_members()
     if available:
@@ -279,6 +288,14 @@ async def send_reminder_with_at(group_id: int, summary: str, customer_list: list
             customer_ids=[qq for qq, _ in customer_list],
             group_id=group_id,
         )
+        if notice_type:
+            for qq, _data in customer_list:
+                try:
+                    await history.record_bot_notice(
+                        qq, notice_type, milestone=milestone, group_msg_id=message_id, summary=summary,
+                    )
+                except Exception as e:
+                    log.error("记录客户 %d 的通知事件失败: %s", qq, e)
     return message_id
 
 
@@ -298,32 +315,51 @@ async def send_and_track_feedback(gid: int, reply_id: int, feedback: str, custom
 
 # ======================= 会话管理 =======================
 
-async def close_session(user_id: int, send_closing: bool = False) -> bool:
+async def close_session(user_id: int, send_closing: bool = False, close_reason: str = "unknown") -> bool:
     """
     从 unreplied_customers 中移除客户，记录耗时（如果存在）。
     如果 send_closing=True，则向该客户发送结束语。
+    close_reason 记录关闭来源（say/bye/close/direct_reply/customer_poke 等），
+    并关闭会话周期、按权威时间段触发历史拉取对账。
     返回是否成功结束（即客户原本在队列中）。
     """
     data = cfg.unreplied_customers.pop(user_id, None)
     if data is None:
         return False
 
+    now = time.time()
     pending = data["pending_since"]
-    elapsed = time.time() - pending
+    elapsed = now - pending
     cfg.reply_durations.append(elapsed)
-    log.info("会话结束: user_id=%s, 耗时=%.1f秒", user_id, elapsed)
+    log.info("会话结束: user_id=%s, 耗时=%.1f秒, 原因=%s", user_id, elapsed, close_reason)
 
-    asyncio.create_task(archive_session(user_id, pending, data["msg_ids"]))
+    session_id = data.get("session_id")
 
     if send_closing:
         try:
-            await client.send_private_msg(
+            resp = await client.send_private_msg(
                 user_id=str(user_id),
                 message=cfg.CLOSING_MESSAGE,
             )
             log.info("自动发送结束语成功: user_id=%s", user_id)
+            if session_id:
+                mid = resp.get("message_id") if resp else None
+                await history.record_bot_send(
+                    user_id, int(mid) if mid is not None else None,
+                    "closing_message", cfg.CLOSING_MESSAGE, session_id=session_id,
+                )
         except Exception as e:
             log.error("自动发送结束语失败: user_id=%s, err=%s", user_id, e, exc_info=True)
+            if session_id:
+                await history.record_bot_send(
+                    user_id, None, "closing_message", cfg.CLOSING_MESSAGE, ok=False, session_id=session_id,
+                )
+
+    if session_id:
+        try:
+            await history.close_session_record(session_id, user_id, pending, now, close_reason, data["msg_ids"])
+        except Exception as e:
+            log.error("关闭会话周期失败: session=%s, err=%s", session_id, e, exc_info=True)
 
     save_state()
     return True

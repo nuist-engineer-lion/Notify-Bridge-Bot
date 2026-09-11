@@ -32,7 +32,7 @@
 - 支持客服直接私聊回复客户后自动结束会话
 - 支持内部群戳一戳查看运行状态面板
 - 支持状态持久化：程序重启后自动恢复待回复客户、监听消息和夜间延后通知
-- 支持会话归档：每次会话结束后自动保存聊天记录到本地 `JSONL`
+- 支持会话归档：对话周期内事件实时写入本地 SQLite 会话库，会话关闭后再按时间段拉取历史对账补漏，双保险保证记录完整
 - 支持统计已完结会话的最短、最长、平均和中位回复耗时
 
 ## 工作流程
@@ -42,7 +42,7 @@
 3. 超过 1 分钟仍未回复时，机器人向内部群发送“新客户提醒”。
 4. 机器人会根据 `milestones` 配置继续发送“超时催办”。
 5. 客服可以直接私聊回复客户，也可以在内部群引用消息执行命令，或使用配置好的表情快捷处理。
-6. 会话结束后，客户会从待回复队列中移除，回复耗时会计入统计，并异步写入本地归档。
+6. 会话结束后，客户会从待回复队列中移除，回复耗时会计入统计；会话周期随即关闭，并按周期时间段拉取历史消息对账补漏。
 7. 若开启夜间模式，夜间时段的新客户提醒和里程碑提醒会暂存，并在次日指定时间汇总发送。
 
 ## 内部群命令
@@ -205,8 +205,11 @@ night_mode:
 # 状态持久化文件
 state_file: "archives/state.json"
 
-# 会话归档目录
+# 会话归档目录（SQLite 会话库 archive.db 也存放在此）
 archive_dir: "archives"
+
+# 会话库保留期（天），0 = 永久保留
+archive_retention_days: 0
 
 # 构造合并转发时，最多回看多久以内的历史消息（秒）
 recent_message_max_age: 86400
@@ -272,7 +275,8 @@ welcome_message:
 | `availability` | 当前可用成员时间表；用于提醒时随机 `@` 一位值班成员 |
 | `max_listen_age` | 机器人消息保持可操作状态的最长时间 |
 | `night_mode` | 夜间免打扰起止时间与汇总时间 |
-| `archive_dir` | 会话归档目录 |
+| `archive_dir` | 会话归档目录（含 SQLite 会话库 `archive.db`） |
+| `archive_retention_days` | 会话库保留天数，`0` 表示永久保留 |
 | `state_file` | 运行状态持久化文件 |
 | `recent_message_max_age` | 构造提醒合并转发时回看的消息时间窗口 |
 | `emoji_mapping` | 表情 ID 到快捷动作的映射 |
@@ -353,11 +357,62 @@ python main.py
 - 最短、最长、平均、中位回复耗时
 - 当前监听中的机器人消息数量
 
-## 状态持久化与归档
+## 状态持久化与会话归档
 
-- `state_file` 会保存待回复客户、监听消息映射、命令防抖时间、夜间延后通知和最近一次夜间汇总日期
-- 每次会话结束后，机器人会异步拉取该客户会话窗口内的消息并追加写入 `archives/<qq>_<yyyymmdd>.jsonl`
-- 归档采用 `JSONL`，适合后续脚本分析或导入其他系统
+### 运行状态（state.json）
+
+`state_file` 保存待回复客户（含其会话周期 ID）、监听消息映射、命令防抖时间、夜间延后通知和最近一次夜间汇总日期，重启后自动恢复。
+
+### 会话归档（SQLite 双保险机制）
+
+对话周期从客户进入待回复队列开始，到会话关闭结束。周期内发生的每一件事通过两层机制保证完整记录：
+
+1. **实时采集**：周期内事件即时写入 `archives/archive.db`（SQLite，WAL 模式），崩溃/重启不丢、不依赖事后回拉
+2. **历史拉取对账**：会话关闭后，按该周期的权威时间段 `[started_at, ended_at]` 拉取双方历史消息，与已入库内容按 `message_id` 对账，只补实时采集遗漏的部分（如客服在其他设备回复且上报异常），并写入一条对账审计事件
+
+记录的事件类型：
+
+| 事件类型 | 含义 |
+|----------|------|
+| `session_open` / `session_close` | 周期开启/关闭（关闭含原因：say / bye / close / direct_reply / customer_poke 等） |
+| `customer_message` | 客户私聊消息（完整消息段） |
+| `staff_reply` | 客服回复（`.say` 发送或客服账号直接私聊，记录操作者/发送者） |
+| `bot_send` | 机器人主动发送给客户的系统消息（结束语、欢迎语等） |
+| `bot_notice` | 内部群提醒/催办（新客户提醒、里程碑催办、夜间汇总，含群消息 ID） |
+| `command` | 客服执行的会话操作命令（say / bye / close，含操作者 QQ） |
+| `poke` | 周期内的戳一戳 |
+| `history_reconcile` | 关闭后的历史拉取对账结果（窗口、拉取/补录条数、缺失清单） |
+
+数据结构：`sessions` 表记录周期（客户、起止时间、耗时、关闭原因），`session_events` 表记录事件流（每条消息保留完整 OB11 消息段；图片等媒体保存 URL，注意 QQ 媒体链接会过期）。
+
+检索示例：
+
+```sql
+-- 某客户的全部会话周期
+SELECT * FROM sessions WHERE customer_uid = 123456 ORDER BY started_at;
+
+-- 某个周期内的完整事件流
+SELECT time, event_type, actor_uid, payload FROM session_events
+WHERE session_id = 42 ORDER BY time;
+
+-- 超过 1 小时才回复的会话
+SELECT * FROM sessions WHERE duration > 3600 ORDER BY duration DESC;
+```
+
+回复耗时统计在重启后自动从会话库恢复最近样本，不再清零。
+
+### 存量 JSONL 迁移
+
+旧版本按 `archives/<qq>_<yyyymmdd>.jsonl` 追加写的归档可用导入工具迁入会话库（幂等，可重复执行）：
+
+```bash
+uv run python scripts/import_jsonl.py --dry-run   # 预览
+uv run python scripts/import_jsonl.py             # 导入
+```
+
+### 保留策略
+
+`archive_retention_days`（默认 `0` = 永久保留）设置保留天数后，巡检任务每小时清理超期的已完结会话。
 
 ## AI 开发指引
 
@@ -378,7 +433,8 @@ python main.py
 - 可操作消息的监听依赖 `monitored_forward_limit` 和 `max_listen_age`；超出窗口后再引用旧消息，机器人可能返回“操作已过期”。
 - `.say` 的等待输入状态保存在内存中，程序重启后不会恢复。
 - 夜间汇总按客户聚合，不保留原始通知类型和里程碑层级。
-- 状态文件和归档目录会随使用时间持续增长，需要自行定期清理。
+- 状态文件和会话库会随使用时间持续增长；会话库可通过 `archive_retention_days` 自动清理，状态文件需自行关注。
+- 归档中的图片等媒体仅保存 URL，QQ 媒体链接会过期，无法永久还原原始文件。
 
 ## 项目结构
 
@@ -389,11 +445,14 @@ python main.py
 ├── pyproject.toml
 ├── uv.lock
 ├── README.md
+├── scripts/
+│   └── import_jsonl.py
 ├── archives/
 └── src/
     ├── __init__.py
     ├── config.py
     ├── group_msg.py
+    ├── history.py
     ├── main.py
     ├── message_sender.py
     ├── models.py
@@ -401,21 +460,25 @@ python main.py
     ├── new_user.py
     ├── private_msg.py
     ├── state.py
+    ├── storage.py
     └── utils.py
 ```
 
 各模块职责：
 
-- `src/main.py`：程序入口、事件分发、启动通知、重连逻辑
+- `src/main.py`：程序入口、事件分发、启动通知、重连逻辑、会话库初始化与启动恢复
 - `src/config.py`：配置加载、全局状态初始化、NapCat 客户端实例
 - `src/private_msg.py`：处理客户私聊消息、客服私聊回复、私聊戳一戳
 - `src/new_user.py`：好友申请自动通过、欢迎消息发送、好友数提醒
 - `src/group_msg.py`：群命令、群表情快捷操作、群戳一戳状态面板
 - `src/message_sender.py`：提醒消息构造、合并转发、会话关闭、状态统计
 - `src/monitor.py`：每 60 秒巡检一次，负责新客户提醒、里程碑催办、夜间汇总和过期清理
-- `src/state.py`：状态保存、状态恢复、会话归档
+- `src/history.py`：对话周期管理、实时事件采集、会话关闭后的历史拉取对账、启动恢复
+- `src/storage.py`：SQLite 会话库表结构与读写（sessions / session_events）
+- `src/state.py`：运行状态保存与恢复
 - `src/utils.py`：时长格式化、值班成员判断、夜间时段判断
 - `src/models.py`：TypedDict 类型定义
+- `scripts/import_jsonl.py`：存量 JSONL 归档导入工具
 
 
 
@@ -485,7 +548,7 @@ sudo install -m 600 /path/to/age.key /etc/notifybot/age.key
 ## 后续可改进方向
 
 - 支持多客户合并转发下的拆分处理
-- 为归档和状态提供清理、导出或检索工具
+- 会话库的导出工具与群内检索命令（当前可用 SQL 直接查询 `archives/archive.db`）
 - 增加更细粒度的权限控制和群内角色区分
 
 ## License

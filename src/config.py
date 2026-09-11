@@ -178,6 +178,8 @@ AI_SUGGESTION: dict[str, Any] = {}
 ARCHIVE_DIR = "archives"
 STATE_FILE = "state.json"
 RECENT_MESSAGE_MAX_AGE = 86400  # 默认1天
+# 会话库保留期（天），0 = 永久保留；超期会话及其事件由巡检任务定期清理
+ARCHIVE_RETENTION_DAYS = 0
 
 
 def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
@@ -189,6 +191,7 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     global FRIEND_COUNT_LIMIT, REPLY_DURATION_MAXLEN, AVAILABILITY, MAX_LISTEN_AGE
     global EMOJI_MAPPING, EMOJI_TO_CMD, RECALL_WINDOW_SECONDS, NIGHT_MODE, NIGHT_START, NIGHT_END
     global NIGHT_SUMMARY_TIME, ARCHIVE_DIR, STATE_FILE, RECENT_MESSAGE_MAX_AGE
+    global ARCHIVE_RETENTION_DAYS
     global AI_SUGGESTION, reply_durations
 
     applied_config = dict(new_config)
@@ -240,6 +243,7 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     ARCHIVE_DIR = config.get("archive_dir", "archives")
     STATE_FILE = config.get("state_file", "state.json")
     RECENT_MESSAGE_MAX_AGE = config.get("recent_message_max_age", 86400)  # 默认1天
+    ARCHIVE_RETENTION_DAYS = int(config.get("archive_retention_days", 0))
 
     if initial:
         reply_durations = deque(maxlen=REPLY_DURATION_MAXLEN)

@@ -13,6 +13,7 @@ from . import config as cfg
 from .config import log
 from .state import save_state
 from .message_sender import close_session
+from . import history
 
 
 def extract_message_text(segments: Iterable[Union[Message, UnknownMessageSegment]]) -> str:
@@ -53,6 +54,7 @@ async def handle_private_msg(event: PrivateMessageEvent) -> bool:
             "is_newly_reported": False,
             "reported_milestones": set(),
             "pending_since": now,
+            "session_id": None,
         }
         log.info("新增客户 %d 进入待回复队列 (msg_id=%s, 内容: %s)。当前队列长度: %d",
                  uid, event.message_id, msg_text, len(cfg.unreplied_customers))
@@ -64,6 +66,10 @@ async def handle_private_msg(event: PrivateMessageEvent) -> bool:
         log.info("客户 %d 追加消息 (msg_id=%s)，累计 %d 条，重置通报倒计时。",
                  uid, event.message_id, len(cfg.unreplied_customers[uid]["msg_ids"]))
 
+    # 实时落库：无会话周期则自动建立（周期起点 = pending_since）
+    nickname = getattr(getattr(event, "sender", None), "nickname", "") or ""
+    await history.record_customer_message(uid, int(event.message_id), float(event.time), event.message, nickname)
+
     save_state()
     return True
 
@@ -73,7 +79,12 @@ async def handle_sent_msg(event: PrivateMessageEvent) -> bool:
     tid = event.target_id
     if tid in cfg.unreplied_customers:
         cfg.unreplied_customers[tid]["msg_ids"].append(event.message_id)
-        await close_session(tid, send_closing=False)
+        # 先记录客服回复（周期内），再关闭会话
+        await history.record_staff_reply(
+            tid, int(event.message_id), float(event.time), event.message,
+            actor_uid=int(event.user_id) if event.user_id else int(cfg.client.self_id),
+        )
+        await close_session(tid, send_closing=False, close_reason="direct_reply")
         log.info("客服已回复 %s，移除提醒并记录耗时。剩余未回复: %d", tid, len(cfg.unreplied_customers))
         return True
     return False
@@ -83,7 +94,8 @@ async def handle_friend_poke(event: FriendPokeEvent) -> bool:
     """处理私聊戳一戳：自动发送结束语并从队列移除"""
     sid = event.sender_id
     if event.target_id == cfg.client.self_id and sid not in cfg.WHITELIST:
-        closed = await close_session(sid, send_closing=True)
+        await history.record_poke(sid, actor_uid=int(sid), direction="customer_to_bot")
+        closed = await close_session(sid, send_closing=True, close_reason="customer_poke")
         if closed:
             log.info("私聊戳一戳结束会话: user_id=%s", sid)
         else:

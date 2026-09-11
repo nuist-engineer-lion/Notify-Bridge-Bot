@@ -5,8 +5,6 @@ from datetime import datetime, timedelta
 from . import config as cfg
 from .config import (
     log,
-    INTERNAL_GROUP_ID,
-    MILESTONES,
     PROCESSED_FRIEND_REQUESTS_EXPIRE,
     unreplied_customers,
     processed_friend_requests,
@@ -17,10 +15,12 @@ from .models import CustomerData, DelayedNotification
 from .utils import is_night_time
 from .message_sender import send_reminder_with_at, pop_tracked_forward
 from .state import save_state
+from . import storage
 
 
 async def monitor_loop():
     log.info("巡检任务已启动，每 60 秒执行一次")
+    last_archive_cleanup = 0.0
     while True:
         await asyncio.sleep(60)
 
@@ -50,6 +50,16 @@ async def monitor_loop():
         if expired_recalls:
             log.debug("已清理 %d 条过期可撤回记录", len(expired_recalls))
 
+        # ===== 清理超出保留期的会话周期（每小时一次） =====
+        if cfg.ARCHIVE_RETENTION_DAYS > 0 and now - last_archive_cleanup > 3600:
+            try:
+                removed = await storage.cleanup_expired(cfg.ARCHIVE_RETENTION_DAYS, now)
+                if removed:
+                    log.info("已清理 %d 个超出保留期(%d天)的会话周期", removed, cfg.ARCHIVE_RETENTION_DAYS)
+            except Exception as e:
+                log.error("会话周期过期清理失败: %s", e, exc_info=True)
+            last_archive_cleanup = now
+
         if not unreplied_customers:
             log.debug("巡检跳过: 当前无未回复客户")
         else:
@@ -78,14 +88,14 @@ async def monitor_loop():
             else:
                 if notify_type == "new_customers":
                     summary = f"📢 刚刚有 {len(customers)} 名客户发来消息，请及时回复！"
-                    asyncio.create_task(send_reminder_with_at(INTERNAL_GROUP_ID, summary, customers))
+                    asyncio.create_task(send_reminder_with_at(cfg.INTERNAL_GROUP_ID, summary, customers, notice_type=notify_type))
                 elif notify_type == "milestone":
                     if milestone is None:
                         log.error("里程碑通知缺少 milestone 参数，跳过")
                         return
                     unit = f"{milestone}分钟" if milestone < 60 else f"{milestone // 60}小时"
                     summary = f"⚠️ 以下 {len(customers)} 名客户已等待长达 {unit}！"
-                    asyncio.create_task(send_reminder_with_at(INTERNAL_GROUP_ID, summary, customers))
+                    asyncio.create_task(send_reminder_with_at(cfg.INTERNAL_GROUP_ID, summary, customers, notice_type=notify_type, milestone=milestone))
 
         if unreplied_customers:
             # ===== 阶段 1：新客户防抖通报 =====
@@ -103,10 +113,10 @@ async def monitor_loop():
                 log.debug("阶段1: 无新客户需要通报")
 
             # ===== 阶段 2：迟滞里程碑通报 =====
-            milestone_groups: dict[int, list[tuple[int, CustomerData]]] = {m: [] for m in MILESTONES}
+            milestone_groups: dict[int, list[tuple[int, CustomerData]]] = {m: [] for m in cfg.MILESTONES}
             for qq, data in unreplied_customers.items():
                 elapsed_min = (now - data["last_active"]) / 60.0
-                for m in sorted(MILESTONES, reverse=True):
+                for m in sorted(cfg.MILESTONES, reverse=True):
                     if elapsed_min >= m:
                         if m not in data["reported_milestones"]:
                             data["reported_milestones"].add(m)
@@ -154,7 +164,7 @@ async def monitor_loop():
                         night_summary_dt += timedelta(days=1)
                     night_max_age = int((night_summary_dt - night_start_dt).total_seconds()) + 300  # +5分钟缓冲
 
-                    asyncio.create_task(send_reminder_with_at(INTERNAL_GROUP_ID, summary_text, customers_list, max_age_seconds=night_max_age))
+                    asyncio.create_task(send_reminder_with_at(cfg.INTERNAL_GROUP_ID, summary_text, customers_list, max_age_seconds=night_max_age, notice_type="night_summary"))
                     log.info(f"夜间汇总已发送（带@合并转发）：{summary_text}")
                 else:
                     log.debug("夜间汇总时没有有效客户，跳过发送")

@@ -7,6 +7,7 @@ class CustomerData(TypedDict):
     is_newly_reported: bool
     reported_milestones: set[int]
     pending_since: float  # 本轮开始等待回复的时间戳
+    session_id: int | None  # 对话周期在会话库中的 ID（None 表示尚未建立）
 
 
 class ForwardMonitorData(TypedDict):
@@ -42,6 +43,7 @@ class StateCustomerData(TypedDict):
     is_newly_reported: bool
     reported_milestones: list[int]  # JSON 中为 list
     pending_since: float
+    session_id: int | None
 
 
 class StateForwardData(TypedDict):

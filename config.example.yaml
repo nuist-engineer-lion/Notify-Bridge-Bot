@@ -43,7 +43,6 @@ welcome_message: |-
   [自动回复]您好，感谢您添加好友。清灰/换硅脂/疑难问题解答等可添加活动通知群1000000000，按照发布的时间地点参加修机活动，目前无需预约
   如果你对修机师的活动感兴趣，也欢迎加入交流群：1000000001
   如有其他问题可随时留言，我们会在工作时间尽快回复。
-  附：本学期修机活动已封箱
 
 # 各命令防抖间隔（秒）
 debounce_seconds:
@@ -111,4 +110,12 @@ ai_suggestion:
   timeout_seconds: 12       # 单次生成超时，失败/超时不影响提醒正常发送
   max_context_messages: 20  # 送入模型的最近对话条数
   max_suggestion_chars: 300 # 建议文本截断长度
+
+# 存档与状态（可选；默认 archives/ 与 archives/state.json）
+# archive_dir / state_file 属于需重启生效的配置
+# archive_dir: "archives"
+# state_file: "archives/state.json"
+
+# 会话库保留期（天），0 = 永久保留；超期会话及其事件由巡检任务定期清理
+archive_retention_days: 0
 
