@@ -230,6 +230,11 @@ ai_suggestion:
   base_url: "https://api.deepseek.com/v1"
   api_key: "sk-xxxx"
   model: "deepseek-chat"
+  # system 提示词可自定义（多行），留空使用内置默认
+  system_prompt: |-
+    你是一家维修客服的助手。请根据以下客服与客户的最近对话，以客服身份草拟下一条发给客户的回复。
+    要求：只输出回复内容本身，不要任何解释、前缀或引号；语气友好专业、简洁；如果客户诉求还不明确，先回应已知信息并礼貌追问。
+  temperature: 0.7          # 采样温度，越高越发散
   timeout_seconds: 12       # 单次生成超时，失败不影响提醒正常发送
   max_context_messages: 20  # 送入模型的最近对话条数
   max_suggestion_chars: 300 # 建议文本截断长度

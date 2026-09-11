@@ -23,6 +23,7 @@ _PER_MESSAGE_MAX_CHARS = 200
 _DEFAULT_TIMEOUT = 12.0
 _DEFAULT_MAX_CONTEXT = 20
 _DEFAULT_MAX_SUGGESTION_CHARS = 300
+_DEFAULT_TEMPERATURE = 0.7
 
 
 def _settings() -> dict:
@@ -84,16 +85,23 @@ def _build_prompt(transcript: list[tuple[str, str]]) -> str | None:
 
 async def _call_llm(base_url: str, api_key: str, model: str, prompt: str) -> str | None:
     url = base_url.rstrip("/") + "/chat/completions"
+    s = _settings()
+    # system 提示词与温度均可在配置中覆盖；留空/非法时回退默认
+    try:
+        temperature = float(s.get("temperature", _DEFAULT_TEMPERATURE))
+    except (TypeError, ValueError):
+        temperature = _DEFAULT_TEMPERATURE
+    system_prompt = str(s.get("system_prompt") or "").strip() or _SYSTEM_PROMPT
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.7,
+        "temperature": temperature,
     }
     headers = {"Authorization": f"Bearer {api_key}"}
-    timeout = aiohttp.ClientTimeout(total=float(_settings().get("timeout_seconds", _DEFAULT_TIMEOUT)))
+    timeout = aiohttp.ClientTimeout(total=float(s.get("timeout_seconds", _DEFAULT_TIMEOUT)))
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(url, json=payload, headers=headers) as resp:
             if resp.status != 200:
