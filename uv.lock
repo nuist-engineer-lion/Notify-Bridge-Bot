@@ -198,12 +198,14 @@ name = "notify-bridge-bot"
 version = "1.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "napcat-sdk" },
     { name = "pyyaml" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.13.3" },
     { name = "napcat-sdk", specifier = ">=0.6.8" },
     { name = "pyyaml", specifier = ">=6.0.3" },
 ]

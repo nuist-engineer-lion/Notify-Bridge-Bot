@@ -12,17 +12,11 @@ from napcat import (
     Reply,
 )
 
+from . import config as cfg
+from . import ai
 from .config import (
     log,
     STARTED_AT,
-    INTERNAL_GROUP_ID,
-    CLOSING_MESSAGE,
-    MONITORED_FORWARD_LIMIT,
-    EMOJI_MAPPING,
-    RECENT_MESSAGE_MAX_AGE,
-    reply_durations,
-    unreplied_customers,
-    monitored_forwards,
     monitored_forward_order,
     last_command_time,
     client,
@@ -41,12 +35,14 @@ def serialize_message_segments(segments: list[Message]) -> list[dict]:
 
 # ======================= 历史消息获取 =======================
 
-async def get_recent_message_ids(user_id: int, count: int = 200, max_age_seconds: int = RECENT_MESSAGE_MAX_AGE) -> list[int]:
+async def get_recent_message_ids(user_id: int, count: int = 200, max_age_seconds: int | None = None) -> list[int]:
     """
     通过 API 获取与指定用户的最近消息，筛选出最近 max_age_seconds 秒内的消息（双方消息）。
     返回按时间正序排列的 message_id 列表。
     """
     now = time.time()
+    if max_age_seconds is None:
+        max_age_seconds = cfg.RECENT_MESSAGE_MAX_AGE
     try:
         resp = await client.get_friend_msg_history(
             user_id=str(user_id),
@@ -73,22 +69,22 @@ async def get_recent_message_ids(user_id: int, count: int = 200, max_age_seconds
 # ======================= 合并转发监听管理 =======================
 
 def track_forward_message(message_id: int, customer_ids: list[int], group_id: int) -> None:
-    if message_id in monitored_forwards:
+    if message_id in cfg.monitored_forwards:
         try:
             monitored_forward_order.remove(message_id)
         except ValueError:
             pass
 
     monitored_forward_order.append(message_id)
-    monitored_forwards[message_id] = {
+    cfg.monitored_forwards[message_id] = {
         "customer_ids": customer_ids,
         "group_id": group_id,
         "created_at": time.time(),
     }
 
-    while len(monitored_forward_order) > MONITORED_FORWARD_LIMIT:
+    while len(monitored_forward_order) > cfg.MONITORED_FORWARD_LIMIT:
         expired_id = monitored_forward_order.popleft()
-        monitored_forwards.pop(expired_id, None)
+        cfg.monitored_forwards.pop(expired_id, None)
 
     log.debug("监听合并转发已更新: message_id=%s, 当前监听数=%d", message_id, len(monitored_forward_order))
     save_state()
@@ -96,7 +92,7 @@ def track_forward_message(message_id: int, customer_ids: list[int], group_id: in
 
 def pop_tracked_forward(message_id: int) -> dict | None:
     """移除监听的合并转发，并清理其防抖记录"""
-    data = monitored_forwards.pop(message_id, None)
+    data = cfg.monitored_forwards.pop(message_id, None)
     if data is None:
         return None
 
@@ -120,18 +116,34 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
     构造嵌套合并转发并发送，每个客户的消息通过 get_recent_message_ids 获取最近指定时间内的消息
     """
     if max_age_seconds is None:
-        max_age_seconds = RECENT_MESSAGE_MAX_AGE
+        max_age_seconds = cfg.RECENT_MESSAGE_MAX_AGE
 
     if not customer_list:
         log.debug("send_nested_forward: customer_list 为空，跳过发送")
         return None
 
     log.info("开始构造合并转发 -> 群 %d, 共 %d 名客户", group_id, len(customer_list))
+
+    # AI 回复建议：未启用/失败/超时返回空，不影响提醒发送
+    try:
+        suggestions = await ai.suggest_for_customers(customer_list)
+    except Exception as e:
+        log.warning("AI建议生成失败，本次提醒不含建议: %s", e)
+        suggestions = {}
+
+    first_node_segments: list[Message] = [Text(text="https://lion-qq.laysath.cn")]
+    for qq, _ in customer_list:
+        suggestion = suggestions.get(qq)
+        if not suggestion:
+            continue
+        label = f"（{qq}）" if len(customer_list) > 1 else ""
+        first_node_segments.append(Text(text=f"\n🤖 AI建议回复{label}：\n{suggestion}"))
+
     outer_nodes: list[Message] = [
         NodeInline(
             nickname="快捷传送门",
             user_id=str(client.self_id),
-            content=serialize_message_segments([Text(text="https://lion-qq.laysath.cn")]),
+            content=serialize_message_segments(first_node_segments),
         ),
     ]
 
@@ -165,7 +177,7 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         )
         message_id = response["message_id"]
         log.info("合并转发发送成功 -> 群 %d, message_id=%s", group_id, message_id)
-        asyncio.create_task(add_emoji_to_message(message_id, [eid for cmd, eid in EMOJI_MAPPING.items() if cmd != "cancel"]))
+        asyncio.create_task(add_emoji_to_message(message_id, action_emoji_ids()))
         return message_id
     except Exception as e:
         log.error("发送合并转发失败: %s", e, exc_info=True)
@@ -209,6 +221,35 @@ async def add_emoji_to_message(message_id: int, emoji_ids: list[int]) -> None:
             log.debug("已为消息 %s 添加表情 %s", message_id, emoji_id)
         except Exception as e:
             log.error("添加表情失败: message_id=%s, emoji_id=%s, err=%s", message_id, emoji_id, e)
+
+
+def action_emoji_ids() -> list[int]:
+    """可操作消息默认贴上的表情（不含 cancel / recall 等仅用于特定消息的表情）"""
+    return [eid for cmd, eid in cfg.EMOJI_MAPPING.items() if cmd not in ("cancel", "recall")]
+
+
+def build_say_feedback(customer_id: int, closed: bool, recallable: bool) -> str:
+    """构造 .say 成功通报文本，附带限时撤回提示"""
+    feedback = f"✅ 已向客户 {customer_id} 发送消息。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
+    if recallable:
+        feedback += f"\n🧹 {cfg.RECALL_WINDOW_SECONDS} 秒内点击本消息上的撤回表情可撤回该消息"
+    return feedback
+
+
+def register_recallable_send(feedback_msg_id: int, customer_msg_id: int, customer_id: int, group_id: int, operator_id: int) -> None:
+    """记录一次可通过表情限时撤回的 .say 发送（以群内反馈消息 ID 为键）"""
+    now = time.time()
+    expired = [mid for mid, d in cfg.recallable_sends.items() if now - d["sent_at"] > cfg.RECALL_WINDOW_SECONDS]
+    for mid in expired:
+        cfg.recallable_sends.pop(mid, None)
+
+    cfg.recallable_sends[feedback_msg_id] = {
+        "customer_msg_id": customer_msg_id,
+        "customer_id": customer_id,
+        "group_id": group_id,
+        "sent_at": now,
+        "operator_id": operator_id,
+    }
 
 
 async def send_reminder_with_at(group_id: int, summary: str, customer_list: list[tuple[int, CustomerData]], max_age_seconds: int | None = None) -> int | None:
@@ -263,13 +304,13 @@ async def close_session(user_id: int, send_closing: bool = False) -> bool:
     如果 send_closing=True，则向该客户发送结束语。
     返回是否成功结束（即客户原本在队列中）。
     """
-    data = unreplied_customers.pop(user_id, None)
+    data = cfg.unreplied_customers.pop(user_id, None)
     if data is None:
         return False
 
     pending = data["pending_since"]
     elapsed = time.time() - pending
-    reply_durations.append(elapsed)
+    cfg.reply_durations.append(elapsed)
     log.info("会话结束: user_id=%s, 耗时=%.1f秒", user_id, elapsed)
 
     asyncio.create_task(archive_session(user_id, pending, data["msg_ids"]))
@@ -278,7 +319,7 @@ async def close_session(user_id: int, send_closing: bool = False) -> bool:
         try:
             await client.send_private_msg(
                 user_id=str(user_id),
-                message=CLOSING_MESSAGE,
+                message=cfg.CLOSING_MESSAGE,
             )
             log.info("自动发送结束语成功: user_id=%s", user_id)
         except Exception as e:
@@ -293,18 +334,18 @@ async def send_status_panel(group_id: int):
     uptime = time.time() - STARTED_AT
     uptime_str = format_duration(uptime)
 
-    pending_count = len(unreplied_customers)
-    total_replies = len(reply_durations)
+    pending_count = len(cfg.unreplied_customers)
+    total_replies = len(cfg.reply_durations)
 
     if total_replies > 0:
-        min_str = format_duration(min(reply_durations))
-        max_str = format_duration(max(reply_durations))
-        avg_str = format_duration(statistics.mean(reply_durations))
-        median_str = format_duration(statistics.median(reply_durations))
+        min_str = format_duration(min(cfg.reply_durations))
+        max_str = format_duration(max(cfg.reply_durations))
+        avg_str = format_duration(statistics.mean(cfg.reply_durations))
+        median_str = format_duration(statistics.median(cfg.reply_durations))
     else:
         min_str = max_str = avg_str = median_str = "暂无数据"
 
-    monitored_count = len(monitored_forwards)
+    monitored_count = len(cfg.monitored_forwards)
 
     panel = (
         "🤖 机器人状态面板\n"

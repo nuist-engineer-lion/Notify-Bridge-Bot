@@ -9,14 +9,8 @@ from napcat import (
     UnknownMessageSegment,
 )
 
-from .config import (
-    log,
-    WHITELIST,
-    PROCESSED_FRIEND_REQUESTS_EXPIRE,
-    friend_approve_time,
-    unreplied_customers,
-    client,
-)
+from . import config as cfg
+from .config import log
 from .state import save_state
 from .message_sender import close_session
 
@@ -40,20 +34,20 @@ async def handle_private_msg(event: PrivateMessageEvent) -> bool:
     """处理客户发来的私聊消息：加入/更新待回复队列"""
     uid = int(event.user_id)
 
-    if uid in WHITELIST:
+    if uid in cfg.WHITELIST:
         return False
 
     now = time.time()
 
     # 检查用户是否刚通过好友申请（窗口期内忽略其消息）
-    if uid in friend_approve_time and (now - friend_approve_time[uid]) < PROCESSED_FRIEND_REQUESTS_EXPIRE:
+    if uid in cfg.friend_approve_time and (now - cfg.friend_approve_time[uid]) < cfg.PROCESSED_FRIEND_REQUESTS_EXPIRE:
         log.info("忽略刚通过好友申请的用户 %d 的消息（窗口期 %d 秒），不加入队列",
-                 uid, PROCESSED_FRIEND_REQUESTS_EXPIRE)
+                 uid, cfg.PROCESSED_FRIEND_REQUESTS_EXPIRE)
         return True
 
-    if uid not in unreplied_customers:
+    if uid not in cfg.unreplied_customers:
         msg_text = extract_message_text(event.message)
-        unreplied_customers[uid] = {
+        cfg.unreplied_customers[uid] = {
             "last_active": now,
             "msg_ids": [event.message_id],
             "is_newly_reported": False,
@@ -61,14 +55,14 @@ async def handle_private_msg(event: PrivateMessageEvent) -> bool:
             "pending_since": now,
         }
         log.info("新增客户 %d 进入待回复队列 (msg_id=%s, 内容: %s)。当前队列长度: %d",
-                 uid, event.message_id, msg_text, len(unreplied_customers))
+                 uid, event.message_id, msg_text, len(cfg.unreplied_customers))
     else:
-        unreplied_customers[uid]["last_active"] = now
-        unreplied_customers[uid]["msg_ids"].append(event.message_id)
-        unreplied_customers[uid]["is_newly_reported"] = False
-        unreplied_customers[uid]["reported_milestones"].clear()
+        cfg.unreplied_customers[uid]["last_active"] = now
+        cfg.unreplied_customers[uid]["msg_ids"].append(event.message_id)
+        cfg.unreplied_customers[uid]["is_newly_reported"] = False
+        cfg.unreplied_customers[uid]["reported_milestones"].clear()
         log.info("客户 %d 追加消息 (msg_id=%s)，累计 %d 条，重置通报倒计时。",
-                 uid, event.message_id, len(unreplied_customers[uid]["msg_ids"]))
+                 uid, event.message_id, len(cfg.unreplied_customers[uid]["msg_ids"]))
 
     save_state()
     return True
@@ -77,10 +71,10 @@ async def handle_private_msg(event: PrivateMessageEvent) -> bool:
 async def handle_sent_msg(event: PrivateMessageEvent) -> bool:
     """处理客服发出的私聊消息：若目标在队列中则结束会话"""
     tid = event.target_id
-    if tid in unreplied_customers:
-        unreplied_customers[tid]["msg_ids"].append(event.message_id)
+    if tid in cfg.unreplied_customers:
+        cfg.unreplied_customers[tid]["msg_ids"].append(event.message_id)
         await close_session(tid, send_closing=False)
-        log.info("客服已回复 %s，移除提醒并记录耗时。剩余未回复: %d", tid, len(unreplied_customers))
+        log.info("客服已回复 %s，移除提醒并记录耗时。剩余未回复: %d", tid, len(cfg.unreplied_customers))
         return True
     return False
 
@@ -88,7 +82,7 @@ async def handle_sent_msg(event: PrivateMessageEvent) -> bool:
 async def handle_friend_poke(event: FriendPokeEvent) -> bool:
     """处理私聊戳一戳：自动发送结束语并从队列移除"""
     sid = event.sender_id
-    if event.target_id == client.self_id and sid not in WHITELIST:
+    if event.target_id == cfg.client.self_id and sid not in cfg.WHITELIST:
         closed = await close_session(sid, send_closing=True)
         if closed:
             log.info("私聊戳一戳结束会话: user_id=%s", sid)

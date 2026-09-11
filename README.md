@@ -25,7 +25,9 @@
 - 按里程碑进行超时催办
 - 支持夜间免打扰：夜间延后提醒，次日指定时间汇总发送
 - 支持在通知群引用机器人消息后执行 `.say` / `.more` / `.bye` / `.close` / `.list` / `.help`
-- 支持通过配置的表情映射触发 `say` / `more` / `bye` / `close` / `cancel`
+- 支持通过配置的表情映射触发 `say` / `more` / `bye` / `close` / `cancel` / `recall`
+- 支持限时撤回：`.say` 发送成功后，点击通报消息上的撤回表情即可撤回刚发送给客户的私聊消息
+- 支持 AI 回复建议：提醒合并转发的第一层附上根据客户最近对话生成的建议答复（OpenAI 兼容接口，可在线开关）
 - 支持 `.say` 两段式回复：先输入 `.say`，再发送下一条群消息作为要转发给客户的内容
 - 支持客服直接私聊回复客户后自动结束会话
 - 支持内部群戳一戳查看运行状态面板
@@ -61,6 +63,7 @@
 
 - `.say` 转发时会去掉群消息中的 `Reply` 段，其余消息段会原样发送给客户，因此文本、图片等消息段都可用。
 - `.say` 进入等待状态后，机器人会给提示消息贴上 `cancel` 表情；贴该表情即可取消本次发送。
+- `.say` 发送成功后，机器人会在通报消息上贴上 `recall` 撤回表情；在 `recall_window_seconds`（默认 60 秒）内点击该表情即可撤回刚发送给客户的私聊消息，超时后点击会提示无法撤回。
 - `.list` 最多展示前 20 条待回复客户记录。
 - 如果引用的是已过期或无法识别的机器人消息，机器人会返回“操作已过期”或“无法识别的消息”。
 
@@ -77,8 +80,10 @@
 | `bye` | `124` | 发送结束语并关闭会话 |
 | `close` | `75` | 直接关闭会话 |
 | `cancel` | `96` | 取消等待中的 `.say` |
+| `recall` | `89` | 限时撤回 `.say` 刚发送给客户的私聊消息 |
 
 - **注意：** 表情快捷操作只支持 **单客户** 消息；如果一条合并转发里包含多个客户，机器人不会直接执行快捷关闭或快捷回复。
+- `recall` 表情只在 `.say` 的成功通报消息上出现；在 `recall_window_seconds` 时间窗口内点击才会生效，撤回成功后机器人会在群内提示。
 
 ## 私聊交互
 
@@ -103,7 +108,13 @@
 
 ## 配置说明
 
-项目使用根目录下的 `config.yaml` 作为配置文件。仓库当前没有单独的 `config.example.yaml`，请直接按实际环境修改现有配置。
+项目运行时读取根目录下的明文 `config.yaml`。
+
+由于仓库是**公开**的，真实配置不得直接提交：
+
+- 仓库内提交：`config.example.yaml`（结构模板）、`config.yaml.enc`（SOPS + age 密文）、`.sops.yaml`
+- 本机私有：明文 `config.yaml`（已 gitignore）、age 私钥 `*.agekey`
+- 远端主机：解密后的明文 `config.yaml`，以及 `/etc/notifybot/age.key`（权限 600）
 
 ### 配置文件示例
 
@@ -207,6 +218,26 @@ emoji_mapping:
   bye: 124
   say: 123
   cancel: 96
+  recall: 89
+
+# .say 发送成功后允许通过表情撤回的时间窗口（秒）
+recall_window_seconds: 60
+
+# AI 回复建议（OpenAI 兼容接口：DeepSeek / 通义 / GLM / one-api 等均可）
+# 注意：客户对话内容会发送给所配置的 LLM 服务；api_key 属敏感信息，走加密配置流程
+ai_suggestion:
+  enabled: false
+  base_url: "https://api.deepseek.com/v1"
+  api_key: "sk-xxxx"
+  model: "deepseek-chat"
+  # system 提示词可自定义（多行），留空使用内置默认
+  system_prompt: |-
+    你是一家维修客服的助手。请根据以下客服与客户的最近对话，以客服身份草拟下一条发给客户的回复。
+    要求：只输出回复内容本身，不要任何解释、前缀或引号；语气友好专业、简洁；如果客户诉求还不明确，先回应已知信息并礼貌追问。
+  temperature: 0.7          # 采样温度，越高越发散
+  timeout_seconds: 12       # 单次生成超时，失败不影响提醒正常发送
+  max_context_messages: 20  # 送入模型的最近对话条数
+  max_suggestion_chars: 300 # 建议文本截断长度
 ```
 
 ### 结构化消息示例
@@ -245,6 +276,7 @@ welcome_message:
 | `state_file` | 运行状态持久化文件 |
 | `recent_message_max_age` | 构造提醒合并转发时回看的消息时间窗口 |
 | `emoji_mapping` | 表情 ID 到快捷动作的映射 |
+| `ai_suggestion` | AI 回复建议（OpenAI 兼容接口配置）；`enabled: false` 或缺省时功能关闭；支持 `.reload cfg` 在线开关 |
 
 ## 运行要求
 
@@ -294,6 +326,7 @@ python main.py
 - 客户首次发消息后不会立刻提醒
 - 只有当“距离最后一条客户消息已满 1 分钟”时，才会推送到内部群
 - 如果客户在等待期间继续发消息，会重置计时并清空已上报的里程碑
+- 开启 `ai_suggestion` 后，提醒合并转发的第一层会附上根据该客户最近对话生成的 AI 建议回复，供客服参考后用 `.say` 发送；生成失败或超时会自动省略，不影响提醒本身
 
 ### 超时催办
 
@@ -384,13 +417,76 @@ python main.py
 - `src/utils.py`：时长格式化、值班成员判断、夜间时段判断
 - `src/models.py`：TypedDict 类型定义
 
+
+
+## 配置加密与远端热更新
+
+### 本地改配置（推荐）
+
+1. 复制示例并编辑明文：
+   ```bash
+   cp config.example.yaml config.yaml
+   # 编辑 config.yaml
+   ```
+2. 确保本机已安装 [sops](https://github.com/getsops/sops) 与 [age](https://github.com/FiloSottile/age)，且 `.sops.yaml` 中的 age 公钥可用。
+   加密使用 **整文件 binary 模式**（因为 `availability` 使用数字 QQ 号作为键，SOPS 结构化 YAML 模式不支持非字符串键）。
+3. 加密并提交密文：
+   ```bash
+   # Linux/macOS
+   ./scripts/config-encrypt
+   # Windows PowerShell
+   ./scripts/config-encrypt.ps1
+
+   git add config.yaml.enc .sops.yaml
+   git commit -m "chore: update encrypted config"
+   git push origin main
+   ```
+4. push 到 `main` 后，GitHub Actions 会识别配置-only 变更：远端 `git pull` → 解密 → 原子替换明文 `config.yaml` → **不重启**，等待 bot 热重载。
+
+> 本地开发可把 age 私钥放在被忽略的 `*.agekey`（例如 `.tools/notifybot.agekey`），远端生产私钥固定为 `/etc/notifybot/age.key`。**切勿提交私钥。**
+
+### 远端私钥
+
+在部署主机放置 age 私钥：
+
+```bash
+sudo mkdir -p /etc/notifybot
+sudo install -m 600 /path/to/age.key /etc/notifybot/age.key
+```
+
+也可用环境变量 `SOPS_AGE_KEY_FILE` 覆盖默认路径。
+
+### 群内命令
+
+- `.reload cfg`：只重读当前明文 `config.yaml` 并回报成败，**不** `git pull`、**不**展示配置内容。
+- 兼容旧输入 `.update cfg`，行为与 `.reload cfg` 相同。
+- 自动生效以 Actions 为准；群命令仅作文件已就位后的手动 reload。
+
+### 代码发布 vs 配置热更
+
+同一工作流 `.github/workflows/deploy-prod.yml` 按变更分流：
+
+| 变更内容 | 远端动作 |
+|------|------|
+| 仅 `config.yaml.enc` / 配置脚本 | `pull` → 解密应用 → 等待热重载（不重启） |
+| `src/`、依赖、启动相关等 | `pull` → 解密（如有）→ `uv sync` → `systemctl restart notifybot` |
+| 两者都有 | 走完整重启路径 |
+
+### 需要的 GitHub Secrets
+
+- `SSH_PRIVATE_KEY`、`REMOTE_USER`、`REMOTE_HOST`
+- 可选 `REMOTE_PORT`（默认 22）
+- 建议配置 Cloudflare Access Service Token：`CLOUDFLARE_ACCESS_CLIENT_ID`、`CLOUDFLARE_ACCESS_CLIENT_SECRET`
+
+### 公开仓库注意
+
+- clone 公开仓库只能看到密文与 example，没有 age 私钥无法还原生产配置。
+- 历史中若曾提交过明文 token，请另行轮换；本流程负责后续不再明文入库。
 ## 后续可改进方向
 
 - 支持多客户合并转发下的拆分处理
 - 为归档和状态提供清理、导出或检索工具
 - 增加更细粒度的权限控制和群内角色区分
-- 补充测试与更明确的部署说明
-- 提供独立的 `config.example.yaml`，避免直接修改真实配置
 
 ## License
 
