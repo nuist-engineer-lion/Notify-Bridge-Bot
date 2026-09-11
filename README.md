@@ -25,12 +25,14 @@
 - 按里程碑进行超时催办
 - 支持夜间免打扰：夜间延后提醒，次日指定时间汇总发送
 - 支持在通知群引用机器人消息后执行 `.say` / `.more` / `.bye` / `.close` / `.list` / `.help`
-- 支持通过配置的表情映射触发 `say` / `more` / `bye` / `close` / `cancel`
+- 支持通过配置的表情映射触发 `say` / `more` / `bye` / `close` / `cancel` / `recall`
+- 支持限时撤回：`.say` 发送成功后，点击通报消息上的撤回表情即可撤回刚发送给客户的私聊消息
+- 支持 AI 回复建议：提醒合并转发的第一层附上根据客户最近对话生成的建议答复（OpenAI 兼容接口，可在线开关）
 - 支持 `.say` 两段式回复：先输入 `.say`，再发送下一条群消息作为要转发给客户的内容
 - 支持客服直接私聊回复客户后自动结束会话
 - 支持内部群戳一戳查看运行状态面板
 - 支持状态持久化：程序重启后自动恢复待回复客户、监听消息和夜间延后通知
-- 支持会话归档：每次会话结束后自动保存聊天记录到本地 `JSONL`
+- 支持会话归档：对话周期内事件实时写入本地 SQLite 会话库，会话关闭后再按时间段拉取历史对账补漏，双保险保证记录完整
 - 支持统计已完结会话的最短、最长、平均和中位回复耗时
 
 ## 工作流程
@@ -40,7 +42,7 @@
 3. 超过 1 分钟仍未回复时，机器人向内部群发送“新客户提醒”。
 4. 机器人会根据 `milestones` 配置继续发送“超时催办”。
 5. 客服可以直接私聊回复客户，也可以在内部群引用消息执行命令，或使用配置好的表情快捷处理。
-6. 会话结束后，客户会从待回复队列中移除，回复耗时会计入统计，并异步写入本地归档。
+6. 会话结束后，客户会从待回复队列中移除，回复耗时会计入统计；会话周期随即关闭，并按周期时间段拉取历史消息对账补漏。
 7. 若开启夜间模式，夜间时段的新客户提醒和里程碑提醒会暂存，并在次日指定时间汇总发送。
 
 ## 内部群命令
@@ -61,6 +63,7 @@
 
 - `.say` 转发时会去掉群消息中的 `Reply` 段，其余消息段会原样发送给客户，因此文本、图片等消息段都可用。
 - `.say` 进入等待状态后，机器人会给提示消息贴上 `cancel` 表情；贴该表情即可取消本次发送。
+- `.say` 发送成功后，机器人会在通报消息上贴上 `recall` 撤回表情；在 `recall_window_seconds`（默认 60 秒）内点击该表情即可撤回刚发送给客户的私聊消息，超时后点击会提示无法撤回。
 - `.list` 最多展示前 20 条待回复客户记录。
 - 如果引用的是已过期或无法识别的机器人消息，机器人会返回“操作已过期”或“无法识别的消息”。
 
@@ -77,8 +80,10 @@
 | `bye` | `124` | 发送结束语并关闭会话 |
 | `close` | `75` | 直接关闭会话 |
 | `cancel` | `96` | 取消等待中的 `.say` |
+| `recall` | `89` | 限时撤回 `.say` 刚发送给客户的私聊消息 |
 
 - **注意：** 表情快捷操作只支持 **单客户** 消息；如果一条合并转发里包含多个客户，机器人不会直接执行快捷关闭或快捷回复。
+- `recall` 表情只在 `.say` 的成功通报消息上出现；在 `recall_window_seconds` 时间窗口内点击才会生效，撤回成功后机器人会在群内提示。
 
 ## 私聊交互
 
@@ -103,7 +108,13 @@
 
 ## 配置说明
 
-项目使用根目录下的 `config.yaml` 作为配置文件。仓库当前没有单独的 `config.example.yaml`，请直接按实际环境修改现有配置。
+项目运行时读取根目录下的明文 `config.yaml`。
+
+由于仓库是**公开**的，真实配置不得直接提交：
+
+- 仓库内提交：`config.example.yaml`（结构模板）、`config.yaml.enc`（SOPS + age 密文）、`.sops.yaml`
+- 本机私有：明文 `config.yaml`（已 gitignore）、age 私钥 `*.agekey`
+- 远端主机：解密后的明文 `config.yaml`，以及 `/etc/notifybot/age.key`（权限 600）
 
 ### 配置文件示例
 
@@ -194,8 +205,11 @@ night_mode:
 # 状态持久化文件
 state_file: "archives/state.json"
 
-# 会话归档目录
+# 会话归档目录（SQLite 会话库 archive.db 也存放在此）
 archive_dir: "archives"
+
+# 会话库保留期（天），0 = 永久保留
+archive_retention_days: 0
 
 # 构造合并转发时，最多回看多久以内的历史消息（秒）
 recent_message_max_age: 86400
@@ -207,6 +221,26 @@ emoji_mapping:
   bye: 124
   say: 123
   cancel: 96
+  recall: 89
+
+# .say 发送成功后允许通过表情撤回的时间窗口（秒）
+recall_window_seconds: 60
+
+# AI 回复建议（OpenAI 兼容接口：DeepSeek / 通义 / GLM / one-api 等均可）
+# 注意：客户对话内容会发送给所配置的 LLM 服务；api_key 属敏感信息，走加密配置流程
+ai_suggestion:
+  enabled: false
+  base_url: "https://api.deepseek.com/v1"
+  api_key: "sk-xxxx"
+  model: "deepseek-chat"
+  # system 提示词可自定义（多行），留空使用内置默认
+  system_prompt: |-
+    你是一家维修客服的助手。请根据以下客服与客户的最近对话，以客服身份草拟下一条发给客户的回复。
+    要求：只输出回复内容本身，不要任何解释、前缀或引号；语气友好专业、简洁；如果客户诉求还不明确，先回应已知信息并礼貌追问。
+  temperature: 0.7          # 采样温度，越高越发散
+  timeout_seconds: 12       # 单次生成超时，失败不影响提醒正常发送
+  max_context_messages: 20  # 送入模型的最近对话条数
+  max_suggestion_chars: 300 # 建议文本截断长度
 ```
 
 ### 结构化消息示例
@@ -241,10 +275,12 @@ welcome_message:
 | `availability` | 当前可用成员时间表；用于提醒时随机 `@` 一位值班成员 |
 | `max_listen_age` | 机器人消息保持可操作状态的最长时间 |
 | `night_mode` | 夜间免打扰起止时间与汇总时间 |
-| `archive_dir` | 会话归档目录 |
+| `archive_dir` | 会话归档目录（含 SQLite 会话库 `archive.db`） |
+| `archive_retention_days` | 会话库保留天数，`0` 表示永久保留 |
 | `state_file` | 运行状态持久化文件 |
 | `recent_message_max_age` | 构造提醒合并转发时回看的消息时间窗口 |
 | `emoji_mapping` | 表情 ID 到快捷动作的映射 |
+| `ai_suggestion` | AI 回复建议（OpenAI 兼容接口配置）；`enabled: false` 或缺省时功能关闭；支持 `.reload cfg` 在线开关 |
 
 ## 运行要求
 
@@ -294,6 +330,7 @@ python main.py
 - 客户首次发消息后不会立刻提醒
 - 只有当“距离最后一条客户消息已满 1 分钟”时，才会推送到内部群
 - 如果客户在等待期间继续发消息，会重置计时并清空已上报的里程碑
+- 开启 `ai_suggestion` 后，提醒合并转发的第一层会附上根据该客户最近对话生成的 AI 建议回复，供客服参考后用 `.say` 发送；生成失败或超时会自动省略，不影响提醒本身
 
 ### 超时催办
 
@@ -320,11 +357,62 @@ python main.py
 - 最短、最长、平均、中位回复耗时
 - 当前监听中的机器人消息数量
 
-## 状态持久化与归档
+## 状态持久化与会话归档
 
-- `state_file` 会保存待回复客户、监听消息映射、命令防抖时间、夜间延后通知和最近一次夜间汇总日期
-- 每次会话结束后，机器人会异步拉取该客户会话窗口内的消息并追加写入 `archives/<qq>_<yyyymmdd>.jsonl`
-- 归档采用 `JSONL`，适合后续脚本分析或导入其他系统
+### 运行状态（state.json）
+
+`state_file` 保存待回复客户（含其会话周期 ID）、监听消息映射、命令防抖时间、夜间延后通知和最近一次夜间汇总日期，重启后自动恢复。
+
+### 会话归档（SQLite 双保险机制）
+
+对话周期从客户进入待回复队列开始，到会话关闭结束。周期内发生的每一件事通过两层机制保证完整记录：
+
+1. **实时采集**：周期内事件即时写入 `archives/archive.db`（SQLite，WAL 模式），崩溃/重启不丢、不依赖事后回拉
+2. **历史拉取对账**：会话关闭后，按该周期的权威时间段 `[started_at, ended_at]` 拉取双方历史消息，与已入库内容按 `message_id` 对账，只补实时采集遗漏的部分（如客服在其他设备回复且上报异常），并写入一条对账审计事件
+
+记录的事件类型：
+
+| 事件类型 | 含义 |
+|----------|------|
+| `session_open` / `session_close` | 周期开启/关闭（关闭含原因：say / bye / close / direct_reply / customer_poke 等） |
+| `customer_message` | 客户私聊消息（完整消息段） |
+| `staff_reply` | 客服回复（`.say` 发送或客服账号直接私聊，记录操作者/发送者） |
+| `bot_send` | 机器人主动发送给客户的系统消息（结束语、欢迎语等） |
+| `bot_notice` | 内部群提醒/催办（新客户提醒、里程碑催办、夜间汇总，含群消息 ID） |
+| `command` | 客服执行的会话操作命令（say / bye / close，含操作者 QQ） |
+| `poke` | 周期内的戳一戳 |
+| `history_reconcile` | 关闭后的历史拉取对账结果（窗口、拉取/补录条数、缺失清单） |
+
+数据结构：`sessions` 表记录周期（客户、起止时间、耗时、关闭原因），`session_events` 表记录事件流（每条消息保留完整 OB11 消息段；图片等媒体保存 URL，注意 QQ 媒体链接会过期）。
+
+检索示例：
+
+```sql
+-- 某客户的全部会话周期
+SELECT * FROM sessions WHERE customer_uid = 123456 ORDER BY started_at;
+
+-- 某个周期内的完整事件流
+SELECT time, event_type, actor_uid, payload FROM session_events
+WHERE session_id = 42 ORDER BY time;
+
+-- 超过 1 小时才回复的会话
+SELECT * FROM sessions WHERE duration > 3600 ORDER BY duration DESC;
+```
+
+回复耗时统计在重启后自动从会话库恢复最近样本，不再清零。
+
+### 存量 JSONL 迁移
+
+旧版本按 `archives/<qq>_<yyyymmdd>.jsonl` 追加写的归档可用导入工具迁入会话库（幂等，可重复执行）：
+
+```bash
+uv run python scripts/import_jsonl.py --dry-run   # 预览
+uv run python scripts/import_jsonl.py             # 导入
+```
+
+### 保留策略
+
+`archive_retention_days`（默认 `0` = 永久保留）设置保留天数后，巡检任务每小时清理超期的已完结会话。
 
 ## AI 开发指引
 
@@ -345,7 +433,8 @@ python main.py
 - 可操作消息的监听依赖 `monitored_forward_limit` 和 `max_listen_age`；超出窗口后再引用旧消息，机器人可能返回“操作已过期”。
 - `.say` 的等待输入状态保存在内存中，程序重启后不会恢复。
 - 夜间汇总按客户聚合，不保留原始通知类型和里程碑层级。
-- 状态文件和归档目录会随使用时间持续增长，需要自行定期清理。
+- 状态文件和会话库会随使用时间持续增长；会话库可通过 `archive_retention_days` 自动清理，状态文件需自行关注。
+- 归档中的图片等媒体仅保存 URL，QQ 媒体链接会过期，无法永久还原原始文件。
 
 ## 项目结构
 
@@ -356,11 +445,14 @@ python main.py
 ├── pyproject.toml
 ├── uv.lock
 ├── README.md
+├── scripts/
+│   └── import_jsonl.py
 ├── archives/
 └── src/
     ├── __init__.py
     ├── config.py
     ├── group_msg.py
+    ├── history.py
     ├── main.py
     ├── message_sender.py
     ├── models.py
@@ -368,29 +460,96 @@ python main.py
     ├── new_user.py
     ├── private_msg.py
     ├── state.py
+    ├── storage.py
     └── utils.py
 ```
 
 各模块职责：
 
-- `src/main.py`：程序入口、事件分发、启动通知、重连逻辑
+- `src/main.py`：程序入口、事件分发、启动通知、重连逻辑、会话库初始化与启动恢复
 - `src/config.py`：配置加载、全局状态初始化、NapCat 客户端实例
 - `src/private_msg.py`：处理客户私聊消息、客服私聊回复、私聊戳一戳
 - `src/new_user.py`：好友申请自动通过、欢迎消息发送、好友数提醒
 - `src/group_msg.py`：群命令、群表情快捷操作、群戳一戳状态面板
 - `src/message_sender.py`：提醒消息构造、合并转发、会话关闭、状态统计
 - `src/monitor.py`：每 60 秒巡检一次，负责新客户提醒、里程碑催办、夜间汇总和过期清理
-- `src/state.py`：状态保存、状态恢复、会话归档
+- `src/history.py`：对话周期管理、实时事件采集、会话关闭后的历史拉取对账、启动恢复
+- `src/storage.py`：SQLite 会话库表结构与读写（sessions / session_events）
+- `src/state.py`：运行状态保存与恢复
 - `src/utils.py`：时长格式化、值班成员判断、夜间时段判断
 - `src/models.py`：TypedDict 类型定义
+- `scripts/import_jsonl.py`：存量 JSONL 归档导入工具
 
+
+
+## 配置加密与远端热更新
+
+### 本地改配置（推荐）
+
+1. 复制示例并编辑明文：
+   ```bash
+   cp config.example.yaml config.yaml
+   # 编辑 config.yaml
+   ```
+2. 确保本机已安装 [sops](https://github.com/getsops/sops) 与 [age](https://github.com/FiloSottile/age)，且 `.sops.yaml` 中的 age 公钥可用。
+   加密使用 **整文件 binary 模式**（因为 `availability` 使用数字 QQ 号作为键，SOPS 结构化 YAML 模式不支持非字符串键）。
+3. 加密并提交密文：
+   ```bash
+   # Linux/macOS
+   ./scripts/config-encrypt
+   # Windows PowerShell
+   ./scripts/config-encrypt.ps1
+
+   git add config.yaml.enc .sops.yaml
+   git commit -m "chore: update encrypted config"
+   git push origin main
+   ```
+4. push 到 `main` 后，GitHub Actions 会识别配置-only 变更：远端 `git pull` → 解密 → 原子替换明文 `config.yaml` → **不重启**，等待 bot 热重载。
+
+> 本地开发可把 age 私钥放在被忽略的 `*.agekey`（例如 `.tools/notifybot.agekey`），远端生产私钥固定为 `/etc/notifybot/age.key`。**切勿提交私钥。**
+
+### 远端私钥
+
+在部署主机放置 age 私钥：
+
+```bash
+sudo mkdir -p /etc/notifybot
+sudo install -m 600 /path/to/age.key /etc/notifybot/age.key
+```
+
+也可用环境变量 `SOPS_AGE_KEY_FILE` 覆盖默认路径。
+
+### 群内命令
+
+- `.reload cfg`：只重读当前明文 `config.yaml` 并回报成败，**不** `git pull`、**不**展示配置内容。
+- 兼容旧输入 `.update cfg`，行为与 `.reload cfg` 相同。
+- 自动生效以 Actions 为准；群命令仅作文件已就位后的手动 reload。
+
+### 代码发布 vs 配置热更
+
+同一工作流 `.github/workflows/deploy-prod.yml` 按变更分流：
+
+| 变更内容 | 远端动作 |
+|------|------|
+| 仅 `config.yaml.enc` / 配置脚本 | `pull` → 解密应用 → 等待热重载（不重启） |
+| `src/`、依赖、启动相关等 | `pull` → 解密（如有）→ `uv sync` → `systemctl restart notifybot` |
+| 两者都有 | 走完整重启路径 |
+
+### 需要的 GitHub Secrets
+
+- `SSH_PRIVATE_KEY`、`REMOTE_USER`、`REMOTE_HOST`
+- 可选 `REMOTE_PORT`（默认 22）
+- 建议配置 Cloudflare Access Service Token：`CLOUDFLARE_ACCESS_CLIENT_ID`、`CLOUDFLARE_ACCESS_CLIENT_SECRET`
+
+### 公开仓库注意
+
+- clone 公开仓库只能看到密文与 example，没有 age 私钥无法还原生产配置。
+- 历史中若曾提交过明文 token，请另行轮换；本流程负责后续不再明文入库。
 ## 后续可改进方向
 
 - 支持多客户合并转发下的拆分处理
-- 为归档和状态提供清理、导出或检索工具
+- 会话库的导出工具与群内检索命令（当前可用 SQL 直接查询 `archives/archive.db`）
 - 增加更细粒度的权限控制和群内角色区分
-- 补充测试与更明确的部署说明
-- 提供独立的 `config.example.yaml`，避免直接修改真实配置
 
 ## License
 

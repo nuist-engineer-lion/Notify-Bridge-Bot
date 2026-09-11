@@ -10,19 +10,8 @@ from napcat import (
     Message,
 )
 
-from .config import (
-    log,
-    INTERNAL_GROUP_ID,
-    CLOSING_MESSAGE,
-    DEBOUNCE_SECONDS,
-    EMOJI_MAPPING,
-    EMOJI_TO_CMD,
-    monitored_forwards,
-    unreplied_customers,
-    last_command_time,
-    pending_say,
-    client,
-)
+from . import config as cfg
+from .config import log
 from .utils import format_duration
 from .message_sender import (
     close_session,
@@ -31,7 +20,11 @@ from .message_sender import (
     send_and_track_feedback,
     track_forward_message,
     add_emoji_to_message,
+    action_emoji_ids,
+    build_say_feedback,
+    register_recallable_send,
 )
+from . import history
 
 
 # ======================= 昵称批量获取 =======================
@@ -44,7 +37,7 @@ async def get_nicknames_batch(user_ids: list[int], delay: float = 0.2) -> dict[i
     nicknames: dict[int, str] = {}
     for uid in user_ids:
         try:
-            info = await client.get_stranger_info(user_id=str(uid))
+            info = await cfg.client.get_stranger_info(user_id=str(uid))
             nickname = info.get("nickname", "未知昵称")
             nicknames[uid] = str(nickname)
         except Exception as e:
@@ -79,14 +72,14 @@ async def resolve_target_from_reply(reply_id: int) -> tuple[list[int] | None, st
     根据被引用的消息ID解析对应的客户列表。
     返回 (customer_ids, error_message)，若成功则 error_message 为 None。
     """
-    data = monitored_forwards.get(reply_id)
+    data = cfg.monitored_forwards.get(reply_id)
     if data is not None:
         return data["customer_ids"], None
 
     try:
-        msg_detail = await client.get_msg(message_id=str(reply_id))
+        msg_detail = await cfg.client.get_msg(message_id=str(reply_id))
         sender_id = int(msg_detail.get("user_id", 0))
-        self_id = int(client.self_id)
+        self_id = int(cfg.client.self_id)
         if sender_id == self_id:
             return None, "操作已过期"
         else:
@@ -96,24 +89,30 @@ async def resolve_target_from_reply(reply_id: int) -> tuple[list[int] | None, st
         return None, "查询消息失败"
 
 
-async def handle_bye_command(gid: int, reply_id: int, customer_id: int) -> str:
+async def handle_bye_command(gid: int, reply_id: int, customer_id: int, operator_uid: int | None = None) -> str:
     """执行 .bye 命令：发送结束语并关闭会话，返回反馈文本"""
     try:
-        await client.send_private_msg(
+        await history.record_command(customer_id, operator_uid, "bye", reply_id=reply_id, group_id=gid)
+        resp = await cfg.client.send_private_msg(
             user_id=str(customer_id),
-            message=CLOSING_MESSAGE,
+            message=cfg.CLOSING_MESSAGE,
         )
-        closed = await close_session(customer_id, send_closing=False)
+        mid = resp.get("message_id") if resp else None
+        await history.record_bot_send(
+            customer_id, int(mid) if mid is not None else None, "closing_message", cfg.CLOSING_MESSAGE,
+        )
+        closed = await close_session(customer_id, send_closing=False, close_reason="bye")
         return f"✅ 已向客户 {customer_id} 发送结束语。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
     except Exception as e:
         log.error("发送结束语失败: customer=%s, err=%s", customer_id, e, exc_info=True)
         return f"❌ 发送失败：{e}"
 
 
-async def handle_close_command(gid: int, reply_id: int, customer_id: int) -> str:
+async def handle_close_command(gid: int, reply_id: int, customer_id: int, operator_uid: int | None = None) -> str:
     """执行 .close 命令：仅关闭会话，不发送结束语，返回反馈文本"""
     try:
-        closed = await close_session(customer_id, send_closing=False)
+        await history.record_command(customer_id, operator_uid, "close", reply_id=reply_id, group_id=gid)
+        closed = await close_session(customer_id, send_closing=False, close_reason="close")
         return f"✅ 已关闭客户 {customer_id} 的会话（未发送结束语）。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
     except Exception as e:
         log.error("关闭会话失败: customer=%s, err=%s", customer_id, e, exc_info=True)
@@ -126,7 +125,7 @@ async def handle_more_command(gid: int, reply_id: int, customer_id: int) -> tupl
     返回 (成功标志, 反馈文本或 None, 新合并转发的消息ID或 None)
     """
     try:
-        resp = await client.get_friend_msg_history(
+        resp = await cfg.client.get_friend_msg_history(
             user_id=str(customer_id),
             count=100,
             parse_mult_msg=True,
@@ -153,6 +152,59 @@ async def handle_more_command(gid: int, reply_id: int, customer_id: int) -> tupl
         return False, f"❌ 获取历史消息失败：{e}", None
 
 
+async def handle_recall_click(gid: int, mid: int, user_id: int) -> bool:
+    """
+    处理撤回表情点击：撤回最近一次 .say 发送给客户的私聊消息。
+    仅在 recall_window_seconds 内生效；返回 True 表示命中了可撤回记录。
+    """
+    data = cfg.recallable_sends.pop(mid, None)
+    if data is None:
+        return False
+
+    customer_id = data["customer_id"]
+    elapsed = time.time() - data["sent_at"]
+    if elapsed > cfg.RECALL_WINDOW_SECONDS:
+        log.info("撤回请求已超时: feedback_msg=%d, 耗时 %.1f 秒, 点击者=%d", mid, elapsed, user_id)
+        await cfg.client.send_group_msg(
+            group_id=str(gid),
+            message=[Reply(id=str(mid)), Text(text=f"⏰ 已超过 {cfg.RECALL_WINDOW_SECONDS} 秒，无法撤回该消息。")],
+        )
+        return True
+
+    try:
+        await cfg.client.delete_msg(message_id=str(data["customer_msg_id"]))
+    except Exception as e:
+        log.error("撤回私聊消息失败: customer=%s, msg_id=%s, err=%s",
+                  customer_id, data["customer_msg_id"], e, exc_info=True)
+        # 仍在时限内则恢复记录，允许重试
+        if time.time() - data["sent_at"] <= cfg.RECALL_WINDOW_SECONDS:
+            cfg.recallable_sends[mid] = data
+        await cfg.client.send_group_msg(
+            group_id=str(gid),
+            message=[Reply(id=str(mid)), Text(text=f"❌ 撤回失败：{e}")],
+        )
+        return True
+
+    log.info("已撤回 .say 发送的私聊消息: customer=%d, msg_id=%d, 点击者=%d",
+             customer_id, data["customer_msg_id"], user_id)
+    try:
+        await history.record_command(
+            customer_id, user_id, "recall",
+            feedback_msg_id=mid,
+            customer_msg_id=data["customer_msg_id"],
+            group_id=gid,
+            operator_id=data.get("operator_id"),
+            elapsed=round(elapsed, 1),
+        )
+    except Exception as e:
+        log.error("记录撤回事件失败: customer=%s, err=%s", customer_id, e)
+    await cfg.client.send_group_msg(
+        group_id=str(gid),
+        message=[Reply(id=str(mid)), Text(text=f"🧹 已撤回发送给客户 {customer_id} 的消息。")],
+    )
+    return True
+
+
 # ======================= 群事件处理 =======================
 
 async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
@@ -160,7 +212,7 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
     gid = event.group_id
     mid = event.message_id
 
-    if gid != INTERNAL_GROUP_ID or event.user_id == client.self_id:
+    if gid != cfg.INTERNAL_GROUP_ID or event.user_id == cfg.client.self_id:
         return False
 
     # 动态提取表情 ID
@@ -184,19 +236,25 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
     if eid is None or not is_add:
         return True
 
+    # 检查是否点击了 .say 通报消息上的撤回表情
+    # 过期记录在宽限期内仍保留，handle_recall_click 会回复超时提示
+    if eid == cfg.EMOJI_MAPPING.get("recall") and mid in cfg.recallable_sends:
+        await handle_recall_click(gid, mid, event.user_id)
+        return True
+
     # 检查是否是 pending say 提示消息上的确认/取消
-    pending = pending_say.get(event.user_id)
+    pending = cfg.pending_say.get(event.user_id)
     if pending and mid == pending["prompt_msg_id"]:
-        cmd = EMOJI_TO_CMD.get(eid)
+        cmd = cfg.EMOJI_TO_CMD.get(eid)
         if cmd == "cancel":
-            pending_say.pop(event.user_id, None)
-            await client.send_group_msg(
+            cfg.pending_say.pop(event.user_id, None)
+            await cfg.client.send_group_msg(
                 group_id=str(gid),
                 message=[Reply(id=str(mid)), Text(text="❌ 已取消发送。")],
             )
         return True
 
-    tracked_data = monitored_forwards.get(mid)
+    tracked_data = cfg.monitored_forwards.get(mid)
     if tracked_data is None:
         return True
 
@@ -205,39 +263,40 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
         return True
 
     customer_id = customer_ids[0]
-    cmd = EMOJI_TO_CMD.get(eid)
+    cmd = cfg.EMOJI_TO_CMD.get(eid)
     if cmd is None:
         return True
 
     try:
         if cmd == "say":
-            resp = await client.send_group_msg(
+            resp = await cfg.client.send_group_msg(
                 group_id=str(gid),
                 message=[Reply(id=str(mid)), Text(text="📝 请发送要回复给客户的消息内容：")],
             )
             prompt_msg_id = resp.get("message_id")
-            pending_say[event.user_id] = {
+            cfg.pending_say[event.user_id] = {
                 "prompt_msg_id": prompt_msg_id,
                 "customer_id": customer_id,
                 "reply_id": mid,
                 "group_id": gid,
             }
+            await history.record_command(customer_id, event.user_id, "say", mode="pending", via="emoji", reply_id=mid, group_id=gid)
             if prompt_msg_id:
                 await add_emoji_to_message(prompt_msg_id, [
-                    EMOJI_MAPPING["cancel"],
+                    cfg.EMOJI_MAPPING["cancel"],
                 ])
         elif cmd == "close":
-            feedback = await handle_close_command(gid, mid, customer_id)
+            feedback = await handle_close_command(gid, mid, customer_id, operator_uid=event.user_id)
             await send_and_track_feedback(gid, mid, feedback, customer_id)
         elif cmd == "bye":
-            feedback = await handle_bye_command(gid, mid, customer_id)
+            feedback = await handle_bye_command(gid, mid, customer_id, operator_uid=event.user_id)
             await send_and_track_feedback(gid, mid, feedback, customer_id)
         elif cmd == "more":
             success, feedback, new_fwd_id = await handle_more_command(gid, mid, customer_id)
             if success:
                 if new_fwd_id:
                     track_forward_message(new_fwd_id, [customer_id], gid)
-                    await add_emoji_to_message(new_fwd_id, [eid for cmd, eid in EMOJI_MAPPING.items() if cmd != "cancel"])
+                    await add_emoji_to_message(new_fwd_id, action_emoji_ids())
                 if feedback:
                     await send_and_track_feedback(gid, mid, feedback, customer_id)
             else:
@@ -250,7 +309,7 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
 
 async def handle_group_poke(event: GroupPokeEvent) -> bool:
     """处理内部群戳一戳：发送状态面板"""
-    if event.group_id == INTERNAL_GROUP_ID and event.target_id == client.self_id:
+    if event.group_id == cfg.INTERNAL_GROUP_ID and event.target_id == cfg.client.self_id:
         log.info("内部群戳一戳触发状态面板: group=%d", event.group_id)
         await send_status_panel(event.group_id)
         return True
@@ -262,7 +321,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
     gid = event.group_id
     msg_id = event.message_id
 
-    if gid != INTERNAL_GROUP_ID or event.user_id == client.self_id:
+    if gid != cfg.INTERNAL_GROUP_ID or event.user_id == cfg.client.self_id:
         return False
 
     # 解析引用和命令
@@ -278,40 +337,49 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
     log.debug("群命令: reply_id=%s, cmd=%s", reply_id, cmd_text)
 
     # 检查是否处于等待 .say 内容的状态：收到消息立即发送
-    if event.user_id in pending_say and not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help', '.close', '.list')):
+    if event.user_id in cfg.pending_say and not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help', '.close', '.list', '.reload', '.update')):
         segments = extract_sendable_segments(event.message)
         if not segments:
-            await client.send_group_msg(
+            await cfg.client.send_group_msg(
                 group_id=str(gid),
                 message=[Reply(id=str(msg_id)), Text(text="⚠️ 消息内容为空，已忽略。")],
             )
             return True
 
-        pending = pending_say.pop(event.user_id)
+        pending = cfg.pending_say.pop(event.user_id)
         customer_id = pending["customer_id"]
         orig_reply_id = pending["reply_id"]
+        customer_msg_id: int | None = None
         try:
-            await client.send_private_msg(
+            send_resp = await cfg.client.send_private_msg(
                 user_id=str(customer_id),
                 message=segments,
             )
-            closed = await close_session(customer_id, send_closing=False)
-            last_command_time[(orig_reply_id, "say")] = time.time()
-            feedback = f"✅ 已向客户 {customer_id} 发送消息。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
+            raw_mid = send_resp.get("message_id") if send_resp else None
+            customer_msg_id = int(raw_mid) if raw_mid is not None else None
+            await history.record_command(customer_id, event.user_id, "say", mode="content", reply_id=orig_reply_id, group_id=gid)
+            if customer_msg_id is not None:
+                await history.record_staff_reply(customer_id, customer_msg_id, time.time(), segments, actor_uid=event.user_id)
+            closed = await close_session(customer_id, send_closing=False, close_reason="say")
+            cfg.last_command_time[(orig_reply_id, "say")] = time.time()
+            feedback = build_say_feedback(customer_id, closed, customer_msg_id is not None)
         except Exception as e:
             log.error("发送私聊消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
             feedback = f"❌ 发送失败：{e}"
 
-        resp = await client.send_group_msg(
+        resp = await cfg.client.send_group_msg(
             group_id=str(gid),
             message=[Reply(id=str(msg_id)), Text(text=feedback)],
         )
         feedback_msg_id = resp.get("message_id")
         if feedback_msg_id:
             track_forward_message(feedback_msg_id, [customer_id], gid)
+            if customer_msg_id is not None:
+                register_recallable_send(feedback_msg_id, customer_msg_id, customer_id, gid, event.user_id)
+                asyncio.create_task(add_emoji_to_message(feedback_msg_id, [cfg.EMOJI_MAPPING["recall"]]))
         return True
 
-    if not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help', '.close', '.list')):
+    if not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help', '.close', '.list', '.reload', '.update')):
         return True
 
     if cmd_text.startswith(".help"):
@@ -322,11 +390,12 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             "• .close – 关闭会话但不发送结束语\n"
             "• .more – 获取客户的最近100条历史消息\n"
             "• .list – 列出所有未回复客户及其等待时间\n"
+            "• .reload cfg – 重载当前明文配置（不拉代码、不展示内容）\n"
             "• .help – 显示此帮助信息\n"
             "\n"
             "使用方法：回复一条合并转发消息，然后输入对应命令。"
         )
-        await client.send_group_msg(
+        await cfg.client.send_group_msg(
             group_id=str(gid),
             message=[Text(text=help_text)],
         )
@@ -335,10 +404,10 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
     elif cmd_text.startswith(".list"):
         now = time.time()
         key = (msg_id, "list")
-        debounce_list = DEBOUNCE_SECONDS.get("list", 5)
-        last_time = last_command_time.get(key, 0.0)
+        debounce_list = cfg.DEBOUNCE_SECONDS.get("list", 5)
+        last_time = cfg.last_command_time.get(key, 0.0)
         if now - last_time < debounce_list:
-            await client.send_group_msg(
+            await cfg.client.send_group_msg(
                 group_id=str(gid),
                 message=[
                     Reply(id=str(msg_id)),
@@ -347,15 +416,15 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             )
             return True
 
-        if not unreplied_customers:
-            await client.send_group_msg(
+        if not cfg.unreplied_customers:
+            await cfg.client.send_group_msg(
                 group_id=str(gid),
                 message=[Reply(id=str(msg_id)), Text(text="📭 当前没有待回复的客户。")],
             )
             return True
 
         sorted_customers = sorted(
-            unreplied_customers.items(),
+            cfg.unreplied_customers.items(),
             key=lambda item: item[1]["last_active"],
             reverse=True
         )
@@ -376,17 +445,41 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             full_text = "\n".join(lines)
 
         try:
-            resp = await client.send_group_msg(
+            resp = await cfg.client.send_group_msg(
                 group_id=str(gid),
                 message=[Reply(id=str(msg_id)), Text(text=full_text)],
             )
             feedback_msg_id = resp.get("message_id")
             if feedback_msg_id:
                 track_forward_message(feedback_msg_id, [], gid)
-            last_command_time[key] = now
+            cfg.last_command_time[key] = now
             log.info(".list 命令执行成功，返回 %d 名客户", len(customer_ids))
         except Exception as e:
             log.error("发送 .list 结果失败: %s", e, exc_info=True)
+        return True
+
+    elif cmd_text.startswith((".reload", ".update")):
+        raw = cmd_text[1:]  # drop leading dot
+        if raw.startswith("reload"):
+            arg = raw[len("reload"):].strip()
+            cmd_name = ".reload"
+        else:
+            arg = raw[len("update"):].strip()
+            cmd_name = ".update"
+        log.info("%s 命令触发: user_id=%s, group_id=%s, arg=%s", cmd_name, event.user_id, gid, arg)
+        if arg != "cfg":
+            await cfg.client.send_group_msg(
+                group_id=str(gid),
+                message=[Reply(id=str(msg_id)), Text(text="❌ 仅支持 .reload cfg")],
+            )
+            return True
+
+        success, update_message = await cfg.run_reload_cfg()
+        log.info("%s cfg 执行结束: success=%s", cmd_name, success)
+        await cfg.client.send_group_msg(
+            group_id=str(gid),
+            message=[Reply(id=str(msg_id)), Text(text=update_message)],
+        )
         return True
 
     if reply_id is None or not cmd_parts:
@@ -394,21 +487,21 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
 
     customer_ids, err_msg = await resolve_target_from_reply(reply_id)
     if err_msg:
-        await client.send_group_msg(
+        await cfg.client.send_group_msg(
             group_id=str(gid),
             message=[Reply(id=str(msg_id)), Text(text=err_msg)],
         )
         return True
 
     if not customer_ids:
-        await client.send_group_msg(
+        await cfg.client.send_group_msg(
             group_id=str(gid),
             message=[Reply(id=str(msg_id)), Text(text="内部错误：无法解析客户列表")],
         )
         return True
 
     if len(customer_ids) != 1:
-        await client.send_group_msg(
+        await cfg.client.send_group_msg(
             group_id=str(gid),
             message=[Reply(id=str(msg_id)), Text(text="暂不支持：该合并转发包含多个客户，请手动处理。")],
         )
@@ -422,82 +515,92 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         segments = extract_sendable_segments(event.message, strip_prefix=".say")
         if not segments:
             # 无内容：进入等待模式，收集用户后续消息
-            resp = await client.send_group_msg(
+            resp = await cfg.client.send_group_msg(
                 group_id=str(gid),
                 message=[Reply(id=str(msg_id)), Text(text="📝 请发送要回复给客户的消息内容：")],
             )
             prompt_msg_id = resp.get("message_id")
-            pending_say[event.user_id] = {
+            cfg.pending_say[event.user_id] = {
                 "prompt_msg_id": prompt_msg_id,
                 "customer_id": customer_id,
                 "reply_id": reply_id,
                 "group_id": gid,
             }
+            await history.record_command(customer_id, event.user_id, "say", mode="pending", reply_id=reply_id, group_id=gid)
             if prompt_msg_id:
                 await add_emoji_to_message(prompt_msg_id, [
-                    EMOJI_MAPPING["cancel"],
+                    cfg.EMOJI_MAPPING["cancel"],
                 ])
             return True
 
         key = (reply_id, "say")
-        last_time = last_command_time.get(key, 0)
-        if now - last_time < DEBOUNCE_SECONDS["say"]:
-            await client.send_group_msg(
+        last_time = cfg.last_command_time.get(key, 0)
+        if now - last_time < cfg.DEBOUNCE_SECONDS["say"]:
+            await cfg.client.send_group_msg(
                 group_id=str(gid),
                 message=[
                     Reply(id=str(msg_id)),
-                    Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {DEBOUNCE_SECONDS['say']} 秒）")
+                    Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {cfg.DEBOUNCE_SECONDS['say']} 秒）")
                 ],
             )
             return True
 
+        customer_msg_id: int | None = None
         try:
-            await client.send_private_msg(
+            send_resp = await cfg.client.send_private_msg(
                 user_id=str(customer_id),
                 message=segments,
             )
-            closed = await close_session(customer_id, send_closing=False)
-            last_command_time[key] = now
-            feedback = f"✅ 已向客户 {customer_id} 发送消息。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
+            raw_mid = send_resp.get("message_id") if send_resp else None
+            customer_msg_id = int(raw_mid) if raw_mid is not None else None
+            await history.record_command(customer_id, event.user_id, "say", mode="content", reply_id=reply_id, group_id=gid)
+            if customer_msg_id is not None:
+                await history.record_staff_reply(customer_id, customer_msg_id, time.time(), segments, actor_uid=event.user_id)
+            closed = await close_session(customer_id, send_closing=False, close_reason="say")
+            cfg.last_command_time[key] = now
+            feedback = build_say_feedback(customer_id, closed, customer_msg_id is not None)
         except Exception as e:
             log.error("发送私聊消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
             feedback = f"❌ 发送失败：{e}"
 
-        resp = await client.send_group_msg(
+        resp = await cfg.client.send_group_msg(
             group_id=str(gid),
             message=[Reply(id=str(msg_id)), Text(text=feedback)],
         )
         feedback_msg_id = resp.get("message_id")
         if feedback_msg_id:
             track_forward_message(feedback_msg_id, [customer_id], gid)
+            if customer_msg_id is not None:
+                register_recallable_send(feedback_msg_id, customer_msg_id, customer_id, gid, event.user_id)
+                asyncio.create_task(add_emoji_to_message(feedback_msg_id, [cfg.EMOJI_MAPPING["recall"]]))
         return True
 
     # ---- .bye ----
     elif cmd_text.startswith(".bye"):
         key = (reply_id, "bye")
-        last_time = last_command_time.get(key, 0)
-        if now - last_time < DEBOUNCE_SECONDS["bye"]:
-            await client.send_group_msg(
+        last_time = cfg.last_command_time.get(key, 0)
+        if now - last_time < cfg.DEBOUNCE_SECONDS["bye"]:
+            await cfg.client.send_group_msg(
                 group_id=str(gid),
                 message=[
                     Reply(id=str(msg_id)),
-                    Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {DEBOUNCE_SECONDS['bye']} 秒）")
+                    Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {cfg.DEBOUNCE_SECONDS['bye']} 秒）")
                 ],
             )
             return True
 
-        feedback = await handle_bye_command(gid, msg_id, customer_id)
-        last_command_time[key] = now
+        feedback = await handle_bye_command(gid, msg_id, customer_id, operator_uid=event.user_id)
+        cfg.last_command_time[key] = now
         asyncio.create_task(send_and_track_feedback(gid, msg_id, feedback, customer_id))
         return True
 
     # ---- .close ----
     elif cmd_text.startswith(".close"):
         key = (reply_id, "close")
-        last_time = last_command_time.get(key, 0)
-        debounce_sec = DEBOUNCE_SECONDS.get("close", 5)
+        last_time = cfg.last_command_time.get(key, 0)
+        debounce_sec = cfg.DEBOUNCE_SECONDS.get("close", 5)
         if now - last_time < debounce_sec:
-            await client.send_group_msg(
+            await cfg.client.send_group_msg(
                 group_id=str(gid),
                 message=[
                     Reply(id=str(msg_id)),
@@ -506,31 +609,31 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             )
             return True
 
-        feedback = await handle_close_command(gid, msg_id, customer_id)
-        last_command_time[key] = now
+        feedback = await handle_close_command(gid, msg_id, customer_id, operator_uid=event.user_id)
+        cfg.last_command_time[key] = now
         asyncio.create_task(send_and_track_feedback(gid, msg_id, feedback, customer_id))
         return True
 
     # ---- .more ----
     elif cmd_text.startswith(".more"):
         key = (reply_id, "more")
-        last_time = last_command_time.get(key, 0)
-        if now - last_time < DEBOUNCE_SECONDS["more"]:
-            await client.send_group_msg(
+        last_time = cfg.last_command_time.get(key, 0)
+        if now - last_time < cfg.DEBOUNCE_SECONDS["more"]:
+            await cfg.client.send_group_msg(
                 group_id=str(gid),
                 message=[
                     Reply(id=str(msg_id)),
-                    Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {DEBOUNCE_SECONDS['more']} 秒）")
+                    Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {cfg.DEBOUNCE_SECONDS['more']} 秒）")
                 ],
             )
             return True
 
         success, feedback, new_fwd_id = await handle_more_command(gid, msg_id, customer_id)
         if success:
-            last_command_time[key] = now
+            cfg.last_command_time[key] = now
             if new_fwd_id:
                 track_forward_message(new_fwd_id, [customer_id], gid)
-                asyncio.create_task(add_emoji_to_message(new_fwd_id, [eid for cmd, eid in EMOJI_MAPPING.items() if cmd != "cancel"]))
+                asyncio.create_task(add_emoji_to_message(new_fwd_id, action_emoji_ids()))
             if feedback:
                 asyncio.create_task(send_and_track_feedback(gid, msg_id, feedback, customer_id))
         else:

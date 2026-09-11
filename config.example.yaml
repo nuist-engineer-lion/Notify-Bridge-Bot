@@ -1,0 +1,121 @@
+# WebSocket 连接配置
+ws_url: "ws://127.0.0.1:3001"
+ws_token: "your_ws_token"
+
+# 内部客服通知群号
+internal_group_id: 123456789
+
+# 免监控白名单（列表）
+whitelist:
+  - 123456789
+  - 987654321
+
+# 迟滞里程碑（分钟）
+milestones:
+  - 15
+  - 30
+  - 60
+  - 120
+  - 180
+  - 360
+  - 720
+  - 1440
+  - 2880
+  - 4320
+
+# 监听合并转发数量上限
+monitored_forward_limit: 15
+
+# 结束会话时发送的消息（支持多行）
+closing_message: |-
+  本次会话暂时结束。感谢您的支持与信任，再见。（请勿回复）
+
+# 新好友通过申请后发送的欢迎消息（支持多行）
+# 可以是纯文本字符串，也可以是结构化消息列表，例如：
+# welcome_message:
+#   - type: text
+#     data:
+#       text: "您好，感谢您添加好友。"
+#   - type: image
+#     data:
+#       file: "https://example.com/welcome.png"
+welcome_message: |-
+  [自动回复]您好，感谢您添加好友。清灰/换硅脂/疑难问题解答等可添加活动通知群1000000000，按照发布的时间地点参加修机活动，目前无需预约
+  如果你对修机师的活动感兴趣，也欢迎加入交流群：1000000001
+  如有其他问题可随时留言，我们会在工作时间尽快回复。
+
+# 各命令防抖间隔（秒）
+debounce_seconds:
+  say: 5
+  more: 5
+  bye: 5
+  close: 5
+  list: 5
+# 好友申请去重缓存时间（秒）
+processed_friend_requests_expire: 5
+
+# 好友通过后发送欢迎消息的延迟（秒），等待好友关系生效
+friend_welcome_delay: 5
+
+# 欢迎消息发送失败后重试
+friend_welcome_retries: 3
+friend_welcome_retry_interval: 3
+
+# 好友数量上限，达到时在群通知中附加警告
+friend_count_limit: 3000
+
+# 回复耗时记录最大保留条数
+reply_duration_maxlen: 1000
+
+# 成员可用时间段配置
+# 格式：qq号 -> 星期几 -> 时段列表（每个时段为 ["HH:MM", "HH:MM"]）
+availability:
+  123456789:   # example duty member
+    monday:
+      - ["09:00", "12:00"]
+      - ["13:00", "18:00"]
+    tuesday: []
+    wednesday: []
+    thursday: []
+    friday: []
+    saturday: []
+    sunday: []
+
+# 表情快捷操作映射：动作 -> QQ 表情 ID
+# recall 用于 .say 发送成功后限时撤回刚发送的私聊消息，ID 需与其他动作不同
+emoji_mapping:
+  close: 128
+  more: 127
+  bye: 100
+  say: 123
+  cancel: 32
+  recall: 89
+
+# .say 发送成功后允许通过点击撤回表情撤回消息的时间窗口（秒）
+recall_window_seconds: 60
+
+# AI 回复建议：提醒合并转发的第一层附上根据客户最近对话生成的建议答复
+# 使用 OpenAI 兼容接口（DeepSeek / 通义 / GLM / one-api 等均可）
+# 注意：客户对话内容会发送给所配置的 LLM 服务；api_key 属敏感信息，真实配置请走加密流程
+ai_suggestion:
+  enabled: false
+  base_url: "https://api.deepseek.com/v1"
+  api_key: "sk-xxxx"
+  model: "deepseek-chat"
+  # system 提示词可自定义（多行），留空使用内置默认
+  system_prompt: |-
+    你是一家维修客服的助手。请根据以下客服与客户的最近对话，以客服身份草拟下一条发给客户的回复。
+    要求：只输出回复内容本身，不要任何解释、前缀或引号；语气友好专业、简洁；如果客户诉求还不明确，先回应已知信息并礼貌追问。
+  temperature: 0.7          # 采样温度，越高越发散
+  timeout_seconds: 12       # 单次生成超时，失败/超时不影响提醒正常发送
+  max_context_messages: 20  # 送入模型的最近对话条数
+  max_suggestion_chars: 300 # 建议文本截断长度
+
+# 存档与状态（可选；默认 archives/ 与 archives/state.json）
+# archive_dir / state_file 属于需重启生效的配置
+# archive_dir: "archives"
+# state_file: "archives/state.json"
+
+# 会话库保留期（天），0 = 永久保留；超期会话及其事件由巡检任务定期清理
+archive_retention_days: 0
+
