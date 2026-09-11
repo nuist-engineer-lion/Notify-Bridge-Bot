@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 from . import config as cfg
 from .config import (
     log,
-    PROCESSED_FRIEND_REQUESTS_EXPIRE,
     unreplied_customers,
     processed_friend_requests,
     friend_approve_time,
@@ -43,8 +42,11 @@ async def monitor_loop():
         if to_remove:
             log.debug("已清理 %d 条过期监听消息", len(to_remove))
 
-        # 清理过期的可撤回发送记录
-        expired_recalls = [mid for mid, data in cfg.recallable_sends.items() if now - data["sent_at"] > cfg.RECALL_WINDOW_SECONDS]
+        # 清理过期的可撤回发送记录（窗口 + 宽限期，避免延迟点击被静默忽略）
+        expired_recalls = [
+            mid for mid, data in cfg.recallable_sends.items()
+            if now - data["sent_at"] > cfg.RECALL_WINDOW_SECONDS + cfg.RECALL_CLEANUP_GRACE_SECONDS
+        ]
         for mid in expired_recalls:
             cfg.recallable_sends.pop(mid, None)
         if expired_recalls:
@@ -65,13 +67,13 @@ async def monitor_loop():
         else:
             log.info("===== 巡检开始 =====\n当前未回复客户数: %d", len(unreplied_customers))
 
-        # 清理过期好友申请缓存
-        expired_flags = [flag for flag, ts in processed_friend_requests.items() if now - ts > PROCESSED_FRIEND_REQUESTS_EXPIRE]
+        # 清理过期好友申请缓存（经 cfg 读取，保证热重载后生效）
+        expired_flags = [flag for flag, ts in processed_friend_requests.items() if now - ts > cfg.PROCESSED_FRIEND_REQUESTS_EXPIRE]
         for flag in expired_flags:
             del processed_friend_requests[flag]
 
         # 清理过期的好友通过时间记录
-        expired_approves = [uid for uid, ts in friend_approve_time.items() if now - ts > PROCESSED_FRIEND_REQUESTS_EXPIRE]
+        expired_approves = [uid for uid, ts in friend_approve_time.items() if now - ts > cfg.PROCESSED_FRIEND_REQUESTS_EXPIRE]
         for uid in expired_approves:
             del friend_approve_time[uid]
 

@@ -237,6 +237,7 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
         return True
 
     # 检查是否点击了 .say 通报消息上的撤回表情
+    # 过期记录在宽限期内仍保留，handle_recall_click 会回复超时提示
     if eid == cfg.EMOJI_MAPPING.get("recall") and mid in cfg.recallable_sends:
         await handle_recall_click(gid, mid, event.user_id)
         return True

@@ -163,6 +163,8 @@ DEFAULT_EMOJI_MAPPING = {"close": 128, "more": 127, "bye": 100, "say": 123, "can
 EMOJI_MAPPING = dict(DEFAULT_EMOJI_MAPPING)
 EMOJI_TO_CMD = {v: k for k, v in EMOJI_MAPPING.items()}
 RECALL_WINDOW_SECONDS = 60  # .say 发送成功后允许通过表情撤回的时间窗口（秒）
+# 过期撤回记录额外保留时长：窗口结束后仍可识别延迟点击并回复超时提示
+RECALL_CLEANUP_GRACE_SECONDS = 300
 
 # ================= 夜间模式配置 =================
 NIGHT_MODE: dict[str, str] = {}

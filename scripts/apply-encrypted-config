@@ -67,25 +67,34 @@ if [[ -f "$PLAINTEXT" ]]; then
   old_mtime="$(stat -c %Y "$PLAINTEXT" 2>/dev/null || stat -f %m "$PLAINTEXT" 2>/dev/null || echo 0)"
 fi
 
+# Drop any previous reload status so wait/verify cannot accept a stale success.
+if [[ -f "$RELOAD_STATUS_PATH" ]]; then
+  rm -f "$RELOAD_STATUS_PATH"
+  echo "cleared stale reload status -> $RELOAD_STATUS_PATH"
+fi
+
 mkdir -p "$(dirname "$PLAINTEXT")"
 tmp_plain="${PLAINTEXT}.tmp.$$"
 cp "$decoded" "$tmp_plain"
 mv "$tmp_plain" "$PLAINTEXT"
-echo "applied encrypted config -> $PLAINTEXT"
+new_mtime="$(stat -c %Y "$PLAINTEXT" 2>/dev/null || stat -f %m "$PLAINTEXT" 2>/dev/null || echo 0)"
+echo "applied encrypted config -> $PLAINTEXT (mtime=$new_mtime, prev=$old_mtime)"
 
 if [[ "$WAIT_RELOAD" == "1" ]]; then
   echo "waiting up to ${WAIT_SECONDS}s for bot reload status..."
   deadline=$((SECONDS + WAIT_SECONDS))
   while (( SECONDS < deadline )); do
     if [[ -f "$RELOAD_STATUS_PATH" ]]; then
-      if python3 - "$RELOAD_STATUS_PATH" "$old_mtime" <<'PY'
+      if python3 - "$RELOAD_STATUS_PATH" "$new_mtime" <<'PY'
 import json, sys
-path, old_mtime = sys.argv[1], float(sys.argv[2])
+path, new_mtime = sys.argv[1], float(sys.argv[2])
 with open(path, "r", encoding="utf-8") as f:
     data = json.load(f)
 ok = bool(data.get("ok"))
 cfg_mtime = float(data.get("config_mtime") or 0)
-if ok and cfg_mtime >= old_mtime:
+# Status file was cleared before apply, so any file present is a fresh write.
+# Require it to describe the plaintext we just installed.
+if ok and new_mtime > 0 and abs(cfg_mtime - new_mtime) <= 2:
     print("reload status ok")
     raise SystemExit(0)
 raise SystemExit(1)

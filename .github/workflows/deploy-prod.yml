@@ -156,9 +156,13 @@ jobs:
           if [ "$MODE" = "config" ]; then
             echo "=== 2. Checking reload status ==="
             remote "cd '$REMOTE_DIR' && test -f archives/reload-status.json && python3 - <<'PY'
-          import json
+          import json, os
           data=json.load(open('archives/reload-status.json', encoding='utf-8'))
           assert data.get('ok') is True, data
+          cfg_mtime=float(data.get('config_mtime') or 0)
+          actual=os.path.getmtime('config.yaml')
+          assert cfg_mtime > 0 and abs(cfg_mtime - actual) <= 2, (
+              f'stale reload status: status.config_mtime={cfg_mtime} config.yaml mtime={actual}', data)
           print('reload ok:', data)
           PY"
             echo "=== 3. Service should still be active (no restart required) ==="

@@ -240,7 +240,11 @@ def build_say_feedback(customer_id: int, closed: bool, recallable: bool) -> str:
 def register_recallable_send(feedback_msg_id: int, customer_msg_id: int, customer_id: int, group_id: int, operator_id: int) -> None:
     """记录一次可通过表情限时撤回的 .say 发送（以群内反馈消息 ID 为键）"""
     now = time.time()
-    expired = [mid for mid, d in cfg.recallable_sends.items() if now - d["sent_at"] > cfg.RECALL_WINDOW_SECONDS]
+    # 仅清理超过窗口+宽限期的旧记录；刚过窗口的仍保留，供延迟点击回复超时提示
+    expired = [
+        mid for mid, d in cfg.recallable_sends.items()
+        if now - d["sent_at"] > cfg.RECALL_WINDOW_SECONDS + cfg.RECALL_CLEANUP_GRACE_SECONDS
+    ]
     for mid in expired:
         cfg.recallable_sends.pop(mid, None)
 

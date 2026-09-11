@@ -96,18 +96,33 @@ if ($targetDir -and -not (Test-Path $targetDir)) {
   New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
 }
 
+$oldMtime = 0.0
+if (Test-Path $target) {
+  $oldMtime = (Get-Item $target).LastWriteTimeUtc.Subtract([datetime]'1970-01-01').TotalSeconds
+}
+
+# Drop any previous reload status so wait/verify cannot accept a stale success.
+$status = Join-Path $Root "archives/reload-status.json"
+if (Test-Path $status) {
+  Remove-Item -Force $status
+  Write-Host "cleared stale reload status -> $status"
+}
+
 $tmp = "$target.tmp.$PID"
 [System.IO.File]::WriteAllBytes($tmp, $bytes)
 Move-Item -Force $tmp $target
-Write-Host "applied encrypted config -> $Plaintext"
+$newMtime = (Get-Item $target).LastWriteTimeUtc.Subtract([datetime]'1970-01-01').TotalSeconds
+Write-Host "applied encrypted config -> $Plaintext (mtime=$newMtime, prev=$oldMtime)"
 
 if ($WaitReload) {
-  $status = Join-Path $Root "archives/reload-status.json"
   $deadline = (Get-Date).AddSeconds($WaitSeconds)
   while ((Get-Date) -lt $deadline) {
     if (Test-Path $status) {
       $data = Get-Content $status -Raw -Encoding utf8 | ConvertFrom-Json
-      if ($data.ok) {
+      $cfgMtime = 0.0
+      if ($data.config_mtime) { $cfgMtime = [double]$data.config_mtime }
+      # Status was cleared before apply; require it to match the new plaintext mtime.
+      if ($data.ok -and $newMtime -gt 0 -and [math]::Abs($cfgMtime - $newMtime) -le 2) {
         Write-Host "reload status ok"
         return
       }
