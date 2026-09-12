@@ -17,6 +17,7 @@ function Resolve-SopsPath {
   $cmd = Get-Command $Bin -ErrorAction SilentlyContinue
   if ($cmd) { return $cmd.Source }
   foreach ($c in @(
+      (Join-Path $Root ".tools\bin\sops.exe"),
       (Join-Path $Root ".tools\gobin\sops.exe"),
       (Join-Path $Root ".tools\sops.exe"),
       (Join-Path $Root ".tools\sops")

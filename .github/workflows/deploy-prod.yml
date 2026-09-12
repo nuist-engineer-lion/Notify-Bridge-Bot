@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REMOTE_DIR: /DATA/Documents/Notify-Bridge-Bot
+      SOPS_VERSION: v3.13.3
       REMOTE_PORT: ${{ secrets.REMOTE_PORT != '' && secrets.REMOTE_PORT || '22' }}
       CLOUDFLARE_ACCESS_CLIENT_ID: ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_ID }}
       CLOUDFLARE_ACCESS_CLIENT_SECRET: ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }}
@@ -109,6 +110,7 @@ jobs:
             echo "=== Config-only hot apply ==="
             remote "cd '$REMOTE_DIR' && \
               git pull --ff-only origin main && \
+              bash scripts/install-sops '$SOPS_VERSION' && \
               SOPS_AGE_KEY_FILE=\"\${SOPS_AGE_KEY_FILE:-/etc/notifybot/age.key}\" \
               WAIT_RELOAD=1 WAIT_SECONDS=90 \
               bash scripts/apply-encrypted-config config.yaml.enc config.yaml"
@@ -116,6 +118,7 @@ jobs:
             echo "=== Full deploy with restart ==="
             remote "cd '$REMOTE_DIR' && \
               git pull --ff-only origin main && \
+              bash scripts/install-sops '$SOPS_VERSION' && \
               if [ -f config.yaml.enc ]; then \
                 SOPS_AGE_KEY_FILE=\"\${SOPS_AGE_KEY_FILE:-/etc/notifybot/age.key}\" \
                 bash scripts/apply-encrypted-config config.yaml.enc config.yaml; \

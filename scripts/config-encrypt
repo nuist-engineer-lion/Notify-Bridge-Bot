@@ -6,7 +6,16 @@ cd "$ROOT_DIR"
 
 PLAINTEXT="${1:-config.yaml}"
 CIPHERTEXT="${2:-config.yaml.enc}"
-SOPS_BIN="${SOPS_BIN:-sops}"
+if [[ -z "${SOPS_BIN:-}" ]]; then
+  # Prefer the project-local copy installed by scripts/install-sops.
+  for candidate in "$ROOT_DIR/.tools/bin/sops" "$ROOT_DIR/.tools/bin/sops.exe"; do
+    if [[ -x "$candidate" ]]; then
+      SOPS_BIN="$candidate"
+      break
+    fi
+  done
+  SOPS_BIN="${SOPS_BIN:-sops}"
+fi
 
 if [[ ! -f "$PLAINTEXT" ]]; then
   echo "error: plaintext config not found: $PLAINTEXT" >&2
