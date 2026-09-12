@@ -14,6 +14,7 @@ function Resolve-SopsPath {
   $cmd = Get-Command $Bin -ErrorAction SilentlyContinue
   if ($cmd) { return $cmd.Source }
   foreach ($c in @(
+      (Join-Path $Root ".tools\bin\sops.exe"),
       (Join-Path $Root ".tools\gobin\sops.exe"),
       (Join-Path $Root ".tools\sops.exe"),
       (Join-Path $Root ".tools\sops")
@@ -65,7 +66,7 @@ if (-not (Test-Path .sops.yaml)) {
 
 $sopsPath = Resolve-SopsPath -Bin $SopsBin
 if (-not $sopsPath) {
-  throw "sops not found. Install sops or set SOPS_BIN / place binary at .tools/gobin/sops.exe"
+    throw "sops not found. Run scripts/install-sops (Git Bash) or set SOPS_BIN / place binary at .tools/bin/sops.exe"
 }
 
 $bytes = Invoke-SopsRaw -SopsPath $sopsPath -Arguments "--encrypt --input-type binary --output-type yaml `"$Plaintext`""

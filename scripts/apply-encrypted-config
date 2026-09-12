@@ -7,7 +7,16 @@ cd "$ROOT_DIR"
 CIPHERTEXT="${1:-config.yaml.enc}"
 PLAINTEXT="${2:-config.yaml}"
 AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-${AGE_KEY_FILE:-/etc/notifybot/age.key}}"
-SOPS_BIN="${SOPS_BIN:-sops}"
+if [[ -z "${SOPS_BIN:-}" ]]; then
+  # Prefer the project-local copy installed by scripts/install-sops.
+  for candidate in "$ROOT_DIR/.tools/bin/sops" "$ROOT_DIR/.tools/bin/sops.exe"; do
+    if [[ -x "$candidate" ]]; then
+      SOPS_BIN="$candidate"
+      break
+    fi
+  done
+  SOPS_BIN="${SOPS_BIN:-sops}"
+fi
 RELOAD_STATUS_PATH="${RELOAD_STATUS_PATH:-archives/reload-status.json}"
 WAIT_RELOAD="${WAIT_RELOAD:-0}"
 WAIT_SECONDS="${WAIT_SECONDS:-90}"

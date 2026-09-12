@@ -491,7 +491,8 @@ uv run python scripts/import_jsonl.py             # 导入
    cp config.example.yaml config.yaml
    # 编辑 config.yaml
    ```
-2. 确保本机已安装 [sops](https://github.com/getsops/sops) 与 [age](https://github.com/FiloSottile/age)，且 `.sops.yaml` 中的 age 公钥可用。
+2. 确保本机已有可用的 [sops](https://github.com/getsops/sops) 与 [age](https://github.com/FiloSottile/age)，且 `.sops.yaml` 中的 age 公钥可用。
+   sops 推荐免污染安装，装入项目 `.tools/bin/`：Windows PowerShell `powershell -ExecutionPolicy Bypass -File scripts\install-sops.ps1`（无需 Git Bash）；Git Bash / Linux / macOS 用 `bash scripts/install-sops`。也可系统级安装（Windows `winget install Mozilla.SOPS`，macOS `brew install sops`）。
    加密使用 **整文件 binary 模式**（因为 `availability` 使用数字 QQ 号作为键，SOPS 结构化 YAML 模式不支持非字符串键）。
 3. 加密并提交密文：
    ```bash
@@ -518,6 +519,12 @@ sudo install -m 600 /path/to/age.key /etc/notifybot/age.key
 ```
 
 也可用环境变量 `SOPS_AGE_KEY_FILE` 覆盖默认路径。
+
+### 远端 sops 安装
+
+部署主机的 `sops` 由 CI 在每次部署时通过 `scripts/install-sops` 自动安装到项目目录 `.tools/bin/`：**不写系统路径、不需要 sudo、不污染主机环境**，删掉项目目录即完全移除。版本固定在 workflow 的 `SOPS_VERSION`（当前 `v3.13.3`），下载后对照官方 `checksums.txt` 做 sha256 校验，幂等（已装同版本则跳过）。`apply-encrypted-config` / `config-encrypt`（bash 与 PowerShell 版）都会自动优先使用该副本，也可用 `SOPS_BIN` 显式指定。
+
+若主机访问 GitHub Release 受限，可用 `SOPS_RELEASE_BASE` 覆盖下载源（指向相同目录结构的镜像）。
 
 ### 群内命令
 
