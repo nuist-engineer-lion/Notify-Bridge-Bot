@@ -176,6 +176,10 @@ NIGHT_SUMMARY_TIME = "08:00"
 # 空字典表示未启用；ai.py 每次调用时读取，可通过 .reload cfg 在线开关/换模型
 AI_SUGGESTION: dict[str, Any] = {}
 
+# ================= 通知 PR（通知群消息自动转主页通知） =================
+# 空字典表示未启用；notice_pr.py 每次调用时读取，可通过 .reload cfg 在线开关/改群号
+NOTICE_PR: dict[str, Any] = {}
+
 # ================= 可配置的存档与状态持久化 =================
 ARCHIVE_DIR = "archives"
 STATE_FILE = "state.json"
@@ -194,7 +198,7 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     global EMOJI_MAPPING, EMOJI_TO_CMD, RECALL_WINDOW_SECONDS, NIGHT_MODE, NIGHT_START, NIGHT_END
     global NIGHT_SUMMARY_TIME, ARCHIVE_DIR, STATE_FILE, RECENT_MESSAGE_MAX_AGE
     global ARCHIVE_RETENTION_DAYS
-    global AI_SUGGESTION, reply_durations
+    global AI_SUGGESTION, NOTICE_PR, reply_durations
 
     applied_config = dict(new_config)
     restart_only_changes: list[str] = []
@@ -240,6 +244,9 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
 
     # ================= AI 回复建议 =================
     AI_SUGGESTION = dict(config.get("ai_suggestion", {}) or {})
+
+    # ================= 通知 PR =================
+    NOTICE_PR = dict(config.get("notice_pr", {}) or {})
 
     # ================= 可配置的存档与状态持久化 =================
     ARCHIVE_DIR = config.get("archive_dir", "archives")

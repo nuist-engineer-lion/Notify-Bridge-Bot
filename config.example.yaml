@@ -111,6 +111,28 @@ ai_suggestion:
   max_context_messages: 20  # 送入模型的最近对话条数
   max_suggestion_chars: 300 # 建议文本截断长度
 
+# ================= 通知 PR：通知群消息自动转主页通知 =================
+# 监控独立的通知群（与上面的 internal_group_id 客服群无关），白名单成员发送的
+# 纯文本消息将自动在主页仓库生成 notices/entries/*.md 并创建 PR，等待 GitHub 上人工审核合并。
+notice_pr:
+  enabled: false
+  # 要监控的通知群号列表
+  groups: []
+  # 这些 QQ 号发送的消息才会自动开 PR（独立于免监控 whitelist）
+  auto_pr_senders: []
+  github:
+    repo: "nuist-engineer-lion/nuist-engineer-lion-homepage"
+    # fine-grained PAT：仅授权该仓库的 Contents:read+write 与 Pull requests:write
+    # token 属敏感信息，真实配置请走加密流程
+    token: "github_pat_xxx"
+    base_branch: main
+  # 开 PR 成功后是否提醒到客服内部群（合并结果不回显到任何群）
+  ack_to_internal: true
+  # 通知标题最大长度（超出截断并加省略号）
+  max_title_chars: 30
+  # true 时只打印将生成的通知文件内容，不调用 GitHub
+  dry_run: false
+
 # 存档与状态（可选；默认 archives/ 与 archives/state.json）
 # archive_dir / state_file 属于需重启生效的配置
 # archive_dir: "archives"
