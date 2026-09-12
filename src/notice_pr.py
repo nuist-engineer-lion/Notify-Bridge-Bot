@@ -9,6 +9,8 @@
 import asyncio
 import base64
 import hashlib
+import json
+import os
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -29,6 +31,13 @@ _RETRYABLE_STATUS = {500, 502, 503, 504}
 _processed_msg_ids: dict[int, float] = {}
 _PROCESSED_TTL = 3600
 _PROCESSED_MAX = 512
+
+# ack 重试队列：PR 已创建但内部群 ack 发送失败时落盘，连接恢复/重启后重发
+_ACK_RETRY_INTERVAL = 30
+_ACK_MAX_RETRIES = 10
+_ack_queue_loaded = False
+_ack_queue: list[dict] = []
+_ack_retry_task: asyncio.Task | None = None
 
 
 def _notice_cfg() -> dict[str, Any]:
@@ -119,7 +128,7 @@ async def _gh_request(session: aiohttp.ClientSession, method: str, path: str, to
                     last_err = f"HTTP {resp.status}"
                 else:
                     return resp.status, data
-        except aiohttp.ClientError as e:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             last_err = str(e)
         if attempt < 2:
             await asyncio.sleep(2 * (attempt + 1))
@@ -131,6 +140,20 @@ async def _has_open_pr(session: aiohttp.ClientSession, repo: str, token: str, br
         session, "GET", f"/repos/{repo}/pulls?head={repo}:{branch}&state=open&per_page=1", token,
     )
     return status == 200 and bool(prs)
+
+
+async def _delete_branch(session: aiohttp.ClientSession, repo: str, token: str, branch: str) -> None:
+    """删除本次创建后未完成 PR 的分支，避免孤儿分支累积。"""
+    try:
+        status, resp = await _gh_request(
+            session, "DELETE", f"/repos/{repo}/git/refs/heads/{branch}", token,
+        )
+        if status == 204:
+            log.info("已清理未完成 PR 的分支 %s", branch)
+        else:
+            log.warning("清理分支 %s 失败: HTTP %s %s", branch, status, resp)
+    except Exception as e:
+        log.warning("清理分支 %s 异常: %s", branch, e)
 
 
 def _build_pr_body(*, group_id: int, user_id: int, message_id: int, msg_time: float,
@@ -195,16 +218,21 @@ async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
             branch_name: str | None = None
             for candidate in [branch] + [f"{branch}-{i}" for i in range(2, 6)]:
                 status, resp = await _gh_request(
-                    session, "POST", "/repos/{r}/git/refs".format(r=repo), token,
+                    session, "POST", f"/repos/{repo}/git/refs", token,
                     json_body={"ref": f"refs/heads/{candidate}", "sha": base_sha},
                 )
                 if status == 201:
                     branch_name = candidate
                     break
                 if status == 422:
-                    if await _has_open_pr(session, repo, token, candidate):
-                        log.info("通知内容已存在待审 PR（分支 %s），跳过", candidate)
-                        return
+                    # 并发场景：另一请求可能刚建好分支还未开完 PR，
+                    # 轮询确认后再决定是否启用后缀分支，避免产生重复 PR
+                    for attempt in range(3):
+                        if await _has_open_pr(session, repo, token, candidate):
+                            log.info("通知内容已存在待审 PR（分支 %s），跳过", candidate)
+                            return
+                        if attempt < 2:
+                            await asyncio.sleep(2)
                     continue
                 log.error("创建分支 %s 失败: HTTP %s %s", candidate, status, resp)
                 return
@@ -212,46 +240,154 @@ async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
                 log.error("通知分支创建失败：候选分支均已存在（%s…）", branch)
                 return
 
-            content_b64 = base64.b64encode(md.encode("utf-8")).decode("ascii")
-            status, resp = await _gh_request(
-                session, "PUT", f"/repos/{repo}/contents/{path}", token,
-                json_body={"message": commit_msg, "content": content_b64, "branch": branch_name},
-            )
-            if status != 201:
-                log.error("提交通知文件 %s 失败: HTTP %s %s", path, status, resp)
-                return
+            # 分支由本次创建：提交文件或开 PR 任一步失败都删除分支，
+            # 重试会从头走确定性流程，不遗留孤儿分支
+            try:
+                content_b64 = base64.b64encode(md.encode("utf-8")).decode("ascii")
+                status, resp = await _gh_request(
+                    session, "PUT", f"/repos/{repo}/contents/{path}", token,
+                    json_body={"message": commit_msg, "content": content_b64, "branch": branch_name},
+                )
+                if status != 201:
+                    raise RuntimeError(f"提交通知文件 {path} 失败: HTTP {status}: {resp}")
 
-            status, resp = await _gh_request(
-                session, "POST", f"/repos/{repo}/pulls", token,
-                json_body={
-                    "title": f"通知：{title}",
-                    "head": branch_name,
-                    "base": base_branch,
-                    "body": _build_pr_body(
-                        group_id=group_id, user_id=user_id, message_id=message_id,
-                        msg_time=msg_time, hash8=hash8, md=md,
-                    ),
-                },
-            )
-            if status != 201:
-                log.error("创建 PR 失败: HTTP %s %s", status, resp)
-                return
-            pr_number = resp.get("number")
-            pr_url = resp.get("html_url")
+                status, resp = await _gh_request(
+                    session, "POST", f"/repos/{repo}/pulls", token,
+                    json_body={
+                        "title": f"通知：{title}",
+                        "head": branch_name,
+                        "base": base_branch,
+                        "body": _build_pr_body(
+                            group_id=group_id, user_id=user_id, message_id=message_id,
+                            msg_time=msg_time, hash8=hash8, md=md,
+                        ),
+                    },
+                )
+                if status != 201:
+                    raise RuntimeError(f"创建 PR 失败: HTTP {status}: {resp}")
+                pr_number = resp.get("number")
+                pr_url = resp.get("html_url")
+            except Exception:
+                await _delete_branch(session, repo, token, branch_name)
+                raise
     except Exception as e:
         log.error("通知 PR 创建失败: group=%d user=%d msg=%s: %s",
                   group_id, user_id, message_id, e, exc_info=True)
         return
 
     log.info("通知 PR 已创建: #%s %s", pr_number, pr_url)
-    if ncfg.get("ack_to_internal", True) and cfg.INTERNAL_GROUP_ID:
+    await _ack_pr_created(f"📬 已为通知群消息创建 PR #{pr_number}：{title}\n{pr_url}")
+
+
+# ======================= ack 持久化重试队列 =======================
+
+def _ack_queue_file() -> str:
+    return os.path.join(cfg.ARCHIVE_DIR, "notice_ack_queue.json")
+
+
+def _load_ack_queue() -> list[dict]:
+    global _ack_queue_loaded, _ack_queue
+    if _ack_queue_loaded:
+        return _ack_queue
+    try:
+        with open(_ack_queue_file(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        _ack_queue = data if isinstance(data, list) else []
+    except FileNotFoundError:
+        _ack_queue = []
+    except Exception as e:
+        log.error("读取通知 ack 队列失败，按空队列处理: %s", e)
+        _ack_queue = []
+    _ack_queue_loaded = True
+    return _ack_queue
+
+
+def _save_ack_queue(acks: list[dict]) -> None:
+    global _ack_queue
+    _ack_queue = acks
+    try:
+        os.makedirs(cfg.ARCHIVE_DIR, exist_ok=True)
+        path = _ack_queue_file()
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(acks, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except Exception as e:
+        log.error("保存通知 ack 队列失败: %s", e)
+
+
+def _ensure_ack_retry_task() -> None:
+    global _ack_retry_task
+    if _ack_retry_task is None or _ack_retry_task.done():
+        _ack_retry_task = asyncio.create_task(_ack_retry_loop())
+
+
+async def _ack_pr_created(text: str) -> None:
+    """开 PR 后 ack 到客服内部群；发送失败进入持久化队列，恢复连接/重启后重发。"""
+    ncfg = _notice_cfg()
+    if not ncfg.get("ack_to_internal", True) or not cfg.INTERNAL_GROUP_ID:
+        return
+    try:
+        await cfg.client.send_group_msg(group_id=str(cfg.INTERNAL_GROUP_ID), message=text)
+        log.info("通知 PR ack 已发送至内部群")
+    except Exception as e:
+        log.error("发送通知 PR ack 到内部群失败，加入重试队列: %s", e)
+        _ack_send_failed(text)
+
+
+def _ack_send_failed(text: str) -> None:
+    acks = _load_ack_queue()
+    acks.append({"text": text, "queued_at": time.time(), "retries": 0})
+    _save_ack_queue(acks)
+    _ensure_ack_retry_task()
+
+
+async def flush_pending_acks() -> None:
+    """启动时冲刷上次未发出的 ack 队列；仍失败的转入后台重试。"""
+    acks = _load_ack_queue()
+    if not acks:
+        return
+    log.info("发现 %d 条待发送的通知 PR ack，尝试重发", len(acks))
+    remaining = []
+    for ack in acks:
         try:
             await cfg.client.send_group_msg(
-                group_id=str(cfg.INTERNAL_GROUP_ID),
-                message=f"📬 已为通知群消息创建 PR #{pr_number}：{title}\n{pr_url}",
+                group_id=str(cfg.INTERNAL_GROUP_ID), message=ack["text"],
             )
+            log.info("重发通知 PR ack 成功")
         except Exception as e:
-            log.error("发送通知 PR ack 到内部群失败: %s", e)
+            log.warning("启动重发通知 PR ack 失败，转入后台重试: %s", e)
+            remaining.append(ack)
+    _save_ack_queue(remaining)
+    if remaining:
+        _ensure_ack_retry_task()
+
+
+async def _ack_retry_loop() -> None:
+    """后台重发 ack 队列，连接恢复后每 30 秒一轮，单条最多重试 10 次。"""
+    for _ in range(_ACK_MAX_RETRIES):
+        await asyncio.sleep(_ACK_RETRY_INTERVAL)
+        acks = _load_ack_queue()
+        if not acks:
+            return
+        remaining = []
+        for ack in acks:
+            try:
+                await cfg.client.send_group_msg(
+                    group_id=str(cfg.INTERNAL_GROUP_ID), message=ack["text"],
+                )
+                log.info("重发通知 PR ack 成功")
+            except Exception as e:
+                ack["retries"] = ack.get("retries", 0) + 1
+                if ack["retries"] >= _ACK_MAX_RETRIES:
+                    log.error("通知 PR ack 重发 %d 次仍失败，放弃: %s (%s)",
+                              _ACK_MAX_RETRIES, ack["text"], e)
+                else:
+                    remaining.append(ack)
+        _save_ack_queue(remaining)
+        if not remaining:
+            return
+    log.warning("通知 ack 后台重试轮次用尽，剩余 %d 条留待下次启动重发", len(_load_ack_queue()))
 
 
 # ======================= 事件入口 =======================

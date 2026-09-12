@@ -17,7 +17,7 @@ from .monitor import monitor_loop
 from .private_msg import handle_private_msg, handle_sent_msg, handle_friend_poke
 from .new_user import handle_friend_request
 from .group_msg import handle_group_emoji, handle_group_poke, handle_group_command
-from .notice_pr import handle_notice_group_msg
+from .notice_pr import handle_notice_group_msg, flush_pending_acks
 from . import storage
 from . import history
 
@@ -38,6 +38,8 @@ async def main():
 
     startup_notified = False
     asyncio.create_task(monitor_loop())
+    # 冲刷上次运行中发送失败的通知 PR ack（已落盘队列）
+    asyncio.create_task(flush_pending_acks())
 
     while True:
         log.info("正在连接 WebSocket...")

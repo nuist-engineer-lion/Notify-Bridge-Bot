@@ -47,14 +47,16 @@ tmp="$(mktemp -d)"
 cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT
 
-curl -fsSL -o "$tmp/$OUT" "${BASE}/${ASSET}"
+curl -fsSL -o "$tmp/$ASSET" "${BASE}/${ASSET}"
 curl -fsSL -o "$tmp/checksums.txt" "${BASE}/sops-${SOPS_VERSION}.checksums.txt"
 
 # checksums.txt is sha256sum-formatted; anchor on the exact asset name so
-# similarly prefixed artifacts (e.g. *.spdx.sbom.json) cannot match.
+# similarly prefixed artifacts (e.g. *.spdx.sbom.json) cannot match. The
+# download must keep the Release asset name: sha256sum -c reads the target
+# filename from each checksums.txt line.
 (cd "$tmp" && grep "${ASSET}\$" checksums.txt | sha256sum -c -)
 
 mkdir -p "$INSTALL_DIR"
-install -m 0755 "$tmp/$OUT" "$SOPS_LOCAL"
+install -m 0755 "$tmp/$ASSET" "$SOPS_LOCAL"
 "$SOPS_LOCAL" --version
 echo "installed sops ${SOPS_VERSION} -> $SOPS_LOCAL"
