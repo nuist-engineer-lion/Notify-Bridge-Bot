@@ -1,4 +1,4 @@
-# WebSocket 连接配置
+# WebSocket 连接配置（修改后需重启生效）
 ws_url: "ws://127.0.0.1:3001"
 ws_token: "your_ws_token"
 
@@ -44,24 +44,25 @@ welcome_message: |-
   如果你对修机师的活动感兴趣，也欢迎加入交流群：1000000001
   如有其他问题可随时留言，我们会在工作时间尽快回复。
 
-# 各命令防抖间隔（秒）
+# 各命令防抖间隔（秒）：say / more / bye / close / list
 debounce_seconds:
   say: 5
   more: 5
   bye: 5
   close: 5
   list: 5
+
 # 好友申请去重缓存时间（秒）
 processed_friend_requests_expire: 5
 
-# 好友通过后发送欢迎消息的延迟（秒），等待好友关系生效
+# 好友通过后发送欢迎消息的延迟（秒），等待好友关系生效（默认 3）
 friend_welcome_delay: 5
 
-# 欢迎消息发送失败后重试
+# 欢迎消息发送失败后重试（默认均为 3）
 friend_welcome_retries: 3
 friend_welcome_retry_interval: 3
 
-# 好友数量上限，达到时在群通知中附加警告
+# 好友数量上限，达到时在群通知中附加警告（默认 3000）
 friend_count_limit: 3000
 
 # 回复耗时记录最大保留条数
@@ -81,6 +82,24 @@ availability:
     saturday: []
     sunday: []
 
+# 过期监听消息保留时长（秒），用于清理（默认 86400）
+max_listen_age: 86400  # 24 小时
+
+# 夜间免打扰时段（夜间通知延后到 summary_time 汇总发送）
+night_mode:
+  start: "23:30"        # 夜间模式开始时间
+  end: "07:00"          # 夜间模式结束时间（跨天）
+  summary_time: "07:00" # 汇总通知发送时间
+
+# 状态持久化文件（代码默认 state.json；修改后需重启生效）
+state_file: "archives/state.json"
+
+# 存档目录名称（存放 archive.db、failed_events.jsonl 等；修改后需重启生效）
+archive_dir: "archives"
+
+# 获取最近消息的最大时限（秒），用于构造合并转发（默认 86400）
+recent_message_max_age: 86400  # 24 小时
+
 # 表情快捷操作映射：动作 -> QQ 表情 ID
 # recall 用于 .say 发送成功后限时撤回刚发送的私聊消息，ID 需与其他动作不同
 emoji_mapping:
@@ -92,7 +111,10 @@ emoji_mapping:
   recall: 89
 
 # .say 发送成功后允许通过点击撤回表情撤回消息的时间窗口（秒）
-recall_window_seconds: 60
+recall_window_seconds: 119
+
+# 会话库保留期（天），0 = 永久保留；超期会话及其事件由巡检任务定期清理
+archive_retention_days: 0
 
 # AI 回复建议：提醒合并转发的第一层附上根据客户最近对话生成的建议答复
 # 使用 OpenAI 兼容接口（DeepSeek / 通义 / GLM / one-api 等均可）
@@ -143,12 +165,3 @@ notice_pr:
   max_title_chars: 30
   # true 时只打印将生成的通知文件内容，不调用 GitHub
   dry_run: false
-
-# 存档与状态（可选；默认 archives/ 与 archives/state.json）
-# archive_dir / state_file 属于需重启生效的配置
-# archive_dir: "archives"
-# state_file: "archives/state.json"
-
-# 会话库保留期（天），0 = 永久保留；超期会话及其事件由巡检任务定期清理
-archive_retention_days: 0
-
