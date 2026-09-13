@@ -122,10 +122,21 @@ notice_pr:
   auto_pr_senders: []
   github:
     repo: "nuist-engineer-lion/nuist-engineer-lion-homepage"
-    # fine-grained PAT：仅授权该仓库的 Contents:read+write 与 Pull requests:write
-    # token 属敏感信息，真实配置请走加密流程
-    token: "github_pat_xxx"
     base_branch: main
+    # ==== 鉴权二选一（App 三件套配置齐全时优先使用 App）====
+    # 1) GitHub App（推荐）：PR 创建者显示为 应用名[bot]，不占用个人账号，
+    #    installation token 每小时自动续期。App 需安装到该仓库，
+    #    并授予 Contents 与 Pull requests 两项 Read & write 权限。
+    # app_id: 123456           # App 设置页的 App ID
+    # installation_id: 654321  # 该仓库安装实例的 ID
+    # private_key: |-         # App 私钥 PEM：可内联，也可填文件路径
+    #   -----BEGIN PRIVATE KEY-----
+    #   ...
+    #   -----END PRIVATE KEY-----
+    # 2) fine-grained PAT（回退）：仅该仓库 Contents:read+write 与
+    #    Pull requests:read+write；注意属主无法 approve 自己开的 PR
+    # 凭据属敏感信息，真实配置请走加密流程
+    token: "github_pat_xxx"
   # 开 PR 成功后是否提醒到客服内部群（合并结果不回显到任何群）
   ack_to_internal: true
   # 通知标题最大长度（超出截断并加省略号）

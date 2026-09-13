@@ -16,6 +16,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import aiohttp
+import jwt
 
 from napcat import GroupMessageEvent, Text
 
@@ -156,6 +157,74 @@ async def _delete_branch(session: aiohttp.ClientSession, repo: str, token: str, 
         log.warning("清理分支 %s 异常: %s", branch, e)
 
 
+# ======================= 凭据解析（GitHub App 优先，PAT 回退） =======================
+
+_token_lock = asyncio.Lock()
+_installation_token: str | None = None
+_installation_token_expires_at = 0.0
+# installation token 实际有效期 1 小时，提前 5 分钟续期
+_INSTALLATION_TOKEN_TTL = 55 * 60
+
+
+def _load_private_key(raw: str) -> str:
+    """private_key 支持内联 PEM 内容或文件路径。"""
+    raw = (raw or "").strip()
+    if "PRIVATE KEY" in raw:
+        return raw
+    with open(raw, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+async def _create_installation_token(gh: dict[str, Any]) -> str | None:
+    """用 App 私钥签 JWT 换取 installation token；失败返回 None。"""
+    now = time.time()
+    payload = {
+        # 容忍时钟偏差；GitHub 限制 JWT 有效期最长 10 分钟
+        "iat": int(now) - 60,
+        "exp": int(now) + 540,
+        "iss": str(gh["app_id"]),
+    }
+    try:
+        private_key = _load_private_key(str(gh["private_key"]))
+        encoded = jwt.encode(payload, private_key, algorithm="RS256")
+    except Exception as e:
+        log.error("签发 GitHub App JWT 失败: %s", e)
+        return None
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            status, resp = await _gh_request(
+                session, "POST", f"/app/installations/{gh['installation_id']}/access_tokens",
+                encoded,
+            )
+            if status != 201:
+                log.error("获取 installation token 失败: HTTP %s %s", status, resp)
+                return None
+            return resp.get("token")
+    except Exception as e:
+        log.error("获取 installation token 异常: %s", e)
+        return None
+
+
+async def _get_repo_token() -> str | None:
+    """解析仓库凭据：App 三件套齐全时用 installation token（缓存自动续期），否则回退 PAT。
+
+    PR/commit 创建者身份由凭据决定：App 凭据显示为 应用名[bot]，PAT 显示为属主个人账号。
+    """
+    global _installation_token, _installation_token_expires_at
+    gh = _notice_cfg().get("github") or {}
+    if not (gh.get("app_id") and gh.get("installation_id") and gh.get("private_key")):
+        return gh.get("token")
+
+    async with _token_lock:
+        if _installation_token and time.time() < _installation_token_expires_at:
+            return _installation_token
+        token = await _create_installation_token(gh)
+        if token:
+            _installation_token = token
+            _installation_token_expires_at = time.time() + _INSTALLATION_TOKEN_TTL
+        return token
+
+
 def _build_pr_body(*, group_id: int, user_id: int, message_id: int, msg_time: float,
                    hash8: str, md: str) -> str:
     ts_str = datetime.fromtimestamp(msg_time, CST).strftime("%Y-%m-%d %H:%M:%S")
@@ -183,7 +252,6 @@ async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
     ncfg = _notice_cfg()
     gh = ncfg.get("github") or {}
     repo = gh.get("repo")
-    token = gh.get("token")
     base_branch = gh.get("base_branch", "main")
     max_title = int(ncfg.get("max_title_chars", 30) or 30)
 
@@ -200,8 +268,12 @@ async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
     if ncfg.get("dry_run"):
         log.info("[notice_pr] dry_run：将提交 %s（分支 %s）\n%s", path, branch, md)
         return
-    if not token or not repo:
-        log.error("notice_pr.github.repo/token 未配置，无法开 PR")
+    if not repo:
+        log.error("notice_pr.github.repo 未配置，无法开 PR")
+        return
+    token = await _get_repo_token()
+    if not token:
+        log.error("无法获取 GitHub 凭据：请配置 github.token，或 App 三件套 app_id/installation_id/private_key")
         return
 
     pr_number: int | None = None
