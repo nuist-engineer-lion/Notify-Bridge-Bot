@@ -1,12 +1,7 @@
 from datetime import datetime
 
-from .config import (
-    log,
-    AVAILABILITY,
-    WEEKDAY_MAP,
-    NIGHT_START,
-    NIGHT_END,
-)
+from . import config as cfg
+from .config import log
 
 
 def format_duration(seconds: float) -> str:
@@ -30,11 +25,11 @@ def format_duration(seconds: float) -> str:
 def get_current_available_members() -> list[int]:
     """根据当前系统时间，返回所有可用的成员QQ列表"""
     now = datetime.now()
-    weekday_name = WEEKDAY_MAP[now.weekday()]
+    weekday_name = cfg.WEEKDAY_MAP[now.weekday()]
     current_time = now.time()
 
     available: list[int] = []
-    for qq, schedule in AVAILABILITY.items():
+    for qq, schedule in cfg.AVAILABILITY.items():
         time_slots = schedule.get(weekday_name, [])
         for start_str, end_str in time_slots:
             try:
@@ -52,8 +47,8 @@ def get_current_available_members() -> list[int]:
 def is_night_time() -> bool:
     """判断当前时间是否处于夜间免打扰时段"""
     now = datetime.now().time()
-    start = datetime.strptime(NIGHT_START, "%H:%M").time()
-    end = datetime.strptime(NIGHT_END, "%H:%M").time()
+    start = datetime.strptime(cfg.NIGHT_START, "%H:%M").time()
+    end = datetime.strptime(cfg.NIGHT_END, "%H:%M").time()
 
     if start <= end:
         return start <= now <= end

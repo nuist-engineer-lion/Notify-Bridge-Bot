@@ -7,6 +7,7 @@ class CustomerData(TypedDict):
     is_newly_reported: bool
     reported_milestones: set[int]
     pending_since: float  # 本轮开始等待回复的时间戳
+    session_id: int | None  # 对话周期在会话库中的 ID（None 表示尚未建立）
 
 
 class ForwardMonitorData(TypedDict):
@@ -22,6 +23,15 @@ class DelayedNotification(TypedDict):
     timestamp: float
 
 
+class RecallableSendData(TypedDict):
+    # .say 成功后可通过表情限时撤回的一次发送记录（以群内反馈消息 ID 为键）
+    customer_msg_id: int
+    customer_id: int
+    group_id: int
+    sent_at: float
+    operator_id: int
+
+
 # 用于存档的消息记录类型（简化）
 MessageRecord = dict[str, Any]
 
@@ -33,6 +43,7 @@ class StateCustomerData(TypedDict):
     is_newly_reported: bool
     reported_milestones: list[int]  # JSON 中为 list
     pending_since: float
+    session_id: int | None
 
 
 class StateForwardData(TypedDict):

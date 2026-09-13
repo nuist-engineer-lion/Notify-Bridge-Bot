@@ -1,0 +1,167 @@
+# WebSocket 连接配置（修改后需重启生效）
+ws_url: "ws://127.0.0.1:3001"
+ws_token: "your_ws_token"
+
+# 内部客服通知群号
+internal_group_id: 123456789
+
+# 免监控白名单（列表）
+whitelist:
+  - 123456789
+  - 987654321
+
+# 迟滞里程碑（分钟）
+milestones:
+  - 15
+  - 30
+  - 60
+  - 120
+  - 180
+  - 360
+  - 720
+  - 1440
+  - 2880
+  - 4320
+
+# 监听合并转发数量上限
+monitored_forward_limit: 15
+
+# 结束会话时发送的消息（支持多行）
+closing_message: |-
+  本次会话暂时结束。感谢您的支持与信任，再见。（请勿回复）
+
+# 新好友通过申请后发送的欢迎消息（支持多行）
+# 可以是纯文本字符串，也可以是结构化消息列表，例如：
+# welcome_message:
+#   - type: text
+#     data:
+#       text: "您好，感谢您添加好友。"
+#   - type: image
+#     data:
+#       file: "https://example.com/welcome.png"
+welcome_message: |-
+  [自动回复]您好，感谢您添加好友。清灰/换硅脂/疑难问题解答等可添加活动通知群1000000000，按照发布的时间地点参加修机活动，目前无需预约
+  如果你对修机师的活动感兴趣，也欢迎加入交流群：1000000001
+  如有其他问题可随时留言，我们会在工作时间尽快回复。
+
+# 各命令防抖间隔（秒）：say / more / bye / close / list
+debounce_seconds:
+  say: 5
+  more: 5
+  bye: 5
+  close: 5
+  list: 5
+
+# 好友申请去重缓存时间（秒）
+processed_friend_requests_expire: 5
+
+# 好友通过后发送欢迎消息的延迟（秒），等待好友关系生效（默认 3）
+friend_welcome_delay: 5
+
+# 欢迎消息发送失败后重试（默认均为 3）
+friend_welcome_retries: 3
+friend_welcome_retry_interval: 3
+
+# 好友数量上限，达到时在群通知中附加警告（默认 3000）
+friend_count_limit: 3000
+
+# 回复耗时记录最大保留条数
+reply_duration_maxlen: 1000
+
+# 成员可用时间段配置
+# 格式：qq号 -> 星期几 -> 时段列表（每个时段为 ["HH:MM", "HH:MM"]）
+availability:
+  123456789:   # example duty member
+    monday:
+      - ["09:00", "12:00"]
+      - ["13:00", "18:00"]
+    tuesday: []
+    wednesday: []
+    thursday: []
+    friday: []
+    saturday: []
+    sunday: []
+
+# 过期监听消息保留时长（秒），用于清理（默认 86400）
+max_listen_age: 86400  # 24 小时
+
+# 夜间免打扰时段（夜间通知延后到 summary_time 汇总发送）
+night_mode:
+  start: "23:30"        # 夜间模式开始时间
+  end: "07:00"          # 夜间模式结束时间（跨天）
+  summary_time: "07:00" # 汇总通知发送时间
+
+# 状态持久化文件（代码默认 state.json；修改后需重启生效）
+state_file: "archives/state.json"
+
+# 存档目录名称（存放 archive.db、failed_events.jsonl 等；修改后需重启生效）
+archive_dir: "archives"
+
+# 获取最近消息的最大时限（秒），用于构造合并转发（默认 86400）
+recent_message_max_age: 86400  # 24 小时
+
+# 表情快捷操作映射：动作 -> QQ 表情 ID
+# recall 用于 .say 发送成功后限时撤回刚发送的私聊消息，ID 需与其他动作不同
+emoji_mapping:
+  close: 128
+  more: 127
+  bye: 100
+  say: 123
+  cancel: 32
+  recall: 89
+
+# .say 发送成功后允许通过点击撤回表情撤回消息的时间窗口（秒）
+recall_window_seconds: 119
+
+# 会话库保留期（天），0 = 永久保留；超期会话及其事件由巡检任务定期清理
+archive_retention_days: 0
+
+# AI 回复建议：提醒合并转发的第一层附上根据客户最近对话生成的建议答复
+# 使用 OpenAI 兼容接口（DeepSeek / 通义 / GLM / one-api 等均可）
+# 注意：客户对话内容会发送给所配置的 LLM 服务；api_key 属敏感信息，真实配置请走加密流程
+ai_suggestion:
+  enabled: false
+  base_url: "https://api.deepseek.com/v1"
+  api_key: "sk-xxxx"
+  model: "deepseek-chat"
+  # system 提示词可自定义（多行），留空使用内置默认
+  system_prompt: |-
+    你是一家维修客服的助手。请根据以下客服与客户的最近对话，以客服身份草拟下一条发给客户的回复。
+    要求：只输出回复内容本身，不要任何解释、前缀或引号；语气友好专业、简洁；如果客户诉求还不明确，先回应已知信息并礼貌追问。
+  temperature: 0.7          # 采样温度，越高越发散
+  timeout_seconds: 12       # 单次生成超时，失败/超时不影响提醒正常发送
+  max_context_messages: 20  # 送入模型的最近对话条数
+  max_suggestion_chars: 300 # 建议文本截断长度
+
+# ================= 通知 PR：通知群消息自动转主页通知 =================
+# 监控独立的通知群（与上面的 internal_group_id 客服群无关），白名单成员发送的
+# 纯文本消息将自动在主页仓库生成 notices/entries/*.md 并创建 PR，等待 GitHub 上人工审核合并。
+notice_pr:
+  enabled: false
+  # 要监控的通知群号列表
+  groups: []
+  # 这些 QQ 号发送的消息才会自动开 PR（独立于免监控 whitelist）
+  auto_pr_senders: []
+  github:
+    repo: "nuist-engineer-lion/nuist-engineer-lion-homepage"
+    base_branch: main
+    # ==== 鉴权二选一（App 三件套配置齐全时优先使用 App）====
+    # 1) GitHub App（推荐）：PR 创建者显示为 应用名[bot]，不占用个人账号，
+    #    installation token 每小时自动续期。App 需安装到该仓库，
+    #    并授予 Contents 与 Pull requests 两项 Read & write 权限。
+    # app_id: 123456           # App 设置页的 App ID
+    # installation_id: 654321  # 该仓库安装实例的 ID
+    # private_key: |-         # App 私钥 PEM：可内联，也可填文件路径
+    #   -----BEGIN PRIVATE KEY-----
+    #   ...
+    #   -----END PRIVATE KEY-----
+    # 2) fine-grained PAT（回退）：仅该仓库 Contents:read+write 与
+    #    Pull requests:read+write；注意属主无法 approve 自己开的 PR
+    # 凭据属敏感信息，真实配置请走加密流程
+    token: "github_pat_xxx"
+  # 开 PR 成功后是否提醒到客服内部群（合并结果不回显到任何群）
+  ack_to_internal: true
+  # 通知标题最大长度（超出截断并加省略号）
+  max_title_chars: 30
+  # true 时只打印将生成的通知文件内容，不调用 GitHub
+  dry_run: false

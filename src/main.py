@@ -10,47 +10,54 @@ from napcat import (
     GroupPokeEvent,
 )
 
-from .config import (
-    log,
-    WS_URL,
-    INTERNAL_GROUP_ID,
-    WHITELIST,
-    MILESTONES,
-    client,
-)
 from . import config as cfg
+from .config import log
 from .state import load_state
 from .monitor import monitor_loop
 from .private_msg import handle_private_msg, handle_sent_msg, handle_friend_poke
 from .new_user import handle_friend_request
 from .group_msg import handle_group_emoji, handle_group_poke, handle_group_command
+from .notice_pr import handle_notice_group_msg, flush_pending_acks
+from . import storage
+from . import history
 
 
 async def main():
-    log.info("程序启动, WS_URL=%s, 通知群=%d, 白名单=%s", WS_URL, INTERNAL_GROUP_ID, WHITELIST)
-    log.info("里程碑阈值(分钟): %s", MILESTONES)
+    log.info("程序启动, WS_URL=%s, 通知群=%d, 白名单=%s", cfg.WS_URL, cfg.INTERNAL_GROUP_ID, cfg.WHITELIST)
+    log.info("里程碑阈值(分钟): %s", cfg.MILESTONES)
 
     load_state()
+
+    # 会话库初始化与启动恢复：队列客户补齐会话周期、清理孤儿会话、恢复耗时统计
+    try:
+        await storage.init_db()
+        await history.recover_sessions()
+        await history.restore_reply_durations()
+    except Exception as e:
+        log.error("会话库初始化失败，历史记录功能降级（事件将落盘兜底）: %s", e, exc_info=True)
+
     startup_notified = False
     asyncio.create_task(monitor_loop())
+    # 冲刷上次运行中发送失败的通知 PR ack（已落盘队列）
+    asyncio.create_task(flush_pending_acks())
 
     while True:
         log.info("正在连接 WebSocket...")
-        async for event in client:
+        async for event in cfg.client:
             if not startup_notified:
                 try:
-                    await client.send_group_msg(
-                        group_id=str(INTERNAL_GROUP_ID),
+                    await cfg.client.send_group_msg(
+                        group_id=str(cfg.INTERNAL_GROUP_ID),
                         message="🤖 客服机器人已启动，开始监听消息。",
                     )
                     startup_notified = True
-                    log.info("启动通知已发送至群 %d", INTERNAL_GROUP_ID)
+                    log.info("启动通知已发送至群 %d", cfg.INTERNAL_GROUP_ID)
                 except Exception as e:
                     log.error("发送启动通知失败: %s", e, exc_info=True)
 
                 for attempt in range(3):
                     try:
-                        friend_list = await client.send(
+                        friend_list = await cfg.client.send(
                             {"action": "get_friend_list", "params": {}},
                             timeout=30.0,
                         )
@@ -90,6 +97,9 @@ async def main():
                     await handle_group_poke(event)
 
                 case GroupMessageEvent():
+                    # 通知群消息先走通知 PR 流程（仅 notice_pr.groups 命中时生效），
+                    # 再进入客服群命令处理，两者互不影响
+                    await handle_notice_group_msg(event)
                     await handle_group_command(event)
 
                 case _:
