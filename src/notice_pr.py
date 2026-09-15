@@ -18,7 +18,7 @@ from typing import Any
 import aiohttp
 import jwt
 
-from napcat import GroupMessageEvent, Text
+from napcat import At, GroupMessageEvent, Text
 
 from . import config as cfg
 from .config import log
@@ -27,6 +27,9 @@ GITHUB_API = "https://api.github.com"
 # 国内业务按东八区取通知日期
 CST = timezone(timedelta(hours=8))
 _RETRYABLE_STATUS = {500, 502, 503, 504}
+_AT_ALL_TEXT = "@全体成员"
+# 日期+后缀标题过长时退回「mm月dd日通知」
+_AT_ALL_TITLE_MAX = 20
 
 # 同一消息只处理一次（事件重复投递/并发保护）
 _processed_msg_ids: dict[int, float] = {}
@@ -48,21 +51,47 @@ def _notice_cfg() -> dict[str, Any]:
 
 # ======================= 消息过滤与内容提取 =======================
 
+def _is_at_all(seg) -> bool:
+    return isinstance(seg, At) and str(seg.qq).strip().lower() in {"all", "全体成员"}
+
+
 def extract_notice_text(message: list) -> str | None:
-    """提取纯文本内容；含任何非 Text 段（图片/@/引用/表情等）时返回 None。
+    """提取纯文本内容；除 @全体成员 外含其他非 Text 段（图片/@/引用/表情等）时返回 None。
 
     QQ 图片 URL 是临时的，无法长期托管在站点上，V1 只支持纯文本通知。
+    @全体成员 可能是特殊 At 段，统一转成文本前缀，便于首行标题规则处理。
     """
     parts: list[str] = []
     for seg in message:
-        if not isinstance(seg, Text):
+        if isinstance(seg, Text):
+            parts.append(seg.text)
+        elif _is_at_all(seg):
+            parts.append(_AT_ALL_TEXT)
+        else:
             return None
-        parts.append(seg.text)
-    return "\n".join(parts).strip()
+    # Text 段自带换行；At(all) 与后续 Text 需直接拼接，才能识别「@全体成员 今日通知」同行标题
+    return "".join(parts).strip()
 
 
 def _yaml_quote(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _title_from_first_line(first: str, msg_dt: datetime) -> str:
+    """首行标题：以 @全体成员 开头时带日期。仅 @全体成员 →「mm月dd日通知」；有后缀 →「mm月dd日+后缀」。
+    后缀拼出的标题超过 20 字时视为首行无有效标题，退回「mm月dd日通知」。
+    """
+    date_prefix = f"{msg_dt.month:02d}月{msg_dt.day:02d}日"
+    fallback = f"{date_prefix}通知"
+    if first == _AT_ALL_TEXT:
+        return fallback
+    if first.startswith(_AT_ALL_TEXT):
+        rest = first[len(_AT_ALL_TEXT):].lstrip(" \t　")
+        if not rest:
+            return fallback
+        title = f"{date_prefix}{rest}"
+        return fallback if len(title) > _AT_ALL_TITLE_MAX else title
+    return first
 
 
 def build_notice_markdown(text: str, max_title_chars: int, msg_time: float) -> tuple[str, str, str, str]:
@@ -70,20 +99,22 @@ def build_notice_markdown(text: str, max_title_chars: int, msg_time: float) -> t
 
     返回 (md内容, 标题, YYYY-MM-DD日期, 内容hash前8位)。
     首行作标题，其余作摘要与正文，遵循主页仓库 notices/README.md 的约定。
+    首行仅为 @全体成员 时，标题写作「mm月dd日通知」。
     """
     stripped = [ln.strip() for ln in text.splitlines()]
     nonempty = [ln for ln in stripped if ln]
     if not nonempty:
         raise ValueError("消息文本为空")
 
-    title = nonempty[0]
+    msg_dt = datetime.fromtimestamp(msg_time, CST)
+    title = _title_from_first_line(nonempty[0], msg_dt)
     if len(title) > max_title_chars:
         title = title[: max_title_chars - 1] + "…"
 
     first_idx = stripped.index(nonempty[0])
     body = "\n".join(stripped[first_idx + 1:]).strip()
 
-    date_str = datetime.fromtimestamp(msg_time, CST).date().isoformat()
+    date_str = msg_dt.date().isoformat()
     hash8 = hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
 
     if not body:
