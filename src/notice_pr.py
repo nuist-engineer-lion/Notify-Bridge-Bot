@@ -513,8 +513,6 @@ async def handle_notice_group_msg(event: GroupMessageEvent) -> bool:
 
     if event.group_id not in groups:
         return False
-    if event.user_id == cfg.client.self_id:
-        return True
     if event.user_id not in senders:
         return True
 
