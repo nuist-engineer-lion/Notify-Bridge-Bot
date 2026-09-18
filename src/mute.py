@@ -91,6 +91,25 @@ def should_defer_notification() -> bool:
     return is_night_time() or is_muted()
 
 
+async def unmute_and_flush() -> tuple[bool, int, str]:
+    """
+    解除静音并汇总延后通知（群内 .unmute 与终端 unmute 共用）。
+    返回 (原先是否静音, 汇总发出的客户数, 结果描述)。
+    命令回执文案由调用方决定发到群还是仅本地打印。
+    """
+    was = clear_mute()
+    flushed = await flush_delayed_notifications(reason="unmute")
+    if not was and flushed == 0:
+        text = "当前未处于静音状态。"
+    elif flushed > 0:
+        text = f"已解除静音，并汇总发出 {flushed} 名客户的延后提醒。"
+    elif was and is_night_time():
+        text = "已解除静音；当前仍在夜间模式，延后通知将在次日汇总发送。"
+    else:
+        text = "已解除静音；暂无延后通知。"
+    return was, flushed, text
+
+
 def queue_delayed_notification(
     notify_type: str,
     customers: list[tuple[int, CustomerData]],

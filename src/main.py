@@ -27,6 +27,14 @@ from . import history
 _background_tasks: list[asyncio.Task] = []
 _shutdown_requested = False
 _shutdown_finished = False
+# 入口 run_app 注入的 stop event：request_shutdown 时一并 set，用于打断 WS 等待
+_external_stop: asyncio.Event | None = None
+
+
+def bind_shutdown_event(event: asyncio.Event | None) -> None:
+    """由入口把 stop event 绑到 bot，控制台/信号共用同一条关停路径。"""
+    global _external_stop
+    _external_stop = event
 
 
 def request_shutdown(reason: str = "manual") -> None:
@@ -36,6 +44,11 @@ def request_shutdown(reason: str = "manual") -> None:
         return
     _shutdown_requested = True
     log.info("收到停止请求: %s", reason)
+    if _external_stop is not None:
+        try:
+            _external_stop.set()
+        except RuntimeError:
+            pass
 
 
 def is_shutdown_requested() -> bool:

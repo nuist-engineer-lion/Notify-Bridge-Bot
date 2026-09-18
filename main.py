@@ -40,6 +40,8 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop, stop_event: asynci
 async def run_app() -> None:
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
+    # 控制台 quit / 信号共用同一 stop event，与 bot 运行生命周期绑定
+    app.bind_shutdown_event(stop_event)
     _install_signal_handlers(loop, stop_event)
 
     main_task = asyncio.create_task(app.main(), name="bot-main")

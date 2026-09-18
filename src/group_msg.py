@@ -12,7 +12,7 @@ from napcat import (
 
 from . import config as cfg
 from .config import log
-from .utils import format_duration, is_night_time
+from .utils import format_duration
 from . import mute
 from .message_sender import (
     close_session,
@@ -425,19 +425,11 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             return True
         cfg.last_command_time[key] = now_ts
 
-        was = mute.clear_mute()
-        flushed = await mute.flush_delayed_notifications(reason="unmute")
-        if not was and flushed == 0:
-            text = "当前未处于静音状态。"
-        elif flushed > 0:
-            text = f"✅ 已解除静音，并汇总发出 {flushed} 名客户的延后提醒。"
-        elif was and is_night_time():
-            text = "✅ 已解除静音；当前仍在夜间模式，延后通知将在次日汇总发送。"
-        else:
-            text = "✅ 已解除静音；暂无延后通知。"
+        # 与终端 unmute 共用同一套业务逻辑
+        _was, _flushed, text = await mute.unmute_and_flush()
         await cfg.client.send_group_msg(
             group_id=str(gid),
-            message=[Reply(id=str(msg_id)), Text(text=text)],
+            message=[Reply(id=str(msg_id)), Text(text="✅ " + text)],
         )
         return True
 
