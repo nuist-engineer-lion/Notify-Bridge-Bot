@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from typing import cast
 
 from . import config as cfg
@@ -71,6 +72,7 @@ def save_state() -> None:
         "last_command_time": serializable_last_cmd,
         "delayed_notifications": serializable_delayed,
         "last_night_summary_sent_date": cfg.last_night_summary_sent_date,
+        "mute_until": cfg.mute_until,
     }
 
     try:
@@ -153,6 +155,15 @@ def load_state() -> None:
 
     # 使用 global 声明以修改模块级变量
     cfg.last_night_summary_sent_date = state.get("last_night_summary_sent_date", "")
+    cfg.mute_until = float(state.get("mute_until", 0) or 0)
 
-    log.info("状态恢复完成：待回复客户 %d 人，监听转发 %d 条",
-             len(unreplied_customers), len(cfg.monitored_forwards))
+    mute_desc = "未静音"
+    if cfg.mute_until > 0:
+        if time.time() < cfg.mute_until:
+            mute_desc = f"静音至 {time.strftime('%H:%M:%S', time.localtime(cfg.mute_until))}"
+        else:
+            # 重启时已过期的静音窗口直接清零，由巡检/解除命令触发汇总
+            mute_desc = "静音已过期（待汇总）"
+
+    log.info("状态恢复完成：待回复客户 %d 人，监听转发 %d 条，%s",
+             len(unreplied_customers), len(cfg.monitored_forwards), mute_desc)

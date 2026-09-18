@@ -12,7 +12,8 @@ from napcat import (
 
 from . import config as cfg
 from .config import log
-from .utils import format_duration
+from .utils import format_duration, is_night_time
+from . import mute
 from .message_sender import (
     close_session,
     send_status_panel,
@@ -25,6 +26,9 @@ from .message_sender import (
     register_recallable_send,
 )
 from . import history
+
+# 运维类命令（无需引用机器人消息）
+OPS_COMMAND_PREFIXES = ('.say', '.bye', '.more', '.help', '.close', '.list', '.reload', '.update', '.mute', '.unmute', '.status')
 
 
 # ======================= 昵称批量获取 =======================
@@ -337,7 +341,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
     log.debug("群命令: reply_id=%s, cmd=%s", reply_id, cmd_text)
 
     # 检查是否处于等待 .say 内容的状态：收到消息立即发送
-    if event.user_id in cfg.pending_say and not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help', '.close', '.list', '.reload', '.update')):
+    if event.user_id in cfg.pending_say and not any(cmd_text.startswith(prefix) for prefix in OPS_COMMAND_PREFIXES):
         segments = extract_sendable_segments(event.message)
         if not segments:
             await cfg.client.send_group_msg(
@@ -379,7 +383,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
                 asyncio.create_task(add_emoji_to_message(feedback_msg_id, [cfg.EMOJI_MAPPING["recall"]]))
         return True
 
-    if not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help', '.close', '.list', '.reload', '.update')):
+    if not any(cmd_text.startswith(prefix) for prefix in OPS_COMMAND_PREFIXES):
         return True
 
     if cmd_text.startswith(".help"):
@@ -390,6 +394,9 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             "• .close – 关闭会话但不发送结束语\n"
             "• .more – 获取客户的最近100条历史消息\n"
             "• .list – 列出所有未回复客户及其等待时间\n"
+            "• .status – 查看运行状态面板\n"
+            "• .mute [分钟] – 临时静音，暂停提醒（默认 60 分钟，解除时汇总）\n"
+            "• .unmute – 解除静音，并汇总发出延后提醒\n"
             "• .reload cfg – 重载当前明文配置（不拉代码、不展示内容）\n"
             "• .help – 显示此帮助信息\n"
             "\n"
@@ -398,6 +405,82 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         await cfg.client.send_group_msg(
             group_id=str(gid),
             message=[Text(text=help_text)],
+        )
+        return True
+
+    elif cmd_text.startswith(".status"):
+        await send_status_panel(gid)
+        return True
+
+    elif cmd_text.startswith(".unmute"):
+        key = (msg_id, "unmute")
+        now_ts = time.time()
+        debounce_sec = cfg.DEBOUNCE_SECONDS.get("unmute", cfg.DEBOUNCE_SECONDS.get("close", 5))
+        last_time = cfg.last_command_time.get(key, 0.0)
+        if now_ts - last_time < debounce_sec:
+            await cfg.client.send_group_msg(
+                group_id=str(gid),
+                message=[Reply(id=str(msg_id)), Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {debounce_sec:.0f} 秒）")],
+            )
+            return True
+        cfg.last_command_time[key] = now_ts
+
+        was = mute.clear_mute()
+        flushed = await mute.flush_delayed_notifications(reason="unmute")
+        if not was and flushed == 0:
+            text = "当前未处于静音状态。"
+        elif flushed > 0:
+            text = f"✅ 已解除静音，并汇总发出 {flushed} 名客户的延后提醒。"
+        elif was and is_night_time():
+            text = "✅ 已解除静音；当前仍在夜间模式，延后通知将在次日汇总发送。"
+        else:
+            text = "✅ 已解除静音；暂无延后通知。"
+        await cfg.client.send_group_msg(
+            group_id=str(gid),
+            message=[Reply(id=str(msg_id)), Text(text=text)],
+        )
+        return True
+
+    elif cmd_text.startswith(".mute"):
+        key = (msg_id, "mute")
+        now_ts = time.time()
+        debounce_sec = cfg.DEBOUNCE_SECONDS.get("mute", cfg.DEBOUNCE_SECONDS.get("close", 5))
+        last_time = cfg.last_command_time.get(key, 0.0)
+        if now_ts - last_time < debounce_sec:
+            await cfg.client.send_group_msg(
+                group_id=str(gid),
+                message=[Reply(id=str(msg_id)), Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {debounce_sec:.0f} 秒）")],
+            )
+            return True
+        cfg.last_command_time[key] = now_ts
+
+        arg = cmd_text[len(".mute"):].strip()
+        minutes = float(cfg.MUTE_DEFAULT_MINUTES)
+        if arg:
+            try:
+                minutes = float(arg)
+            except ValueError:
+                await cfg.client.send_group_msg(
+                    group_id=str(gid),
+                    message=[Reply(id=str(msg_id)), Text(text=f"❌ 无效时长：{arg}，示例：.mute 30")],
+                )
+                return True
+            if minutes <= 0:
+                await cfg.client.send_group_msg(
+                    group_id=str(gid),
+                    message=[Reply(id=str(msg_id)), Text(text="❌ 静音时长必须大于 0 分钟")],
+                )
+                return True
+
+        until = mute.set_mute(minutes)
+        until_str = time.strftime("%H:%M:%S", time.localtime(until))
+        text = (
+            f"🔕 已开启临时静音 {minutes:g} 分钟（至 {until_str}）。\n"
+            "期间新客户提醒与里程碑催办将暂存；解除静音或到期后汇总发出。"
+        )
+        await cfg.client.send_group_msg(
+            group_id=str(gid),
+            message=[Reply(id=str(msg_id)), Text(text=text)],
         )
         return True
 

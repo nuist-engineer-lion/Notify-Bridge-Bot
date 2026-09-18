@@ -10,10 +10,10 @@ from .config import (
     friend_approve_time,
     delayed_notifications,
 )
-from .models import CustomerData, DelayedNotification
-from .utils import is_night_time
+from .models import CustomerData
 from .message_sender import send_reminder_with_at, pop_tracked_forward
 from .state import save_state
+from . import mute
 from . import storage
 
 
@@ -33,6 +33,15 @@ async def monitor_loop():
             cfg.maybe_reload_config_from_disk()
         except Exception as e:
             log.error("巡检配置热重载异常: %s", e, exc_info=True)
+
+        # ===== 临时静音到期自动解除并汇总 =====
+        try:
+            if mute.expire_if_due():
+                flushed = await mute.flush_delayed_notifications(reason="expire")
+                if flushed:
+                    log.info("静音到期已汇总发出 %d 名客户提醒", flushed)
+        except Exception as e:
+            log.error("静音到期处理失败: %s", e, exc_info=True)
 
         # ===== 清理超时的监听消息 =====
         now = time.time()
@@ -78,15 +87,8 @@ async def monitor_loop():
             del friend_approve_time[uid]
 
         def handle_notification(notify_type: str, customers: list[tuple[int, CustomerData]], milestone: int | None = None) -> None:
-            if is_night_time():
-                notif: DelayedNotification = {
-                    "type": notify_type,
-                    "customers": customers,
-                    "milestone": milestone,
-                    "timestamp": now,
-                }
-                delayed_notifications.append(notif)
-                log.info(f"夜间模式：{notify_type} 通知已延后，涉及 {len(customers)} 名客户")
+            if mute.should_defer_notification():
+                mute.queue_delayed_notification(notify_type, customers, milestone=milestone)
             else:
                 if notify_type == "new_customers":
                     summary = f"📢 刚刚有 {len(customers)} 名客户发来消息，请及时回复！"
