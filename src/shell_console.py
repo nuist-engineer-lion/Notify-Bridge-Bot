@@ -191,8 +191,9 @@ HELP_TEXT = """\
   unmute               解除静音并汇总延后提醒（与群内 .unmute 一致）
   reload               重载明文 config.yaml
   say <qq|all> <文本>  私聊发送；all=当前待回复队列
-  bye <qq|all>         发送结束语并关闭会话
-  close <qq|all>       关闭会话（不发结束语）
+  say <文本…>          队列仅 1 人时自动匹配该客户
+  bye <qq|all>         发送结束语并关闭会话；无参且队列仅 1 人时自动匹配
+  close <qq|all>       关闭会话（不发结束语）；无参自动匹配同上
   more                 终端不支持；请在通知群用 .more
   quit / exit / stop   优雅停止 bot（保存状态并退出；与 Ctrl+C 相同）
 """
@@ -236,13 +237,25 @@ def format_customer_list() -> str:
     return "\n".join(lines)
 
 
-def _parse_shell_target(token: str) -> tuple[int | None, bool, str | None]:
-    """解析终端目标：返回 (qq, is_all, error)。"""
+def _parse_shell_target(token: str | None) -> tuple[int | None, bool, str | None]:
+    """解析终端目标：(qq, is_all, error)。token=None 时队列唯一则自动匹配。
+    error=='AUTO_CONTENT' 表示首个 token 非 QQ 但队列仅 1 人，应将其及后续视为正文。
+    """
+    if token is None:
+        keys = list(cfg.unreplied_customers.keys())
+        if len(keys) == 1:
+            return keys[0], False, None
+        if not keys:
+            return None, False, "当前没有待回复客户，且未指定客户 QQ。"
+        return None, False, f"待回复客户有 {len(keys)} 人，请指定 QQ 或 all。"
     t = (token or "").strip()
     if t.lower() == "all":
         return None, True, None
     qq = parse_qq_arg(t)
     if qq is None:
+        keys = list(cfg.unreplied_customers.keys())
+        if len(keys) == 1:
+            return keys[0], False, "AUTO_CONTENT"
         return None, False, f"无效目标：{token}，请使用客户 QQ 号或 all"
     return qq, False, None
 
@@ -263,22 +276,26 @@ def _shell_debounce_allowed(key: tuple, op: str) -> bool:
 
 async def _shell_say(args: list[str]) -> None:
     if not args:
-        _print("用法：say <qq|all> <文本…>")
+        qq, _all, err = _parse_shell_target(None)
+        if err:
+            _print(err + " 用法：say <qq|all> <文本…>")
+            return
+        _print("用法：say <qq|all> <文本…>（缺少要发送的内容）")
         return
     qq, is_all, err = _parse_shell_target(args[0])
-    if err:
+    auto_content = err == "AUTO_CONTENT"
+    if err and not auto_content:
         _print(err)
         return
-    if len(args) < 2:
+    if auto_content or is_all:
+        text = " ".join(args if auto_content else args[1:]).strip()
+    else:
+        text = " ".join(args[1:]).strip()
+    if not text:
         _print("用法：say <qq|all> <文本…>（缺少要发送的内容）")
         return
     if not cfg.client.is_running:
         _print("客户端未运行，无法发送私聊消息。")
-        return
-
-    text = " ".join(args[1:]).strip()
-    if not text:
-        _print("用法：say <qq|all> <文本…>（缺少要发送的内容）")
         return
     segments = [Text(text=text)]
 
@@ -328,12 +345,13 @@ async def _shell_say(args: list[str]) -> None:
 
 
 async def _shell_bye(args: list[str]) -> None:
-    if not args:
+    token = args[0] if args else None
+    qq, is_all, err = _parse_shell_target(token)
+    if err == "AUTO_CONTENT":
         _print("用法：bye <qq|all>")
         return
-    qq, is_all, err = _parse_shell_target(args[0])
     if err:
-        _print(err)
+        _print(err + " 用法：bye <qq|all>")
         return
     if not cfg.client.is_running:
         _print("客户端未运行，无法发送结束语。")
@@ -379,12 +397,13 @@ async def _shell_bye(args: list[str]) -> None:
 
 
 async def _shell_close(args: list[str]) -> None:
-    if not args:
+    token = args[0] if args else None
+    qq, is_all, err = _parse_shell_target(token)
+    if err == "AUTO_CONTENT":
         _print("用法：close <qq|all>")
         return
-    qq, is_all, err = _parse_shell_target(args[0])
     if err:
-        _print(err)
+        _print(err + " 用法：close <qq|all>")
         return
 
     if is_all:

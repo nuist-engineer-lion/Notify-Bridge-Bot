@@ -15,10 +15,12 @@ if str(ROOT) not in sys.path:
 
 from napcat import Reply, Text  # noqa: E402
 from src.group_msg import (  # noqa: E402
+    extract_say_plain_content,
     extract_say_qq_segments,
     extract_say_target_segments,
     format_batch_result,
     parse_qq_arg,
+    sole_unreplied_customer,
     split_session_op,
 )
 from src.shell_console import handle_shell_command  # noqa: E402
@@ -94,6 +96,26 @@ class TestExtractSayQqSegments(unittest.TestCase):
         self.assertIn("失败 1", text)
         self.assertIn("9", text)
 
+    def test_extract_say_plain_content(self):
+        segs = extract_say_plain_content([Text(text=".say 你好呀")])
+        self.assertEqual(len(segs), 1)
+        self.assertEqual(segs[0].text, "你好呀")
+
+    def test_sole_unreplied_customer(self):
+        from src import config as cfg
+
+        saved = cfg.unreplied_customers.copy()
+        cfg.unreplied_customers.clear()
+        try:
+            self.assertIsNone(sole_unreplied_customer())
+            cfg.unreplied_customers[111] = {"pending_since": 1, "last_active": 1}
+            self.assertEqual(sole_unreplied_customer(), 111)
+            cfg.unreplied_customers[222] = {"pending_since": 1, "last_active": 1}
+            self.assertIsNone(sole_unreplied_customer())
+        finally:
+            cfg.unreplied_customers.clear()
+            cfg.unreplied_customers.update(saved)
+
 
 class TestShellCommandDispatch(unittest.IsolatedAsyncioTestCase):
     async def _run(self, line: str) -> str:
@@ -116,6 +138,53 @@ class TestShellCommandDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertIn("用法", out)
         out2 = await self._run("say all")
         self.assertIn("用法", out2)
+
+    async def test_more_still_rejected(self):
+        out = await self._run("more all")
+        self.assertIn("终端不支持", out)
+
+    async def test_shell_auto_match_queue_sole(self):
+        from src import config as cfg
+        from unittest import mock
+        import time as _time
+
+        saved = cfg.unreplied_customers.copy()
+        cfg.unreplied_customers.clear()
+        cfg.unreplied_customers[777001] = {
+            "pending_since": _time.time(),
+            "last_active": _time.time(),
+            "msg_ids": [],
+        }
+        fake = mock.Mock()
+        fake.is_running = False
+        try:
+            with mock.patch.object(cfg, "client", fake):
+                # 无参 bye：自动匹配 777001，因客户端未运行被拒绝（而不是要求 QQ）
+                out = await self._run("bye")
+                self.assertIn("客户端未运行", out)
+                self.assertNotIn("待回复客户有", out)
+        finally:
+            cfg.unreplied_customers.clear()
+            cfg.unreplied_customers.update(saved)
+
+    async def test_shell_no_auto_match_when_multi(self):
+        from src import config as cfg
+        import time as _time
+
+        saved = cfg.unreplied_customers.copy()
+        cfg.unreplied_customers.clear()
+        for q in (1, 2):
+            cfg.unreplied_customers[q] = {
+                "pending_since": _time.time(),
+                "last_active": _time.time(),
+                "msg_ids": [],
+            }
+        try:
+            out = await self._run("bye")
+            self.assertIn("请指定", out)
+        finally:
+            cfg.unreplied_customers.clear()
+            cfg.unreplied_customers.update(saved)
 
     async def test_say_invalid_target(self):
         out = await self._run("say foo hi")
