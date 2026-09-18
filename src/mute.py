@@ -53,7 +53,7 @@ def set_mute(minutes: float | None = None) -> float:
     if minutes is None:
         cfg.mute_until = MUTE_UNLIMITED
         save_state()
-        log.info("已开启不限时静音（直到手动解除）")
+        log.info("已开启静音")
         return MUTE_UNLIMITED
 
     if minutes <= 0:

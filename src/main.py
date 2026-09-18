@@ -87,7 +87,7 @@ async def graceful_shutdown(reason: str = "signal") -> None:
         return
     _shutdown_finished = True
     _shutdown_requested = True
-    log.info("===== 开始优雅关停（reason=%s） =====", reason)
+    log.info("===== 开始关停（reason=%s） =====", reason)
 
     tasks = [t for t in _background_tasks if t is not None and not t.done()]
     _background_tasks.clear()
@@ -120,7 +120,7 @@ async def graceful_shutdown(reason: str = "signal") -> None:
     except Exception as e:
         log.error("关停时保存状态失败: %s", e, exc_info=True)
 
-    log.info("===== 优雅关停完成 =====")
+    log.info("===== 关停完成 =====")
 
 
 def _register_background_task(coro, name: str) -> asyncio.Task:
@@ -232,7 +232,7 @@ async def main():
         await history.recover_sessions()
         await history.restore_reply_durations()
     except Exception as e:
-        log.error("会话库初始化/恢复失败（写库失败时事件仍会落盘兜底）: %s", e, exc_info=True)
+        log.error("会话库初始化/恢复失败: %s", e, exc_info=True)
 
     _register_background_task(monitor_loop(), "monitor-loop")
     # 冲刷上次运行中发送失败的通知 PR ack（已落盘队列）

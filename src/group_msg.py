@@ -397,7 +397,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             "• .status – 查看运行状态面板\n"
             "• .mute [分钟] – 临时静音（不带参数不限时；如 .mute 30 为 30 分钟）\n"
             "• .unmute – 解除静音，并汇总发出延后提醒\n"
-            "• .reload cfg – 重载当前明文配置（不拉代码、不展示内容）\n"
+            "• .reload – 重载当前明文配置（不拉代码、不展示内容；兼容 .reload cfg）\n"
             "• .help – 显示此帮助信息\n"
             "\n"
             "使用方法：回复一条合并转发消息，然后输入对应命令。"
@@ -549,10 +549,11 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             arg = raw[len("update"):].strip()
             cmd_name = ".update"
         log.info("%s: user=%s group=%s arg=%s", cmd_name, event.user_id, gid, arg)
-        if arg != "cfg":
+        # .reload / .update 可不带参数；cfg 为兼容旧写法
+        if arg not in ("", "cfg"):
             await cfg.client.send_group_msg(
                 group_id=str(gid),
-                message=[Reply(id=str(msg_id)), Text(text="❌ 仅支持 .reload cfg")],
+                message=[Reply(id=str(msg_id)), Text(text="❌ 用法：.reload（可省略 cfg）")],
             )
             return True
 

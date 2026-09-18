@@ -1,7 +1,8 @@
 """本地终端 Shell 控制台：与 bot 同进程、同生命周期。
 
-- 控制台随 bot 启动，随 bot 优雅关停结束；quit/exit 会请求停止整个 bot
+- 控制台随 bot 启动，随 bot 关停结束；quit/exit 会请求停止整个 bot
 - 命令回执只写本地终端，不向 QQ 群发送命令 ACK
+- 业务结果以 log 为准（handler 已展示）；_print 仅用于校验失败等无日志场景
 - unmute 与群内 .unmute 共用 mute.unmute_and_flush（含向通知群汇总延后提醒）
 - 日志经 ConsoleSafeLogHandler 输出：插入日志后重绘 prompt + 已输入缓冲，避免打断命令
 """
@@ -212,16 +213,6 @@ def format_customer_list() -> str:
     return "\n".join(lines)
 
 
-def _describe_mute_opened() -> str:
-    if mute.is_unlimited():
-        return "已开启不限时静音（直到 unmute）。期间提醒将暂存；解除时与群内 .unmute 一样会汇总发出。"
-    until_str = time.strftime("%H:%M:%S", time.localtime(cfg.mute_until))
-    return (
-        f"已开启临时静音（至 {until_str}）。"
-        "期间提醒将暂存；解除时与群内 .unmute 一样会汇总发出。"
-    )
-
-
 async def handle_shell_command(raw: str) -> bool:
     """处理一条控制台命令。返回 False 表示请求停止 bot/退出控制台循环。"""
     cmd = raw.strip()
@@ -245,9 +236,9 @@ async def handle_shell_command(raw: str) -> bool:
         return True
 
     if op == "mute":
+        # set_mute 已写 log（控制台日志 handler 会展示），不再 _print 重复回执
         if not args:
             mute.set_mute(None)
-            _print(_describe_mute_opened())
             return True
         try:
             minutes = float(args[0])
@@ -261,25 +252,24 @@ async def handle_shell_command(raw: str) -> bool:
             mute.set_mute(minutes)
         except ValueError as e:
             _print(str(e))
-            return True
-        _print(_describe_mute_opened())
         return True
 
     if op == "unmute":
         # 与群内 .unmute 一致：解除 + 汇总发出延后提醒（业务消息会进通知群）
-        # 命令回执仍只打在本地终端
-        _was, _flushed, text = await mute.unmute_and_flush()
-        _print(text)
+        # 成功路径业务层已 log；仅在无日志可依时才本地回执
+        was, flushed, text = await mute.unmute_and_flush()
+        if not was and flushed == 0:
+            _print(text)
         return True
 
     if op in ("reload", ".reload"):
-        ok, message = await cfg.run_reload_cfg()
-        _print(("✔ " if ok else "✘ ") + message.replace("\n", "\n  "))
+        # force_reload_config 已 log 成功/警告/失败，不再 _print 重复结果
+        await cfg.run_reload_cfg()
         return True
 
     if op in ("quit", "exit", "stop"):
         # 控制台与 bot 运行绑定：退出控制台 = 优雅停止整个 bot
-        _print("控制台与 bot 运行绑定：正在请求优雅停止 bot（保存状态并退出）...")
+        # request_shutdown 会 log「收到停止请求」，不再 _print 重复描述
         try:
             from . import main as app_main
             app_main.request_shutdown("console-quit")
@@ -374,8 +364,8 @@ async def shell_console_loop() -> None:
         return
 
     loop = asyncio.get_running_loop()
-    log.info("Shell 控制台已启动（与 bot 运行绑定），Ctrl+C 或 quit 优雅停止")
-    _print("Notify-Bridge-Bot Shell 控制台已就绪（与 bot 运行绑定）。输入 help 查看命令。")
+    log.info("Shell 控制台已启动，Ctrl+C 或 quit 以停止")
+    _print("输入 help 查看命令。")
 
     try:
         while True:
@@ -384,7 +374,6 @@ async def shell_console_loop() -> None:
             except (RuntimeError, asyncio.CancelledError):
                 return
             except KeyboardInterrupt:
-                _print("收到 Ctrl+C，正在请求优雅停止 bot...")
                 try:
                     from . import main as app_main
                     app_main.request_shutdown("console-ctrl-c")
@@ -396,14 +385,14 @@ async def shell_console_loop() -> None:
                 return
 
             if line == "":
-                log.info("Shell 控制台 stdin 关闭，控制台结束（bot 继续运行）")
+                log.info("Shell 控制台 stdin 关闭，控制台结束运行")
                 return
 
             try:
                 alive = await handle_shell_command(line)
             except Exception as e:
+                # 已由日志 handler 输出（含 traceback），不再 _print 重复错误
                 log.error("控制台命令执行失败: %s", e, exc_info=True)
-                _print(f"命令执行失败：{e}")
                 alive = True
 
             if not alive:

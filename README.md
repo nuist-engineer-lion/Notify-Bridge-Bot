@@ -62,7 +62,7 @@
 | `.status` | 发送运行状态面板（与戳一戳机器人相同） | `.status` | 否 |
 | `.mute [分钟]` | 临时静音（不带参数不限时；`.mute 30` 为 30 分钟） | `.mute` | 否 |
 | `.unmute` | 解除静音并汇总发出延后提醒（与终端 `unmute` 一致） | `.unmute` | 否 |
-| `.reload cfg` | 重载当前明文配置 | `.reload cfg` | 否 |
+| `.reload` | 重载当前明文配置（兼容 `.reload cfg`） | `.reload` | 否 |
 | `.help` | 显示帮助信息 | `.help` | 否 |
 
 补充说明：
@@ -329,7 +329,7 @@ welcome_message:
 | `state_file` | 运行状态持久化文件 |
 | `recent_message_max_age` | 构造提醒合并转发时回看的消息时间窗口 |
 | `emoji_mapping` | 表情 ID 到快捷动作的映射 |
-| `ai_suggestion` | AI 回复建议（OpenAI 兼容接口配置）；`enabled: false` 或缺省时功能关闭；支持 `.reload cfg` 在线开关 |
+| `ai_suggestion` | AI 回复建议（OpenAI 兼容接口配置）；`enabled: false` 或缺省时功能关闭；支持 `.reload` 在线开关 |
 
 ## 运行要求
 
@@ -582,8 +582,8 @@ sudo install -m 600 /path/to/age.key /etc/notifybot/age.key
 
 ### 群内命令
 
-- `.reload cfg`：只重读当前明文 `config.yaml` 并回报成败，**不** `git pull`、**不**展示配置内容。
-- 兼容旧输入 `.update cfg`，行为与 `.reload cfg` 相同。
+- `.reload`：只重读当前明文 `config.yaml` 并回报成败，**不** `git pull`、**不**展示配置内容。
+- 兼容旧输入 `.reload cfg` / `.update cfg`，行为与 `.reload` 相同。
 - 自动生效以 Actions 为准；群命令仅作文件已就位后的手动 reload。
 
 ### 代码发布 vs 配置热更

@@ -304,7 +304,7 @@ async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
         return
     token = await _get_repo_token()
     if not token:
-        log.error("无法获取 GitHub 凭据：请配置 github.token，或 App 三件套 app_id/installation_id/private_key")
+        log.error("无法获取 GitHub 凭据：请正确配置")
         return
 
     pr_number: int | None = None
