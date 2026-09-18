@@ -339,10 +339,8 @@ recallable_sends: dict[int, RecallableSendData] = {}
 delayed_notifications: list[DelayedNotification] = []
 last_night_summary_sent_date: str = ""
 
-# 临时静音截止时间戳（epoch 秒）；0 表示未静音
+# 临时静音截止时间戳（epoch 秒）；0 未静音；-1 不限时静音
 mute_until: float = 0.0
-# 默认静音时长（分钟），可通过群/控制台命令覆盖
-MUTE_DEFAULT_MINUTES = 60
 
 _apply_config(load_config(CONFIG_PATH), initial=True)
 

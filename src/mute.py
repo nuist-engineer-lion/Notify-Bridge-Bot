@@ -1,4 +1,10 @@
-"""临时静音：暂停向内部群推送提醒，解除时汇总发出。"""
+"""临时静音：暂停向内部群推送提醒，解除时汇总发出。
+
+mute_until 语义：
+  0  → 未静音
+  -1 → 不限时静音（直到手动 unmute）
+  >0 → 静音截止时间戳（epoch 秒）
+"""
 
 from __future__ import annotations
 
@@ -10,28 +16,49 @@ from .models import CustomerData, DelayedNotification
 from .state import save_state
 from .utils import format_duration, is_night_time
 
+# 不限时静音哨兵值
+MUTE_UNLIMITED = -1.0
+
 
 def is_muted() -> bool:
+    if cfg.mute_until == MUTE_UNLIMITED:
+        return True
     return cfg.mute_until > 0 and time.time() < cfg.mute_until
 
 
+def is_unlimited() -> bool:
+    return cfg.mute_until == MUTE_UNLIMITED
+
+
 def get_mute_remaining() -> float:
+    """限时静音返回剩余秒数；不限时返回 inf；未静音返回 0。"""
+    if is_unlimited():
+        return float("inf")
     if not is_muted():
         return 0.0
     return max(0.0, cfg.mute_until - time.time())
 
 
 def describe_mute_status() -> str:
+    if is_unlimited():
+        return "静音中（不限时）"
     if not is_muted():
         return "未静音"
     remaining = get_mute_remaining()
     return f"静音中（剩余 {format_duration(remaining)}）"
 
 
-def set_mute(minutes: float) -> float:
-    """开启静音，返回截止时间戳。minutes <= 0 时按默认值处理。"""
+def set_mute(minutes: float | None = None) -> float:
+    """开启静音。minutes 为 None 或省略时不限时，直到手动解除。返回 mute_until 值。"""
+    if minutes is None:
+        cfg.mute_until = MUTE_UNLIMITED
+        save_state()
+        log.info("已开启不限时静音（直到手动解除）")
+        return MUTE_UNLIMITED
+
     if minutes <= 0:
-        minutes = float(cfg.MUTE_DEFAULT_MINUTES)
+        raise ValueError("静音时长必须大于 0")
+
     until = time.time() + minutes * 60.0
     cfg.mute_until = until
     save_state()
@@ -40,8 +67,8 @@ def set_mute(minutes: float) -> float:
 
 
 def clear_mute() -> bool:
-    """解除静音。返回解除前是否处于静音（含已到期未清理的窗口）。"""
-    was_active = cfg.mute_until > 0
+    """解除静音。返回解除前是否处于静音。"""
+    was_active = cfg.mute_until != 0
     cfg.mute_until = 0.0
     if was_active:
         save_state()
@@ -50,7 +77,7 @@ def clear_mute() -> bool:
 
 
 def expire_if_due() -> bool:
-    """巡检调用：静音到期则自动解除。返回是否刚刚到期解除。"""
+    """巡检调用：限时静音到期则自动解除。不限时静音不会到期。"""
     if cfg.mute_until > 0 and time.time() >= cfg.mute_until:
         log.info("临时静音已到期，自动解除")
         cfg.mute_until = 0.0
@@ -82,8 +109,9 @@ def queue_delayed_notification(
 
 async def flush_delayed_notifications(reason: str = "unmute") -> int:
     """
-    汇总并发送延后通知。
+    汇总并发送延后通知到内部群。
     夜间时段仍保留队列（交给夜间汇总），其他情况立即发出。
+    仅由群内命令或巡检到期触发；终端控制台不调用本函数。
     返回发送涉及的客户数；未发送返回 0。
     """
     from .message_sender import send_reminder_with_at  # 延迟导入避免循环依赖
@@ -123,7 +151,6 @@ async def flush_delayed_notifications(reason: str = "unmute") -> int:
         log.info("静音延后通知已汇总发送 (reason=%s)：%s", reason, summary_text)
     except Exception as e:
         log.error("静音延后通知发送失败: %s", e, exc_info=True)
-        # 发送失败时整批回填，避免丢提醒
         cfg.delayed_notifications.append({
             "type": "mute_flush",
             "customers": customers_list,

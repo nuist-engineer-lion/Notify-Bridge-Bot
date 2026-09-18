@@ -1,4 +1,8 @@
-"""本地终端 Shell 控制台：与 bot 同进程读 stdin，提供运维指令。"""
+"""本地终端 Shell 控制台：与 bot 同进程读 stdin，提供运维指令。
+
+约束：终端命令的所有输出只写本地 stdout，不向任何 QQ 群发送命令回执。
+延后提醒的汇总发送只由群内 .unmute 或巡检到期触发。
+"""
 
 from __future__ import annotations
 
@@ -9,18 +13,18 @@ import time
 from . import config as cfg
 from .config import log
 from . import mute
-from .utils import format_duration, is_night_time
+from .utils import format_duration
 
 HELP_TEXT = """\
-可用控制台命令：
+可用控制台命令（输出仅在本地终端，不发送到群）：
   help                 显示本帮助
-  status               查看运行状态（本地输出）
+  status               查看运行状态
   list                 列出待回复客户
-  mute [分钟]          临时静音（默认 {default} 分钟）
-  unmute               解除静音并汇总发出延后提醒
+  mute [分钟]          临时静音；不带参数为不限时，直到 unmute
+  unmute               解除静音（不向群发送；延后提醒需群内 .unmute 或等待汇总）
   reload               重载明文 config.yaml
   quit / exit          退出控制台（bot 继续运行；停止 bot 请用 Ctrl+C）
-""".format(default=60)
+"""
 
 
 def _print(text: str) -> None:
@@ -66,8 +70,21 @@ def format_customer_list() -> str:
     return "\n".join(lines)
 
 
+def _describe_mute_opened() -> str:
+    if mute.is_unlimited():
+        return "已开启不限时静音（直到 unmute）。期间提醒将暂存；终端操作不会向群发送回执。"
+    until_str = time.strftime("%H:%M:%S", time.localtime(cfg.mute_until))
+    return (
+        f"已开启临时静音（至 {until_str}）。"
+        "期间提醒将暂存；终端操作不会向群发送回执。"
+    )
+
+
 async def handle_shell_command(raw: str) -> bool:
-    """处理一条控制台命令。返回 False 表示请求退出控制台。"""
+    """处理一条控制台命令。返回 False 表示请求退出控制台。
+
+    所有反馈只写本地 stdout，绝不调用群消息接口。
+    """
     cmd = raw.strip()
     if not cmd:
         return True
@@ -89,33 +106,40 @@ async def handle_shell_command(raw: str) -> bool:
         return True
 
     if op == "mute":
-        minutes = cfg.MUTE_DEFAULT_MINUTES
-        if args:
-            try:
-                minutes = float(args[0])
-            except ValueError:
-                _print(f"无效时长：{args[0]}，示例：mute 30")
-                return True
-            if minutes <= 0:
-                _print("静音时长必须大于 0 分钟")
-                return True
-        until = mute.set_mute(minutes)
-        until_str = time.strftime("%H:%M:%S", time.localtime(until))
-        _print(f"已开启临时静音 {minutes:g} 分钟（至 {until_str}）。期间提醒将暂存，解除时汇总发出。")
+        # 无参数 = 不限时；有参数 = 限时分钟数
+        if not args:
+            mute.set_mute(None)
+            _print(_describe_mute_opened())
+            return True
+        try:
+            minutes = float(args[0])
+        except ValueError:
+            _print(f"无效时长：{args[0]}，示例：mute 30；直接输入 mute 表示不限时")
+            return True
+        if minutes <= 0:
+            _print("静音时长必须大于 0 分钟；不限时请直接输入 mute")
+            return True
+        try:
+            mute.set_mute(minutes)
+        except ValueError as e:
+            _print(str(e))
+            return True
+        _print(_describe_mute_opened())
         return True
 
     if op == "unmute":
+        # 仅本地解除静音状态，不向群汇总发送，避免终端命令输出进群
         was = mute.clear_mute()
-        flushed = await mute.flush_delayed_notifications(reason="unmute")
-        if not was and flushed == 0:
+        delayed = len(cfg.delayed_notifications)
+        if not was:
             _print("当前未处于静音状态。")
-        elif flushed > 0:
-            _print(f"已解除静音，并汇总发出 {flushed} 名客户的延后提醒。")
-        elif was:
-            if is_night_time():
-                _print("已解除静音；当前仍在夜间模式，延后通知将在次日汇总发送。")
-            else:
-                _print("已解除静音；暂无延后通知。")
+        elif delayed > 0:
+            _print(
+                f"已在本地解除静音。延后通知仍有 {delayed} 条，"
+                "未向群发送；请在群内执行 .unmute 汇总发出，或等待夜间汇总。"
+            )
+        else:
+            _print("已在本地解除静音；暂无延后通知。")
         return True
 
     if op in ("reload", ".reload"):
@@ -142,9 +166,9 @@ async def shell_console_loop() -> None:
         return
 
     loop = asyncio.get_running_loop()
-    log.info("Shell 控制台已启动，输入 help 查看命令；Ctrl+C 停止 bot")
+    log.info("Shell 控制台已启动（输出仅本地），输入 help 查看命令；Ctrl+C 停止 bot")
 
-    _print("Notify-Bridge-Bot Shell 控制台已就绪，输入 help 查看命令。")
+    _print("Notify-Bridge-Bot Shell 控制台已就绪（输出仅本地，不发送到群）。输入 help 查看命令。")
 
     while True:
         try:
@@ -157,7 +181,6 @@ async def shell_console_loop() -> None:
             return
 
         if line == "":
-            # EOF：非交互环境或 stdin 被关闭
             log.info("Shell 控制台收到 EOF，控制台已禁用（bot 继续运行）")
             _print("Shell 控制台已禁用（stdin 关闭），bot 继续运行。")
             return

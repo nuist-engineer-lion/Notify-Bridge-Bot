@@ -395,7 +395,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             "• .more – 获取客户的最近100条历史消息\n"
             "• .list – 列出所有未回复客户及其等待时间\n"
             "• .status – 查看运行状态面板\n"
-            "• .mute [分钟] – 临时静音，暂停提醒（默认 60 分钟，解除时汇总）\n"
+            "• .mute [分钟] – 临时静音（不带参数不限时；如 .mute 30 为 30 分钟）\n"
             "• .unmute – 解除静音，并汇总发出延后提醒\n"
             "• .reload cfg – 重载当前明文配置（不拉代码、不展示内容）\n"
             "• .help – 显示此帮助信息\n"
@@ -455,29 +455,36 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         cfg.last_command_time[key] = now_ts
 
         arg = cmd_text[len(".mute"):].strip()
-        minutes = float(cfg.MUTE_DEFAULT_MINUTES)
+        # 无参数 = 不限时静音；有参数 = 限时分钟数
+        minutes: float | None = None
         if arg:
             try:
                 minutes = float(arg)
             except ValueError:
                 await cfg.client.send_group_msg(
                     group_id=str(gid),
-                    message=[Reply(id=str(msg_id)), Text(text=f"❌ 无效时长：{arg}，示例：.mute 30")],
+                    message=[Reply(id=str(msg_id)), Text(text=f"❌ 无效时长：{arg}，示例：.mute 30；直接发送 .mute 表示不限时")],
                 )
                 return True
             if minutes <= 0:
                 await cfg.client.send_group_msg(
                     group_id=str(gid),
-                    message=[Reply(id=str(msg_id)), Text(text="❌ 静音时长必须大于 0 分钟")],
+                    message=[Reply(id=str(msg_id)), Text(text="❌ 静音时长必须大于 0 分钟；不限时请直接发送 .mute")],
                 )
                 return True
 
         until = mute.set_mute(minutes)
-        until_str = time.strftime("%H:%M:%S", time.localtime(until))
-        text = (
-            f"🔕 已开启临时静音 {minutes:g} 分钟（至 {until_str}）。\n"
-            "期间新客户提醒与里程碑催办将暂存；解除静音或到期后汇总发出。"
-        )
+        if minutes is None:
+            text = (
+                "🔕 已开启不限时静音（直到 .unmute）。\n"
+                "期间新客户提醒与里程碑催办将暂存；解除静音后汇总发出。"
+            )
+        else:
+            until_str = time.strftime("%H:%M:%S", time.localtime(until))
+            text = (
+                f"🔕 已开启临时静音 {minutes:g} 分钟（至 {until_str}）。\n"
+                "期间新客户提醒与里程碑催办将暂存；解除静音或到期后汇总发出。"
+            )
         await cfg.client.send_group_msg(
             group_id=str(gid),
             message=[Reply(id=str(msg_id)), Text(text=text)],
