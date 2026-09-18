@@ -832,7 +832,8 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
                     group_id=gid,
                     reply_id=orig_reply_id,
                 )
-                cfg.last_command_time[debounce_key] = time.time()
+                if not feedback.startswith("❌"):
+                    cfg.last_command_time[debounce_key] = time.time()
             except Exception as e:
                 log.error("发送私聊消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
                 feedback = f"❌ 发送失败：{e}"
