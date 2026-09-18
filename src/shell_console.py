@@ -17,9 +17,17 @@ import sys
 import threading
 import time
 
+from napcat import Text
+
 from . import config as cfg
 from .config import log
 from . import mute
+from .group_msg import (
+    handle_bye_command,
+    handle_close_command,
+    parse_qq_arg,
+    send_private_and_close,
+)
 from .utils import format_duration
 
 _PROMPT = "notifybot> "
@@ -30,6 +38,8 @@ _log_handler: logging.Handler | None = None
 _installed_logger_names: list[str] = []
 # 关停时置位，使阻塞在 executor 中的 stdin 读取尽快返回
 _stop_stdin_read = threading.Event()
+# 终端防抖：独立内存字典，不写入 last_command_time（避免破坏 state 持久化键格式）
+_shell_debounce: dict[tuple, float] = {}
 
 
 def request_console_stop() -> None:
@@ -180,6 +190,10 @@ HELP_TEXT = """\
   mute [分钟]          临时静音；不带参数为不限时，直到 unmute
   unmute               解除静音并汇总延后提醒（与群内 .unmute 一致）
   reload               重载明文 config.yaml
+  say <qq|all> <文本>  私聊发送；all=当前待回复队列
+  bye <qq|all>         发送结束语并关闭会话
+  close <qq|all>       关闭会话（不发结束语）
+  more                 终端不支持；请在通知群用 .more
   quit / exit / stop   优雅停止 bot（保存状态并退出；与 Ctrl+C 相同）
 """
 
@@ -222,6 +236,196 @@ def format_customer_list() -> str:
     return "\n".join(lines)
 
 
+def _parse_shell_target(token: str) -> tuple[int | None, bool, str | None]:
+    """解析终端目标：返回 (qq, is_all, error)。"""
+    t = (token or "").strip()
+    if t.lower() == "all":
+        return None, True, None
+    qq = parse_qq_arg(t)
+    if qq is None:
+        return None, False, f"无效目标：{token}，请使用客户 QQ 号或 all"
+    return qq, False, None
+
+
+def _shell_key(target: int | str, op: str) -> tuple:
+    """终端防抖键（仅存在 _shell_debounce，不进入持久化 last_command_time）。"""
+    return (target, op)
+
+
+def _shell_debounce_allowed(key: tuple, op: str) -> bool:
+    debounce_sec = cfg.DEBOUNCE_SECONDS.get(op, 5)
+    now = time.time()
+    if now - _shell_debounce.get(key, 0) < debounce_sec:
+        _print(f"操作过于频繁，请稍后再试（防抖 {debounce_sec} 秒）")
+        return False
+    return True
+
+
+async def _shell_say(args: list[str]) -> None:
+    if not args:
+        _print("用法：say <qq|all> <文本…>")
+        return
+    qq, is_all, err = _parse_shell_target(args[0])
+    if err:
+        _print(err)
+        return
+    if len(args) < 2:
+        _print("用法：say <qq|all> <文本…>（缺少要发送的内容）")
+        return
+    if not cfg.client.is_running:
+        _print("客户端未运行，无法发送私聊消息。")
+        return
+
+    text = " ".join(args[1:]).strip()
+    if not text:
+        _print("用法：say <qq|all> <文本…>（缺少要发送的内容）")
+        return
+    segments = [Text(text=text)]
+
+    if is_all:
+        targets = list(cfg.unreplied_customers.keys())
+        if not targets:
+            _print("当前没有待回复客户。")
+            return
+        key = _shell_key("__all__", "say")
+        if not _shell_debounce_allowed(key, "say"):
+            return
+        ok = 0
+        failed: list[int] = []
+        for cust in targets:
+            feedback, _closed, _mid = await send_private_and_close(
+                cust, segments,
+                operator_uid=None,
+                via="shell",
+                close_reason="say",
+            )
+            if feedback.startswith("❌"):
+                failed.append(cust)
+            else:
+                ok += 1
+        if ok:
+            _shell_debounce[key] = time.time()
+        suffix = ""
+        if failed:
+            shown = ", ".join(str(x) for x in failed[:10])
+            more = f" 等共 {len(failed)} 人" if len(failed) > 10 else ""
+            suffix = f"；失败 QQ：{shown}{more}"
+        _print(f"say all 完成：成功 {ok}，失败 {len(failed)}{suffix}")
+        return
+
+    key = _shell_key(qq, "say")
+    if not _shell_debounce_allowed(key, "say"):
+        return
+    feedback, _closed, _mid = await send_private_and_close(
+        qq, segments,
+        operator_uid=None,
+        via="shell",
+        close_reason="say",
+    )
+    if not feedback.startswith("❌"):
+        _shell_debounce[key] = time.time()
+    _print(feedback)
+
+
+async def _shell_bye(args: list[str]) -> None:
+    if not args:
+        _print("用法：bye <qq|all>")
+        return
+    qq, is_all, err = _parse_shell_target(args[0])
+    if err:
+        _print(err)
+        return
+    if not cfg.client.is_running:
+        _print("客户端未运行，无法发送结束语。")
+        return
+
+    if is_all:
+        targets = list(cfg.unreplied_customers.keys())
+        if not targets:
+            _print("当前没有待回复客户。")
+            return
+        key = _shell_key("__all__", "bye")
+        if not _shell_debounce_allowed(key, "bye"):
+            return
+        ok = 0
+        failed: list[int] = []
+        for cust in targets:
+            feedback = await handle_bye_command(
+                None, None, cust, operator_uid=None, via="shell",
+            )
+            if feedback.startswith("❌"):
+                failed.append(cust)
+            else:
+                ok += 1
+        if ok:
+            _shell_debounce[key] = time.time()
+        suffix = ""
+        if failed:
+            shown = ", ".join(str(x) for x in failed[:10])
+            more = f" 等共 {len(failed)} 人" if len(failed) > 10 else ""
+            suffix = f"；失败 QQ：{shown}{more}"
+        _print(f"bye all 完成：成功 {ok}，失败 {len(failed)}{suffix}")
+        return
+
+    key = _shell_key(qq, "bye")
+    if not _shell_debounce_allowed(key, "bye"):
+        return
+    feedback = await handle_bye_command(
+        None, None, qq, operator_uid=None, via="shell",
+    )
+    if not feedback.startswith("❌"):
+        _shell_debounce[key] = time.time()
+    _print(feedback)
+
+
+async def _shell_close(args: list[str]) -> None:
+    if not args:
+        _print("用法：close <qq|all>")
+        return
+    qq, is_all, err = _parse_shell_target(args[0])
+    if err:
+        _print(err)
+        return
+
+    if is_all:
+        targets = list(cfg.unreplied_customers.keys())
+        if not targets:
+            _print("当前没有待回复客户。")
+            return
+        key = _shell_key("__all__", "close")
+        if not _shell_debounce_allowed(key, "close"):
+            return
+        ok = 0
+        failed: list[int] = []
+        for cust in targets:
+            feedback = await handle_close_command(
+                None, None, cust, operator_uid=None, via="shell",
+            )
+            if feedback.startswith("❌"):
+                failed.append(cust)
+            else:
+                ok += 1
+        if ok:
+            _shell_debounce[key] = time.time()
+        suffix = ""
+        if failed:
+            shown = ", ".join(str(x) for x in failed[:10])
+            more = f" 等共 {len(failed)} 人" if len(failed) > 10 else ""
+            suffix = f"；失败 QQ：{shown}{more}"
+        _print(f"close all 完成：成功 {ok}，失败 {len(failed)}{suffix}")
+        return
+
+    key = _shell_key(qq, "close")
+    if not _shell_debounce_allowed(key, "close"):
+        return
+    feedback = await handle_close_command(
+        None, None, qq, operator_uid=None, via="shell",
+    )
+    if not feedback.startswith("❌"):
+        _shell_debounce[key] = time.time()
+    _print(feedback)
+
+
 async def handle_shell_command(raw: str) -> bool:
     """处理一条控制台命令。返回 False 表示请求停止 bot/退出控制台循环。"""
     cmd = raw.strip()
@@ -242,6 +446,22 @@ async def handle_shell_command(raw: str) -> bool:
 
     if op == "list":
         _print(format_customer_list())
+        return True
+
+    if op in ("more", ".more"):
+        _print("终端不支持 more：请在通知群使用 .more（可引用机器人消息，或 .more <客户QQ>）")
+        return True
+
+    if op == "say":
+        await _shell_say(args)
+        return True
+
+    if op == "bye":
+        await _shell_bye(args)
+        return True
+
+    if op == "close":
+        await _shell_close(args)
         return True
 
     if op == "mute":

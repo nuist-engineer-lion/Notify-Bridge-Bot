@@ -39,9 +39,12 @@ def save_state() -> None:
         str(mid): data for mid, data in cfg.monitored_forwards.items()
     }
 
-    # 转换 last_command_time 的键为字符串
+    # 转换 last_command_time 的键为字符串（兼容 2 元组；非 2 元组跳过，不中断落盘）
     serializable_last_cmd: dict[str, float] = {}
-    for (msg_id, cmd), ts in last_command_time.items():
+    for key, ts in last_command_time.items():
+        if not isinstance(key, tuple) or len(key) != 2:
+            continue
+        msg_id, cmd = key
         serializable_last_cmd[f"{msg_id}_{cmd}"] = ts
 
     # 转换 delayed_notifications 中的 CustomerData 为 StateCustomerData

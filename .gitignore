@@ -1,4 +1,4 @@
-﻿# Python-generated files
+# Python-generated files
 __pycache__/
 *.py[oc]
 build/
@@ -23,3 +23,7 @@ config.yaml
 
 # Vibe
 .claude/
+
+# Compose/docs — 永不入库
+docs/
+.worktrees/

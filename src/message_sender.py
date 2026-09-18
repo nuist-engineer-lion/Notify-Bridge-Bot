@@ -230,10 +230,16 @@ def action_emoji_ids() -> list[int]:
     return [eid for cmd, eid in cfg.EMOJI_MAPPING.items() if cmd not in ("cancel", "recall")]
 
 
-def build_say_feedback(customer_id: int, closed: bool, recallable: bool) -> str:
-    """构造 .say 成功通报文本，附带限时撤回提示"""
+def build_say_feedback(
+    customer_id: int,
+    closed: bool,
+    recallable: bool,
+    *,
+    recall_hint: bool = True,
+) -> str:
+    """构造 .say 成功通报文本；recall_hint=False 时不附终端/非表情撤回提示。"""
     feedback = f"✅ 已向客户 {customer_id} 发送消息。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
-    if recallable:
+    if recallable and recall_hint:
         feedback += f"\n🧹 {cfg.RECALL_WINDOW_SECONDS} 秒内点击本消息上的撤回表情可撤回该消息"
     return feedback
 

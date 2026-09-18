@@ -157,8 +157,8 @@ async def record_bot_send(uid: int, message_id: int | None, kind: str, message, 
                        kind=kind, ok=ok, msg=_text_as_segments(message))
 
 
-async def record_command(uid: int, operator_uid: int, command: str, **payload) -> None:
-    """客服在内部群执行的会话操作命令（say/bye/close 等）。"""
+async def record_command(uid: int, operator_uid: int | None, command: str, **payload) -> None:
+    """客服在内部群/终端执行的会话操作命令（say/bye/close 等）。operator_uid 终端路径为 None。"""
     sid = await ensure_session(uid)
     if sid is None:
         return
