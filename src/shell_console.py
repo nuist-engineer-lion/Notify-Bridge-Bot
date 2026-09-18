@@ -23,7 +23,7 @@ HELP_TEXT = """\
   mute [分钟]          临时静音；不带参数为不限时，直到 unmute
   unmute               解除静音（不向群发送；延后提醒需群内 .unmute 或等待汇总）
   reload               重载明文 config.yaml
-  quit / exit          退出控制台（bot 继续运行；停止 bot 请用 Ctrl+C）
+  quit / exit          退出控制台（bot 继续运行；停止 bot 请用 Ctrl+C，会优雅落盘）
 """
 
 
@@ -148,7 +148,7 @@ async def handle_shell_command(raw: str) -> bool:
         return True
 
     if op in ("quit", "exit"):
-        _print("控制台已退出（bot 仍在后台运行）。停止 bot 请在进程终端按 Ctrl+C。")
+        _print("控制台已退出（bot 仍在后台运行）。停止 bot 请在进程终端按 Ctrl+C（将保存状态并优雅退出）。")
         return False
 
     _print(f"未知命令：{op}，输入 help 查看可用命令。")
@@ -166,7 +166,7 @@ async def shell_console_loop() -> None:
         return
 
     loop = asyncio.get_running_loop()
-    log.info("Shell 控制台已启动（输出仅本地），输入 help 查看命令；Ctrl+C 停止 bot")
+    log.info("Shell 控制台已启动（输出仅本地），输入 help 查看命令；Ctrl+C 优雅停止 bot")
 
     _print("Notify-Bridge-Bot Shell 控制台已就绪（输出仅本地，不发送到群）。输入 help 查看命令。")
 

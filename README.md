@@ -143,7 +143,14 @@ bot 启动后会在同一进程读取终端 stdin。交互式运行（或 `scree
 | `reload` | 重载明文 `config.yaml` |
 | `quit` / `exit` | 退出控制台（bot 继续运行） |
 
-停止 bot 仍使用终端 `Ctrl+C`。
+停止 bot 使用终端 `Ctrl+C`（或向进程发送 `SIGTERM`）。触发后会执行**优雅关停**：
+
+1. 停止接收新事件，取消后台任务（巡检 / 控制台 / 通知 ack 冲刷）
+2. 关闭 NapCat WebSocket 连接
+3. 最后一次将运行状态写入 `state_file`
+4. 进程退出
+
+若信号处理器未能生效（极端情况），入口会兜底再保存一次状态。Shell 控制台的 `quit` / `exit` 只退出控制台本身，不会停 bot。
 
 ## 配置说明
 
@@ -508,7 +515,7 @@ uv run python scripts/import_jsonl.py             # 导入
 
 各模块职责：
 
-- `src/main.py`：程序入口、事件分发、启动通知、重连逻辑、会话库初始化与启动恢复
+- `src/main.py`：程序入口逻辑、事件分发、启动通知、重连、优雅关停（信号→取消任务→关连接→落盘状态）
 - `src/config.py`：配置加载、全局状态初始化、NapCat 客户端实例
 - `src/private_msg.py`：处理客户私聊消息、客服私聊回复、私聊戳一戳
 - `src/new_user.py`：好友申请自动通过、欢迎消息发送、好友数提醒
