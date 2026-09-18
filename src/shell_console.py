@@ -5,6 +5,7 @@
 - 业务结果以 log 为准（handler 已展示）；_print 仅用于校验失败等无日志场景
 - unmute 与群内 .unmute 共用 mute.unmute_and_flush（含向通知群汇总延后提醒）
 - 日志经 ConsoleSafeLogHandler 输出：插入日志后重绘 prompt + 已输入缓冲，避免打断命令
+- stdin 读取可被 _stop_stdin_read 中断，避免关停时阻塞默认执行器
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import asyncio
 import logging
 import os
 import sys
+import threading
 import time
 
 from . import config as cfg
@@ -26,6 +28,13 @@ _reading = False
 _input_buffer = ""
 _log_handler: logging.Handler | None = None
 _installed_logger_names: list[str] = []
+# 关停时置位，使阻塞在 executor 中的 stdin 读取尽快返回
+_stop_stdin_read = threading.Event()
+
+
+def request_console_stop() -> None:
+    """优雅关停时调用：唤醒/退出 stdin 读取，避免阻塞默认执行器。"""
+    _stop_stdin_read.set()
 
 
 def _print(text: str) -> None:
@@ -308,6 +317,11 @@ def _read_line_windows() -> str:
     sys.stdout.flush()
     try:
         while True:
+            if _stop_stdin_read.is_set():
+                return ""
+            if not msvcrt.kbhit():
+                time.sleep(0.05)
+                continue
             ch = msvcrt.getwch()
             # Ctrl+C
             if ch == "\x03":
@@ -327,10 +341,16 @@ def _read_line_windows() -> str:
                 continue
             # 方向键/功能键前缀 \x00 或 \xe0，吞掉后续
             if ch in ("\x00", "\xe0"):
-                try:
-                    msvcrt.getwch()
-                except Exception:
-                    pass
+                for _ in range(20):
+                    if _stop_stdin_read.is_set():
+                        return ""
+                    if msvcrt.kbhit():
+                        try:
+                            msvcrt.getwch()
+                        except Exception:
+                            pass
+                        break
+                    time.sleep(0.01)
                 continue
             buf.append(ch)
             _input_buffer = "".join(buf)
@@ -345,14 +365,32 @@ def _read_line_windows() -> str:
 def _read_line_unix_fallback() -> str:
     sys.stdout.write(_PROMPT)
     sys.stdout.flush()
-    line = sys.stdin.readline()
-    return line
+    # 用可超时的 select 轮询，关停时能及时退出，避免阻塞默认执行器
+    try:
+        import select
+    except ImportError:
+        return sys.stdin.readline()
+
+    try:
+        while True:
+            if _stop_stdin_read.is_set():
+                return ""
+            try:
+                ready, _, _ = select.select([sys.stdin], [], [], 0.2)
+            except (OSError, ValueError, TypeError):
+                # select 不可用时退回阻塞读；EOF/关停由上层处理
+                return sys.stdin.readline()
+            if ready:
+                return sys.stdin.readline()
+    except Exception:
+        return sys.stdin.readline()
 
 
 async def shell_console_loop() -> None:
     """与 bot 同进程运行；bot 关停时本任务会被取消。"""
     global _reading, _input_buffer
 
+    _stop_stdin_read.clear()
     install_console_log_handler()
 
     try:
@@ -385,6 +423,9 @@ async def shell_console_loop() -> None:
                 return
 
             if line == "":
+                # 关停触发的空返回不记作「stdin 关闭」业务事件
+                if _stop_stdin_read.is_set():
+                    return
                 log.info("Shell 控制台 stdin 关闭，控制台结束运行")
                 return
 
@@ -400,3 +441,4 @@ async def shell_console_loop() -> None:
     finally:
         _reading = False
         _input_buffer = ""
+        _stop_stdin_read.set()

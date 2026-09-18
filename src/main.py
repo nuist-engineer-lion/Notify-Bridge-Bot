@@ -89,6 +89,13 @@ async def graceful_shutdown(reason: str = "signal") -> None:
     _shutdown_requested = True
     log.info("===== 开始关停（reason=%s） =====", reason)
 
+    # 先打断控制台 stdin 读取，避免默认执行器在关停时被阻塞
+    try:
+        from .shell_console import request_console_stop
+        request_console_stop()
+    except Exception:
+        pass
+
     tasks = [t for t in _background_tasks if t is not None and not t.done()]
     _background_tasks.clear()
     if tasks:

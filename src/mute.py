@@ -98,15 +98,33 @@ async def unmute_and_flush() -> tuple[bool, int, str]:
     命令回执文案由调用方决定发到群还是仅本地打印。
     """
     was = clear_mute()
+    pending_before = len(cfg.delayed_notifications)
+    client_up = bool(cfg.client.is_running)
     flushed = await flush_delayed_notifications(reason="unmute")
-    if not was and flushed == 0:
-        text = "当前未处于静音状态。"
-    elif flushed > 0:
+    pending_after = len(cfg.delayed_notifications)
+
+    if flushed > 0:
         text = f"已解除静音，并汇总发出 {flushed} 名客户的延后提醒。"
+    elif was and not client_up:
+        text = (
+            f"已解除静音；客户端未运行，仍有 {pending_before} 条延后通知，"
+            "将在客户端恢复后补发。"
+        )
     elif was and is_night_time():
         text = "已解除静音；当前仍在夜间模式，延后通知将在次日汇总发送。"
-    else:
+    elif was and pending_after > 0:
+        text = f"已解除静音；仍有 {pending_after} 条延后通知未能发出，请稍后重试 unmute。"
+    elif not was and pending_before > 0 and not client_up:
+        text = (
+            f"当前未处于静音状态；客户端未运行，仍有 {pending_before} 条延后通知，"
+            "将在客户端恢复后补发。"
+        )
+    elif not was and pending_before > 0:
+        text = f"当前未处于静音状态；仍有 {pending_before} 条延后通知待处理。"
+    elif was:
         text = "已解除静音；暂无延后通知。"
+    else:
+        text = "当前未处于静音状态。"
     return was, flushed, text
 
 
@@ -155,21 +173,20 @@ async def flush_delayed_notifications(reason: str = "unmute") -> int:
         return 0
 
     customers_list = list(customers_aggregated.items())
-    summary_text = (
-        f"🔕 静音解除，期间共有 {len(customers_list)} 名客户发来消息，请及时处理。"
-        if reason == "unmute"
-        else f"🔕 静音到期，期间共有 {len(customers_list)} 名客户发来消息，请及时处理。"
-    )
-    try:
-        await send_reminder_with_at(
-            cfg.INTERNAL_GROUP_ID,
-            summary_text,
-            customers_list,
-            notice_type="mute_flush",
+    if reason == "unmute":
+        summary_text = (
+            f"🔕 静音解除，期间共有 {len(customers_list)} 名客户发来消息，请及时处理。"
         )
-        log.info("静音延后通知已汇总发送 (reason=%s)：%s", reason, summary_text)
-    except Exception as e:
-        log.error("静音延后通知发送失败: %s", e, exc_info=True)
+    elif reason == "expire":
+        summary_text = (
+            f"🔕 静音到期，期间共有 {len(customers_list)} 名客户发来消息，请及时处理。"
+        )
+    else:
+        summary_text = (
+            f"🔕 延后通知补发，共有 {len(customers_list)} 名客户发来消息，请及时处理。"
+        )
+
+    def _restore_queue() -> None:
         cfg.delayed_notifications.append({
             "type": "mute_flush",
             "customers": customers_list,
@@ -177,6 +194,33 @@ async def flush_delayed_notifications(reason: str = "unmute") -> int:
             "timestamp": time.time(),
         })
         save_state()
+
+    try:
+        message_id = await send_reminder_with_at(
+            cfg.INTERNAL_GROUP_ID,
+            summary_text,
+            customers_list,
+            notice_type="mute_flush",
+        )
+    except Exception as e:
+        log.error("静音延后通知发送失败: %s", e, exc_info=True)
+        _restore_queue()
         return 0
 
+    # send_reminder_with_at 在转发失败/内容为空时返回 None 且不抛异常，不能当作成功
+    if message_id is None:
+        log.error(
+            "静音延后通知发送未成功（无消息 ID），已恢复 %d 名客户通知 (reason=%s)",
+            len(customers_list),
+            reason,
+        )
+        _restore_queue()
+        return 0
+
+    log.info(
+        "静音延后通知已汇总发送 (reason=%s, msg_id=%s)：%s",
+        reason,
+        message_id,
+        summary_text,
+    )
     return len(customers_list)

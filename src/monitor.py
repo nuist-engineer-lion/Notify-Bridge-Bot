@@ -20,11 +20,24 @@ from . import storage
 async def monitor_loop():
     log.info("巡检任务已启动，每 60 秒执行一次")
     last_archive_cleanup = 0.0
+    client_was_down = False
     while True:
         await asyncio.sleep(60)
 
         if not cfg.client.is_running:
+            client_was_down = True
             continue
+
+        # 客户端恢复后：静音已解除且不在夜间时，补发积压的延后通知
+        if client_was_down:
+            client_was_down = False
+            if cfg.delayed_notifications and not mute.should_defer_notification():
+                try:
+                    flushed = await mute.flush_delayed_notifications(reason="client_reconnect")
+                    if flushed > 0:
+                        log.info("客户端恢复后补发延后通知，涉及 %d 名客户", flushed)
+                except Exception as e:
+                    log.error("客户端恢复后补发延后通知失败: %s", e, exc_info=True)
 
         # 检测明文配置是否被远端解密更新
         try:
