@@ -79,64 +79,85 @@ class ConsoleSafeLogHandler(logging.Handler):
             self.handleError(record)
 
 
-def _is_console_stream_handler(h: logging.Handler) -> bool:
-    if isinstance(h, ConsoleSafeLogHandler):
-        return True
+def _is_terminal_stream_handler(h: logging.Handler) -> bool:
+    """是否为写向终端的 StreamHandler（FileHandler 等保留）。"""
+    if isinstance(h, logging.FileHandler):
+        return False
     if isinstance(h, logging.StreamHandler):
         stream = getattr(h, "stream", None)
-        return stream in (sys.stdout, sys.stderr)
+        if stream in (sys.stdout, sys.stderr):
+            return True
+        # basicConfig 默认挂 stderr；未识别 stream 的 StreamHandler 也视为控制台
+        if stream is None:
+            return True
+        # 常见：stream 是 sys.__stderr__
+        if stream is getattr(sys, "__stdout__", None) or stream is getattr(sys, "__stderr__", None):
+            return True
     return False
 
 
+def _remove_console_handlers(logger: logging.Logger) -> None:
+    for h in list(logger.handlers):
+        if isinstance(h, ConsoleSafeLogHandler) or _is_terminal_stream_handler(h):
+            logger.removeHandler(h)
+
+
 def install_console_log_handler() -> None:
-    """替换根/应用日志的 StreamHandler，使日志与控制台输入协调。"""
+    """
+    安装控制台安全日志 Handler。
+
+    只挂在 root 上一次；子 logger 默认 propagate 到 root，避免同一 Handler
+    在 root + 子 logger 各 emit 一次导致输出重复。
+    propagate=False 的 logger 单独挂同一 handler。
+    """
     global _log_handler, _installed_logger_names
     if _log_handler is not None:
         return
 
     handler = ConsoleSafeLogHandler()
-    targets = [
-        logging.getLogger(),  # root（basicConfig 挂在这里）
-        logging.getLogger("Notify-Bridge-Bot"),
-        logging.getLogger("napcat"),
-        logging.getLogger("napcat.client"),
-        logging.getLogger("napcat.connection"),
-    ]
-    names: list[str] = []
-    for lg in targets:
-        name = lg.name or "root"
-        # 去掉会抢终端的 StreamHandler
-        for h in list(lg.handlers):
-            if _is_console_stream_handler(h) and not isinstance(h, ConsoleSafeLogHandler):
-                lg.removeHandler(h)
-        if not any(isinstance(h, ConsoleSafeLogHandler) for h in lg.handlers):
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    _remove_console_handlers(root)
+    root.addHandler(handler)
+
+    # 清理已创建 logger 上的控制台 StreamHandler / 重复的本 Handler
+    manager = root.manager
+    attached_non_propagating: list[str] = []
+    for name, lg in list(manager.loggerDict.items()):
+        if not isinstance(lg, logging.Logger):
+            continue
+        _remove_console_handlers(lg)
+        if not lg.propagate:
             lg.addHandler(handler)
-        if lg.name == "" or name == "root":
-            # 保证 root 仍向上冒泡给已挂的 handler
-            lg.setLevel(logging.INFO)
-        names.append(name)
-    # 独立 logger（如 napcat.*）不 propagate 时也要能打到控制台
-    for name in ("napcat", "napcat.client", "napcat.connection"):
+            attached_non_propagating.append(name)
+
+    # 确保关键 logger 会冒泡到 root（不各自挂 handler）
+    for name in ("Notify-Bridge-Bot", "napcat", "napcat.client", "napcat.connection"):
         lg = logging.getLogger(name)
-        # 仅在没有其他 handler 时确保至少有我们的 handler
-        if not any(isinstance(h, ConsoleSafeLogHandler) for h in lg.handlers):
-            lg.addHandler(handler)
-        names.append(name)
+        _remove_console_handlers(lg)
+        lg.propagate = True
 
     _log_handler = handler
-    _installed_logger_names = names
+    _installed_logger_names = ["root", *attached_non_propagating]
 
 
 def uninstall_console_log_handler() -> None:
     global _log_handler, _installed_logger_names
     if _log_handler is None:
         return
-    for name in set(_installed_logger_names):
-        lg = logging.getLogger(name) if name != "root" else logging.getLogger()
-        try:
-            lg.removeHandler(_log_handler)
-        except Exception:
-            pass
+    root = logging.getLogger()
+    try:
+        root.removeHandler(_log_handler)
+    except Exception:
+        pass
+    manager = root.manager
+    for lg in manager.loggerDict.values():
+        if isinstance(lg, logging.Logger):
+            try:
+                lg.removeHandler(_log_handler)
+            except Exception:
+                pass
     _log_handler = None
     _installed_logger_names = []
 
