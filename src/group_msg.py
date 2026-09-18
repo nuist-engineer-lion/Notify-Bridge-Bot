@@ -13,6 +13,7 @@ from napcat import (
 from . import config as cfg
 from .config import log
 from .utils import format_duration
+from . import mute
 from .message_sender import (
     close_session,
     send_status_panel,
@@ -25,6 +26,9 @@ from .message_sender import (
     register_recallable_send,
 )
 from . import history
+
+# 运维类命令（无需引用机器人消息）
+OPS_COMMAND_PREFIXES = ('.say', '.bye', '.more', '.help', '.close', '.list', '.reload', '.update', '.mute', '.unmute', '.status')
 
 
 # ======================= 昵称批量获取 =======================
@@ -337,7 +341,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
     log.debug("群命令: reply_id=%s, cmd=%s", reply_id, cmd_text)
 
     # 检查是否处于等待 .say 内容的状态：收到消息立即发送
-    if event.user_id in cfg.pending_say and not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help', '.close', '.list', '.reload', '.update')):
+    if event.user_id in cfg.pending_say and not any(cmd_text.startswith(prefix) for prefix in OPS_COMMAND_PREFIXES):
         segments = extract_sendable_segments(event.message)
         if not segments:
             await cfg.client.send_group_msg(
@@ -379,7 +383,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
                 asyncio.create_task(add_emoji_to_message(feedback_msg_id, [cfg.EMOJI_MAPPING["recall"]]))
         return True
 
-    if not any(cmd_text.startswith(prefix) for prefix in ('.say', '.bye', '.more', '.help', '.close', '.list', '.reload', '.update')):
+    if not any(cmd_text.startswith(prefix) for prefix in OPS_COMMAND_PREFIXES):
         return True
 
     if cmd_text.startswith(".help"):
@@ -390,7 +394,10 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             "• .close – 关闭会话但不发送结束语\n"
             "• .more – 获取客户的最近100条历史消息\n"
             "• .list – 列出所有未回复客户及其等待时间\n"
-            "• .reload cfg – 重载当前明文配置（不拉代码、不展示内容）\n"
+            "• .status – 查看运行状态面板\n"
+            "• .mute [分钟] – 临时静音（不带参数不限时；如 .mute 30 为 30 分钟）\n"
+            "• .unmute – 解除静音，并汇总发出延后提醒\n"
+            "• .reload – 重载当前明文配置（不拉代码、不展示内容；兼容 .reload cfg）\n"
             "• .help – 显示此帮助信息\n"
             "\n"
             "使用方法：回复一条合并转发消息，然后输入对应命令。"
@@ -398,6 +405,81 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         await cfg.client.send_group_msg(
             group_id=str(gid),
             message=[Text(text=help_text)],
+        )
+        return True
+
+    elif cmd_text.startswith(".status"):
+        await send_status_panel(gid)
+        return True
+
+    elif cmd_text.startswith(".unmute"):
+        key = (msg_id, "unmute")
+        now_ts = time.time()
+        debounce_sec = cfg.DEBOUNCE_SECONDS.get("unmute", cfg.DEBOUNCE_SECONDS.get("close", 5))
+        last_time = cfg.last_command_time.get(key, 0.0)
+        if now_ts - last_time < debounce_sec:
+            await cfg.client.send_group_msg(
+                group_id=str(gid),
+                message=[Reply(id=str(msg_id)), Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {debounce_sec:.0f} 秒）")],
+            )
+            return True
+        cfg.last_command_time[key] = now_ts
+
+        # 与终端 unmute 共用同一套业务逻辑
+        _was, _flushed, text = await mute.unmute_and_flush()
+        await cfg.client.send_group_msg(
+            group_id=str(gid),
+            message=[Reply(id=str(msg_id)), Text(text="✅ " + text)],
+        )
+        return True
+
+    elif cmd_text.startswith(".mute"):
+        key = (msg_id, "mute")
+        now_ts = time.time()
+        debounce_sec = cfg.DEBOUNCE_SECONDS.get("mute", cfg.DEBOUNCE_SECONDS.get("close", 5))
+        last_time = cfg.last_command_time.get(key, 0.0)
+        if now_ts - last_time < debounce_sec:
+            await cfg.client.send_group_msg(
+                group_id=str(gid),
+                message=[Reply(id=str(msg_id)), Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {debounce_sec:.0f} 秒）")],
+            )
+            return True
+        cfg.last_command_time[key] = now_ts
+
+        arg = cmd_text[len(".mute"):].strip()
+        # 无参数 = 不限时静音；有参数 = 限时分钟数
+        minutes: float | None = None
+        if arg:
+            try:
+                minutes = float(arg)
+            except ValueError:
+                await cfg.client.send_group_msg(
+                    group_id=str(gid),
+                    message=[Reply(id=str(msg_id)), Text(text=f"❌ 无效时长：{arg}，示例：.mute 30；直接发送 .mute 表示不限时")],
+                )
+                return True
+            if minutes <= 0:
+                await cfg.client.send_group_msg(
+                    group_id=str(gid),
+                    message=[Reply(id=str(msg_id)), Text(text="❌ 静音时长必须大于 0 分钟；不限时请直接发送 .mute")],
+                )
+                return True
+
+        until = mute.set_mute(minutes)
+        if minutes is None:
+            text = (
+                "🔕 已开启不限时静音（直到 .unmute）。\n"
+                "期间新客户提醒与里程碑催办将暂存；解除静音后汇总发出。"
+            )
+        else:
+            until_str = time.strftime("%H:%M:%S", time.localtime(until))
+            text = (
+                f"🔕 已开启临时静音 {minutes:g} 分钟（至 {until_str}）。\n"
+                "期间新客户提醒与里程碑催办将暂存；解除静音或到期后汇总发出。"
+            )
+        await cfg.client.send_group_msg(
+            group_id=str(gid),
+            message=[Reply(id=str(msg_id)), Text(text=text)],
         )
         return True
 
@@ -466,16 +548,16 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         else:
             arg = raw[len("update"):].strip()
             cmd_name = ".update"
-        log.info("%s 命令触发: user_id=%s, group_id=%s, arg=%s", cmd_name, event.user_id, gid, arg)
-        if arg != "cfg":
+        log.info("%s: user=%s group=%s arg=%s", cmd_name, event.user_id, gid, arg)
+        # .reload / .update 可不带参数；cfg 为兼容旧写法
+        if arg not in ("", "cfg"):
             await cfg.client.send_group_msg(
                 group_id=str(gid),
-                message=[Reply(id=str(msg_id)), Text(text="❌ 仅支持 .reload cfg")],
+                message=[Reply(id=str(msg_id)), Text(text="❌ 用法：.reload（可省略 cfg）")],
             )
             return True
 
-        success, update_message = await cfg.run_reload_cfg()
-        log.info("%s cfg 执行结束: success=%s", cmd_name, success)
+        _success, update_message = await cfg.run_reload_cfg()
         await cfg.client.send_group_msg(
             group_id=str(gid),
             message=[Reply(id=str(msg_id)), Text(text=update_message)],

@@ -59,10 +59,11 @@ class StateDelayedNotification(TypedDict):
     timestamp: float
 
 
-class AppState(TypedDict):
+class AppState(TypedDict, total=False):
     unreplied_customers: dict[str, "StateCustomerData"]
     monitored_forwards: dict[str, "StateForwardData"]
     monitored_forward_order: list[int]
     last_command_time: dict[str, float]
     delayed_notifications: list["StateDelayedNotification"]
     last_night_summary_sent_date: str
+    mute_until: float  # 静音截止时间戳；0 或缺省表示未静音

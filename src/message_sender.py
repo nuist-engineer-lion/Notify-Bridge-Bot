@@ -25,6 +25,7 @@ from .models import CustomerData
 from .utils import format_duration, get_current_available_members
 from .state import save_state
 from . import history
+from . import mute
 
 
 # ======================= 消息序列化 =======================
@@ -397,6 +398,8 @@ async def send_status_panel(group_id: int):
         f"• 平均回复耗时：{avg_str}\n"
         f"• 中位数耗时：{median_str}\n"
         f"• 监听合并转发：{monitored_count}\n"
+        f"• 延后通知：{len(cfg.delayed_notifications)}\n"
+        f"• 静音状态：{mute.describe_mute_status()}\n"
         f"使用 .help 查看可用命令"
     )
 
@@ -405,6 +408,6 @@ async def send_status_panel(group_id: int):
             group_id=str(group_id),
             message=panel,
         )
-        log.info("状态面板已发送至群 %d", group_id)
+        log.debug("状态面板已发送至群 %d", group_id)
     except Exception as e:
         log.error("发送状态面板失败: %s", e, exc_info=True)
