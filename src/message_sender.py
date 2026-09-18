@@ -408,6 +408,6 @@ async def send_status_panel(group_id: int):
             group_id=str(group_id),
             message=panel,
         )
-        log.info("状态面板已发送至群 %d", group_id)
+        log.debug("状态面板已发送至群 %d", group_id)
     except Exception as e:
         log.error("发送状态面板失败: %s", e, exc_info=True)

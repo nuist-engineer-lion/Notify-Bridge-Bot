@@ -290,9 +290,9 @@ def reload_config_if_changed(path: str = CONFIG_PATH) -> bool:
     write_reload_status(ok=True, source="mtime_watch", restart_only_changes=restart_only_changes)
 
     if restart_only_changes:
-        log.warning("配置文件已重载，但以下配置需重启后生效: %s", ", ".join(sorted(restart_only_changes)))
+        log.warning("配置已重载(mtime)，以下项需重启后生效: %s", ", ".join(sorted(restart_only_changes)))
     else:
-        log.info("配置文件已重载并生效")
+        log.info("配置已重载并生效 (source=mtime_watch)")
     return True
 
 
@@ -320,8 +320,6 @@ friend_approve_time: dict[int, float] = {}
 
 # 好友数量缓存（启动时初始化，通过事件增量更新）
 friend_count: int = 0
-
-# ================= 回复耗时记录（秒） =================
 
 # ================= 运行时状态 =================
 # 内存字典：存储未回复的客户状态
@@ -402,11 +400,12 @@ def force_reload_config(path: str = CONFIG_PATH, *, source: str = "manual") -> t
     write_reload_status(ok=True, source=source, restart_only_changes=restart_only_changes)
     if restart_only_changes:
         log.warning(
-            "配置文件已重载，但以下配置需重启后生效: %s",
+            "配置已重载(source=%s)，以下项需重启后生效: %s",
+            source,
             ", ".join(sorted(restart_only_changes)),
         )
     else:
-        log.info("配置文件已重载并生效 (source=%s)", source)
+        log.info("配置已重载并生效 (source=%s)", source)
     return True, restart_only_changes, None
 
 
@@ -416,11 +415,9 @@ def maybe_reload_config_from_disk() -> bool:
 
 
 async def run_reload_cfg() -> tuple[bool, str]:
-    """Group-command entry: reload local plaintext config only."""
-    log.info(".reload cfg 开始执行")
+    """群/控制台共用：仅重载本地明文 config.yaml。"""
     ok, restart_only_changes, error = force_reload_config(source="group_command")
     if not ok:
-        log.error(".reload cfg 失败: %s", error)
         return False, f"❌ 配置重载失败：{error}"
 
     lines = ["🔄 配置已重载"]

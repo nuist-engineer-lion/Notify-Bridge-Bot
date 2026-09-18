@@ -432,7 +432,7 @@ async def _ack_pr_created(text: str) -> None:
         return
     try:
         await cfg.client.send_group_msg(group_id=str(cfg.INTERNAL_GROUP_ID), message=text)
-        log.info("通知 PR ack 已发送至内部群")
+        log.debug("通知 PR ack 已发送至内部群")
     except Exception as e:
         log.error("发送通知 PR ack 到内部群失败，加入重试队列: %s", e)
         _ack_send_failed(text)

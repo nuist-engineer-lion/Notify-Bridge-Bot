@@ -174,7 +174,7 @@ async def _bot_event_loop() -> None:
                     case FriendAddNoticeEvent():
                         if event.user_id not in cfg.friend_approve_time:
                             cfg.friend_count += 1
-                        log.info("好友增加通知: user_id=%s, 当前好友数=%d", event.user_id, cfg.friend_count)
+                            log.info("好友增加: user_id=%s, 好友数=%d", event.user_id, cfg.friend_count)
 
                     case FriendRequestEvent():
                         await handle_friend_request(event)
@@ -232,7 +232,7 @@ async def main():
         await history.recover_sessions()
         await history.restore_reply_durations()
     except Exception as e:
-        log.error("会话库初始化失败，历史记录功能降级（事件将落盘兜底）: %s", e, exc_info=True)
+        log.error("会话库初始化/恢复失败（写库失败时事件仍会落盘兜底）: %s", e, exc_info=True)
 
     _register_background_task(monitor_loop(), "monitor-loop")
     # 冲刷上次运行中发送失败的通知 PR ack（已落盘队列）

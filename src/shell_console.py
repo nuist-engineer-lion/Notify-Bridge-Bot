@@ -214,11 +214,11 @@ def format_customer_list() -> str:
 
 def _describe_mute_opened() -> str:
     if mute.is_unlimited():
-        return "已开启不限时静音（直到 unmute）。期间提醒将暂存；终端操作不会向群发送命令回执。"
+        return "已开启不限时静音（直到 unmute）。期间提醒将暂存；解除时与群内 .unmute 一样会汇总发出。"
     until_str = time.strftime("%H:%M:%S", time.localtime(cfg.mute_until))
     return (
         f"已开启临时静音（至 {until_str}）。"
-        "期间提醒将暂存；终端操作不会向群发送命令回执。"
+        "期间提醒将暂存；解除时与群内 .unmute 一样会汇总发出。"
     )
 
 
@@ -374,16 +374,14 @@ async def shell_console_loop() -> None:
         return
 
     loop = asyncio.get_running_loop()
-    log.info("Shell 控制台已启动（与 bot 运行绑定；输出仅本地），Ctrl+C 或 quit 优雅停止")
-    _print("Notify-Bridge-Bot Shell 控制台已就绪（与 bot 运行绑定，命令回执仅本地）。")
-    _print("输入 help 查看命令。")
+    log.info("Shell 控制台已启动（与 bot 运行绑定），Ctrl+C 或 quit 优雅停止")
+    _print("Notify-Bridge-Bot Shell 控制台已就绪（与 bot 运行绑定）。输入 help 查看命令。")
 
     try:
         while True:
             try:
                 line = await loop.run_in_executor(None, _read_line_sync)
             except (RuntimeError, asyncio.CancelledError):
-                log.info("Shell 控制台已停止")
                 return
             except KeyboardInterrupt:
                 _print("收到 Ctrl+C，正在请求优雅停止 bot...")
@@ -394,12 +392,11 @@ async def shell_console_loop() -> None:
                     pass
                 return
             except Exception as e:
-                log.warning("Shell 控制台读取失败，控制台退出: %s", e)
+                log.warning("Shell 控制台读取失败，退出: %s", e)
                 return
 
             if line == "":
-                log.info("Shell 控制台收到 EOF（stdin 关闭）；bot 继续运行，控制台结束")
-                _print("Shell 控制台已结束（stdin 关闭）。bot 仍在运行；停止请在服务管理器发送 SIGTERM。")
+                log.info("Shell 控制台 stdin 关闭，控制台结束（bot 继续运行）")
                 return
 
             try:

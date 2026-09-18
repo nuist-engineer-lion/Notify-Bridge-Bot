@@ -130,7 +130,7 @@ async def flush_delayed_notifications(reason: str = "unmute") -> int:
     """
     汇总并发送延后通知到内部群。
     夜间时段仍保留队列（交给夜间汇总），其他情况立即发出。
-    仅由群内命令或巡检到期触发；终端控制台不调用本函数。
+    由群内 .unmute、终端 unmute（经 unmute_and_flush）或巡检静音到期触发。
     返回发送涉及的客户数；未发送返回 0。
     """
     from .message_sender import send_reminder_with_at  # 延迟导入避免循环依赖

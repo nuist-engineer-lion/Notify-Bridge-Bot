@@ -11,7 +11,6 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop, stop_event: asynci
     """注册 SIGINT/SIGTERM：请求优雅关停并唤醒主等待。"""
 
     def _on_stop(name: str) -> None:
-        log.info("收到停止信号 (%s)，准备优雅退出...", name)
         app.request_shutdown(name)
         stop_event.set()
 

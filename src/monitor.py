@@ -24,9 +24,7 @@ async def monitor_loop():
         await asyncio.sleep(60)
 
         if not cfg.client.is_running:
-            log.debug("巡检跳过: 客户端未运行")
             continue
-
 
         # 检测明文配置是否被远端解密更新
         try:
@@ -37,9 +35,7 @@ async def monitor_loop():
         # ===== 临时静音到期自动解除并汇总 =====
         try:
             if mute.expire_if_due():
-                flushed = await mute.flush_delayed_notifications(reason="expire")
-                if flushed:
-                    log.info("静音到期已汇总发出 %d 名客户提醒", flushed)
+                await mute.flush_delayed_notifications(reason="expire")
         except Exception as e:
             log.error("静音到期处理失败: %s", e, exc_info=True)
 
@@ -70,11 +66,6 @@ async def monitor_loop():
             except Exception as e:
                 log.error("会话周期过期清理失败: %s", e, exc_info=True)
             last_archive_cleanup = now
-
-        if not unreplied_customers:
-            log.debug("巡检跳过: 当前无未回复客户")
-        else:
-            log.info("===== 巡检开始 =====\n当前未回复客户数: %d", len(unreplied_customers))
 
         # 清理过期好友申请缓存（经 cfg 读取，保证热重载后生效）
         expired_flags = [flag for flag, ts in processed_friend_requests.items() if now - ts > cfg.PROCESSED_FRIEND_REQUESTS_EXPIRE]
@@ -113,8 +104,6 @@ async def monitor_loop():
             if new_customers_to_report:
                 new_customers_to_report.sort(key=lambda x: x[1]["last_active"], reverse=True)
                 handle_notification("new_customers", new_customers_to_report)
-            else:
-                log.debug("阶段1: 无新客户需要通报")
 
             # ===== 阶段 2：迟滞里程碑通报 =====
             milestone_groups: dict[int, list[tuple[int, CustomerData]]] = {m: [] for m in cfg.MILESTONES}
@@ -131,8 +120,6 @@ async def monitor_loop():
                 if delay_list:
                     delay_list.sort(key=lambda x: x[1]["last_active"], reverse=True)
                     handle_notification("milestone", delay_list, milestone=m)
-
-            log.info("===== 巡检结束 =====")
 
         # ===== 夜间汇总发送检查 =====
         summary_time = datetime.strptime(cfg.NIGHT_SUMMARY_TIME, "%H:%M").time()
@@ -159,22 +146,17 @@ async def monitor_loop():
                     customers_list = list(customers_aggregated.items())
                     summary_text = f"🌙 夜间免打扰时段汇总：共有 {len(customers_list)} 名客户发来消息，请及时处理。"
 
-                    # 计算覆盖整个夜间窗口所需的 max_age_seconds
                     night_start_t = datetime.strptime(cfg.NIGHT_START, "%H:%M").time()
                     night_summary_t = datetime.strptime(cfg.NIGHT_SUMMARY_TIME, "%H:%M").time()
                     night_start_dt = datetime.combine(datetime.today(), night_start_t)
                     night_summary_dt = datetime.combine(datetime.today(), night_summary_t)
                     if night_summary_dt <= night_start_dt:
                         night_summary_dt += timedelta(days=1)
-                    night_max_age = int((night_summary_dt - night_start_dt).total_seconds()) + 300  # +5分钟缓冲
+                    night_max_age = int((night_summary_dt - night_start_dt).total_seconds()) + 300
 
                     asyncio.create_task(send_reminder_with_at(cfg.INTERNAL_GROUP_ID, summary_text, customers_list, max_age_seconds=night_max_age, notice_type="night_summary"))
-                    log.info(f"夜间汇总已发送（带@合并转发）：{summary_text}")
-                else:
-                    log.debug("夜间汇总时没有有效客户，跳过发送")
+                    log.info("夜间汇总已发送：%s", summary_text)
                 delayed_notifications.clear()
-            else:
-                log.debug("夜间汇总时间到，但无延后通知")
 
             cfg.last_night_summary_sent_date = today_str
 
@@ -186,8 +168,8 @@ async def monitor_loop():
                 )
                 if friend_list.get("status") == "ok" and friend_list.get("retcode") == 0:
                     cfg.friend_count = len(friend_list.get("data", []))
-                    log.info("夜间模式结束后刷新好友人数: %d", cfg.friend_count)
+                    log.info("夜间汇总后刷新好友人数: %d", cfg.friend_count)
             except Exception as e:
-                log.warning("夜间模式结束后刷新好友人数失败: %s", e)
+                log.warning("夜间汇总后刷新好友人数失败: %s", e)
 
         save_state()
