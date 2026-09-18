@@ -326,7 +326,8 @@ friend_count: int = 0
 unreplied_customers: dict[int, CustomerData] = {}
 monitored_forward_order: deque[int] = deque()
 monitored_forwards: dict[int, ForwardMonitorData] = {}
-last_command_time: dict[tuple[int, str], float] = {}
+# 键：消息 ID / 客户 QQ，或 "__all__"（群组批量操作防抖）
+last_command_time: dict[tuple[int | str, str], float] = {}
 # 等待 .say 内容的用户：{user_id: {prompt_msg_id, customer_id, reply_id, group_id}}
 pending_say: dict[int, dict] = {}
 

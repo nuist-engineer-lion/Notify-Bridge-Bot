@@ -39,9 +39,13 @@ def save_state() -> None:
         str(mid): data for mid, data in cfg.monitored_forwards.items()
     }
 
-    # 转换 last_command_time 的键为字符串
+    # 转换 last_command_time 的键为字符串（兼容 2 元组；非 2 元组跳过，不中断落盘）
+    # 编码为 f"{msg_id}_{cmd}"；读回时用 rsplit("_", 1)，可正确还原 "__all___say" 等键
     serializable_last_cmd: dict[str, float] = {}
-    for (msg_id, cmd), ts in last_command_time.items():
+    for key, ts in last_command_time.items():
+        if not isinstance(key, tuple) or len(key) != 2:
+            continue
+        msg_id, cmd = key
         serializable_last_cmd[f"{msg_id}_{cmd}"] = ts
 
     # 转换 delayed_notifications 中的 CustomerData 为 StateCustomerData
@@ -124,13 +128,20 @@ def load_state() -> None:
     monitored_forward_order.extend(state.get("monitored_forward_order", []))
 
     # 恢复 last_command_time
+    # 用 rsplit 保留 cmd 中可能的下划线，并兼容 __all__ 群组防抖键（如 "__all___say"）
     last_command_time.clear()
     for key_str, ts in state.get("last_command_time", {}).items():
-        parts = key_str.split("_")
-        if len(parts) == 2:
-            msg_id = int(parts[0])
-            cmd = parts[1]
-            last_command_time[(msg_id, cmd)] = ts
+        parts = key_str.rsplit("_", 1)
+        if len(parts) != 2:
+            continue
+        mid_raw, cmd = parts
+        if mid_raw == "__all__":
+            last_command_time[("__all__", cmd)] = ts
+            continue
+        try:
+            last_command_time[(int(mid_raw), cmd)] = ts
+        except ValueError:
+            continue
 
     # 恢复 delayed_notifications
     delayed_notifications.clear()
