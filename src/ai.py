@@ -5,12 +5,14 @@
 配置读取自 cfg.AI_SUGGESTION（OpenAI 兼容接口），每次调用时读取，
 可通过 .reload cfg 在线开关或更换模型。
 
-图片输入（vision）：消息段中带 http(s) / data:image URL 的图片会按
-OpenAI 兼容 image_url 送入支持视觉的模型（DeepSeek deepseek-flash 等）；
-无 URL 或请求失败时回退纯文本 [图片] 占位。
+图片输入（vision）：消息段中的 http(s) 图片会先由 bot 下载并转为
+data:image/...;base64,...，再以 OpenAI 兼容 image_url 送入支持视觉的模型
+（DeepSeek deepseek-flash 等）；消息里已有的 data:image 原样使用。
+下载失败的图片会跳过，请求失败或无可用图时回退纯文本 [图片] 占位。
 """
 
 import asyncio
+import base64
 import time
 from typing import Any
 
@@ -33,6 +35,9 @@ _DEFAULT_TEMPERATURE = 0.7
 _DEFAULT_MAX_IMAGES = 3
 _DEFAULT_IMAGE_DETAIL = "low"
 _VALID_IMAGE_DETAILS = {"low", "high", "original", "auto"}
+# 单图下载上限（原始字节）；DeepSeek 单图硬限 32MiB，这里取更紧的实用上限
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+_IMAGE_DOWNLOAD_CHUNK = 64 * 1024
 
 
 def _settings() -> dict:
@@ -164,7 +169,10 @@ def _collect_image_urls(transcript: list[dict[str, Any]], max_images: int) -> li
 
 
 def _build_user_content(prompt: str, image_urls: list[str], detail: str) -> str | list[dict]:
-    """无图返回纯文本；有图返回 OpenAI 兼容 content 数组（image_url 仅允许出现在 user 消息）。"""
+    """无图返回纯文本；有图返回 OpenAI 兼容 content 数组（image_url 仅允许出现在 user 消息）。
+
+    image_urls 为已就绪的可送入模型的地址（优先 data:image base64）。
+    """
     if not image_urls:
         return prompt
     content: list[dict] = [{"type": "text", "text": prompt}]
@@ -174,6 +182,78 @@ def _build_user_content(prompt: str, image_urls: list[str], detail: str) -> str 
             "image_url": {"url": url, "detail": detail},
         })
     return content
+
+
+def _sniff_image_mime(data: bytes, content_type: str | None = None) -> str | None:
+    """按文件头识别 JPEG/PNG/GIF/WebP；不认识时回退合法的 image/* Content-Type。"""
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"GIF8"):
+        return "image/gif"
+    if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    if content_type:
+        ct = content_type.split(";")[0].strip().lower()
+        if ct in {"image/jpeg", "image/png", "image/gif", "image/webp"}:
+            return ct
+    return None
+
+
+def _to_data_url(data: bytes, mime: str) -> str:
+    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+async def _download_image_as_data_url(url: str, *, timeout: float) -> str | None:
+    """下载 http(s) 图片并转为 data URL；已是 data:image 则原样返回。失败返回 None。"""
+    if url.startswith("data:image/"):
+        return url
+    client_timeout = aiohttp.ClientTimeout(total=timeout)
+    try:
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    log.warning("AI建议: 图片下载 HTTP %s: %s", resp.status, url[:120])
+                    return None
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.content.iter_chunked(_IMAGE_DOWNLOAD_CHUNK):
+                    total += len(chunk)
+                    if total > _MAX_IMAGE_BYTES:
+                        log.warning("AI建议: 图片超过 %d 字节，跳过: %s", _MAX_IMAGE_BYTES, url[:120])
+                        return None
+                    chunks.append(chunk)
+                data = b"".join(chunks)
+                mime = _sniff_image_mime(data, resp.headers.get("Content-Type"))
+                if not mime:
+                    log.warning("AI建议: 无法识别图片格式，跳过: %s", url[:120])
+                    return None
+                return _to_data_url(data, mime)
+    except asyncio.TimeoutError:
+        log.warning("AI建议: 图片下载超时，跳过: %s", url[:120])
+        return None
+    except Exception as e:
+        log.warning("AI建议: 图片下载失败，跳过: %s (%s)", url[:120], e)
+        return None
+
+
+async def resolve_images_to_data_urls(urls: list[str], *, timeout: float) -> list[str]:
+    """并发下载图片并转为 data URL；仅保留成功项，顺序与入参一致。"""
+    if not urls:
+        return []
+    results = await asyncio.gather(
+        *(_download_image_as_data_url(u, timeout=timeout) for u in urls),
+        return_exceptions=True,
+    )
+    ready: list[str] = []
+    for u, result in zip(urls, results):
+        if isinstance(result, BaseException):
+            log.warning("AI建议: 图片处理异常，跳过: %s (%s)", u[:120], result)
+            continue
+        if result:
+            ready.append(result)
+    return ready
 
 
 async def _call_llm(
@@ -249,14 +329,22 @@ async def generate_reply_suggestion(uid: int) -> str | None:
             log.info("AI建议: 客户 %d 窗口内无可读对话，跳过", uid)
             return None
         image_urls = _collect_image_urls(transcript, max_images)
+        image_payloads: list[str] = []
         if image_urls:
-            log.debug("AI建议: 客户 %d 附带图片 %d 张", uid, len(image_urls))
+            log.debug("AI建议: 客户 %d 待处理图片 %d 张，先下载再送模型", uid, len(image_urls))
+            image_payloads = await resolve_images_to_data_urls(image_urls, timeout=_remaining())
+            log.debug(
+                "AI建议: 客户 %d 图片就绪 %d/%d 张",
+                uid,
+                len(image_payloads),
+                len(image_urls),
+            )
 
         suggestion: str | None = None
-        if image_urls:
+        if image_payloads:
             try:
                 suggestion = await asyncio.wait_for(
-                    _call_llm(base_url, api_key, model, prompt, image_urls=image_urls),
+                    _call_llm(base_url, api_key, model, prompt, image_urls=image_payloads),
                     timeout=_remaining(),
                 )
             except asyncio.TimeoutError:
