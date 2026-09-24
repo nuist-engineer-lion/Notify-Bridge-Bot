@@ -123,7 +123,12 @@ ai_suggestion:
   enabled: false
   base_url: "https://api.deepseek.com/v1"
   api_key: "sk-xxxx"
-  model: "deepseek-chat"
+  # 图片输入需视觉模型：DeepSeek 请用 deepseek-flash（deepseek-v4-pro 不支持 vision）
+  model: "deepseek-flash"
+  # 将对话中的图片 URL 以 image_url 送入模型；失败或无 URL 时回退 [图片] 占位
+  vision_enabled: true
+  image_detail: "low"                 # low/high/original/auto，low 更省 token
+  max_images_per_suggestion: 3        # 每条建议最多附带几张图（优先客户侧）
   # system 提示词可自定义（多行），留空使用内置默认
   system_prompt: |-
     你是一家维修客服的助手。请根据以下客服与客户的最近对话，以客服身份草拟下一条发给客户的回复。

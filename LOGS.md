@@ -16,13 +16,18 @@
 
 | 编号 | 级别 | 文案 |
 |------|------|------|
-| 004 | warning | AI建议: LLM 接口返回 %s: %s |
+| 004 | warning | AI建议: LLM 接口返回 %s%s: %s |
 | 005 | warning | AI建议: LLM 响应格式异常: %s |
-| 006 | debug | AI建议: 客户 %d 窗口内无可读对话，跳过 |
+| 006 | info | AI建议: 客户 %d 窗口内无可读对话，跳过 |
 | 007 | warning | AI建议: 为客户 %d 生成建议超时（%s 秒），跳过 |
 | 008 | warning | AI建议: 为客户 %d 生成建议失败: %s |
 | 009 | warning | AI建议: 客户 %d 生成异常: %s |
-| 010 | info | AI建议已生成: %d/%d 名客户 |
+| 010 | info | AI建议已生成: %d/%d 名客户（未生成 %d） |
+| 010a | info | AI建议未启用，跳过 %d 名客户 |
+| 010b | info | AI建议开始生成: %d 名客户, model=%s, vision=%s, max_images=%d |
+| 010c | warning | AI建议: 0/%d 名客户生成成功（全部跳过或失败，详见上方日志） |
+| 010d | debug | AI建议: 客户 %d 附带图片 %d 张 |
+| 010e | info | AI建议: 客户 %d 含图片请求未成功，回退纯文本重试 |
 
 ## src/config.py
 
@@ -117,6 +122,9 @@
 | 077 | debug | send_nested_forward: customer_list 为空，跳过发送 |
 | 078 | info | 开始构造合并转发 -> 群 %d, 共 %d 名客户 |
 | 079 | warning | AI建议生成失败，本次提醒不含建议: %s |
+| 079a | debug | 提醒: 客户 %d 本次无 AI 建议 |
+| 079b | info | 提醒合并转发第一层无 AI 建议（客户 %d 名） |
+| 079c | info | 提醒合并转发: 第一层附加 AI 建议 %d 条 / 客户 %d 名 |
 | 080 | warning | 客户 %d 无%d秒内消息，跳过该客户节点 |
 | 081 | warning | 所有客户均无%d秒内消息，取消发送合并转发 |
 | 082 | info | 合并转发发送成功 -> 群 %d, message_id=%s |

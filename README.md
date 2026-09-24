@@ -27,7 +27,7 @@
 - 支持在通知群引用机器人消息后执行 `.say` / `.more` / `.bye` / `.close` / `.list` / `.help`
 - 支持通过配置的表情映射触发 `say` / `more` / `bye` / `close` / `cancel` / `recall`
 - 支持限时撤回：`.say` 发送成功后，点击通报消息上的撤回表情即可撤回刚发送给客户的私聊消息
-- 支持 AI 回复建议：提醒合并转发的第一层附上根据客户最近对话生成的建议答复（OpenAI 兼容接口，可在线开关）
+- 支持 AI 回复建议：提醒合并转发的第一层附上根据客户最近对话生成的建议答复（OpenAI 兼容接口，可选图片输入，可在线开关）
 - 支持 `.say` 两段式回复：先输入 `.say`，再发送下一条群消息作为要转发给客户的内容
 - 支持客服直接私聊回复客户后自动结束会话
 - 支持内部群戳一戳查看运行状态面板
@@ -305,7 +305,11 @@ ai_suggestion:
   enabled: false
   base_url: "https://api.deepseek.com/v1"
   api_key: "sk-xxxx"
-  model: "deepseek-chat"
+  # 图片输入需视觉模型：DeepSeek 请用 deepseek-flash（deepseek-v4-pro 不支持 vision）
+  model: "deepseek-flash"
+  vision_enabled: true
+  image_detail: "low"
+  max_images_per_suggestion: 3
   # system 提示词可自定义（多行），留空使用内置默认
   system_prompt: |-
     你是一家维修客服的助手。请根据以下客服与客户的最近对话，以客服身份草拟下一条发给客户的回复。
@@ -353,7 +357,7 @@ welcome_message:
 | `state_file` | 运行状态持久化文件 |
 | `recent_message_max_age` | 构造提醒合并转发时回看的消息时间窗口 |
 | `emoji_mapping` | 表情 ID 到快捷动作的映射 |
-| `ai_suggestion` | AI 回复建议（OpenAI 兼容接口配置）；`enabled: false` 或缺省时功能关闭；支持 `.reload` 在线开关 |
+| `ai_suggestion` | AI 回复建议（OpenAI 兼容接口配置）；`enabled: false` 或缺省时功能关闭；`vision_enabled` 控制是否把对话图片 URL 送入视觉模型（DeepSeek 用 `deepseek-flash`）；支持 `.reload` 在线开关 |
 
 ## 运行要求
 
@@ -404,6 +408,8 @@ python main.py
 - 只有当“距离最后一条客户消息已满 1 分钟”时，才会推送到内部群
 - 如果客户在等待期间继续发消息，会重置计时并清空已上报的里程碑
 - 开启 `ai_suggestion` 后，提醒合并转发的第一层会附上根据该客户最近对话生成的 AI 建议回复，供客服参考后用 `.say` 发送；生成失败或超时会自动省略，不影响提醒本身
+- `vision_enabled: true` 时，消息中的图片 URL 会以 OpenAI 兼容 `image_url` 送入模型（优先客户侧，最多 `max_images_per_suggestion` 张）；无 URL 或模型不支持视觉时自动回退 `[图片]` 占位/纯文本重试
+- 日志会记录每次批量生成的 `成功/总数`（含 0/N）以及提醒合并转发第一层实际附带的建议条数，便于排查夜间汇总后无建议等问题
 
 ### 超时催办
 
