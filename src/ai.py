@@ -11,6 +11,7 @@ OpenAI 兼容 image_url 送入支持视觉的模型（DeepSeek deepseek-flash �
 """
 
 import asyncio
+import time
 from typing import Any
 
 import aiohttp
@@ -219,17 +220,29 @@ async def _call_llm(
 
 
 async def generate_reply_suggestion(uid: int) -> str | None:
-    """为单个客户生成建议回复；未启用/无对话/失败/超时均返回 None。"""
+    """为单个客户生成建议回复；未启用/无对话/失败/超时均返回 None。
+
+    总超时按 timeout_seconds 计：拉历史 + 视觉请求 + 纯文本回退共享同一时间预算，
+    视觉超时/失败不会吞掉纯文本重试机会。
+    """
     s = _settings()
     if not is_enabled():
         return None
     timeout = float(s.get("timeout_seconds", _DEFAULT_TIMEOUT))
     use_vision = vision_enabled()
     max_images = _max_images() if use_vision else 0
+    deadline = time.monotonic() + timeout
+    base_url = str(s.get("base_url"))
+    api_key = str(s.get("api_key"))
+    model = str(s.get("model"))
+
+    def _remaining() -> float:
+        return max(0.05, deadline - time.monotonic())
+
     try:
         transcript = await asyncio.wait_for(
             build_transcript(uid, int(s.get("max_context_messages", _DEFAULT_MAX_CONTEXT)), allow_images=use_vision),
-            timeout=timeout,
+            timeout=_remaining(),
         )
         prompt = _build_prompt(transcript)
         if prompt is None:
@@ -238,17 +251,33 @@ async def generate_reply_suggestion(uid: int) -> str | None:
         image_urls = _collect_image_urls(transcript, max_images)
         if image_urls:
             log.debug("AI建议: 客户 %d 附带图片 %d 张", uid, len(image_urls))
-        suggestion = await _call_llm(
-            str(s.get("base_url")), str(s.get("api_key")), str(s.get("model")), prompt,
-            image_urls=image_urls,
-        )
-        # 视觉请求失败且带图时，回退纯文本再试一次（兼容不支持 vision 的模型）
-        if suggestion is None and image_urls:
-            log.info("AI建议: 客户 %d 含图片请求未成功，回退纯文本重试", uid)
-            suggestion = await _call_llm(
-                str(s.get("base_url")), str(s.get("api_key")), str(s.get("model")), prompt,
-                image_urls=[],
-            )
+
+        suggestion: str | None = None
+        if image_urls:
+            try:
+                suggestion = await asyncio.wait_for(
+                    _call_llm(base_url, api_key, model, prompt, image_urls=image_urls),
+                    timeout=_remaining(),
+                )
+            except asyncio.TimeoutError:
+                log.warning("AI建议: 客户 %d 含图片请求超时，回退纯文本重试", uid)
+                suggestion = None
+            except Exception as e:
+                log.warning("AI建议: 客户 %d 含图片请求失败，回退纯文本重试: %s", uid, e)
+                suggestion = None
+            else:
+                if not suggestion:
+                    log.info("AI建议: 客户 %d 含图片请求未成功，回退纯文本重试", uid)
+
+        if not suggestion:
+            try:
+                suggestion = await asyncio.wait_for(
+                    _call_llm(base_url, api_key, model, prompt, image_urls=[]),
+                    timeout=_remaining(),
+                )
+            except asyncio.TimeoutError:
+                log.warning("AI建议: 为客户 %d 生成建议超时（%s 秒），跳过", uid, timeout)
+                return None
     except asyncio.TimeoutError:
         log.warning("AI建议: 为客户 %d 生成建议超时（%s 秒），跳过", uid, timeout)
         return None
