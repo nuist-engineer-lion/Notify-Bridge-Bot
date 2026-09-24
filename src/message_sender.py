@@ -134,12 +134,23 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         suggestions = {}
 
     first_node_segments: list[Message] = [Text(text="https://lion-qq.laysath.cn")]
+    ai_block_count = 0
     for qq, _ in customer_list:
         suggestion = suggestions.get(qq)
         if not suggestion:
+            log.debug("提醒: 客户 %d 本次无 AI 建议", qq)
             continue
+        ai_block_count += 1
         label = f"（{qq}）" if len(customer_list) > 1 else ""
         first_node_segments.append(Text(text=f"\n🤖 AI建议回复{label}：\n{suggestion}"))
+    if not suggestions:
+        log.info("提醒合并转发第一层无 AI 建议（客户 %d 名）", len(customer_list))
+    else:
+        log.info(
+            "提醒合并转发: 第一层附加 AI 建议 %d 条 / 客户 %d 名",
+            ai_block_count,
+            len(customer_list),
+        )
 
     outer_nodes: list[Message] = [
         NodeInline(
