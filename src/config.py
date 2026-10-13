@@ -1,8 +1,10 @@
+import asyncio
 import time
 import json
 import logging
 import os
 import subprocess
+import shutil
 from collections import deque
 from typing import Any
 
@@ -415,13 +417,113 @@ def maybe_reload_config_from_disk() -> bool:
     return reload_config_if_changed()
 
 
-async def run_reload_cfg() -> tuple[bool, str]:
-    """群/控制台共用：仅重载本地明文 config.yaml。"""
+_reload_lock = asyncio.Lock()
+
+
+def _command_feedback(stdout: str | bytes | None, stderr: str | bytes | None) -> str:
+    """Decode timeout output too, and keep command replies within a useful size."""
+    def decode(value: str | bytes | None) -> str | None:
+        return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+
+    output = _combine_command_output(decode(stdout), decode(stderr))
+    limit = 3000
+    if len(output) > limit:
+        output = output[:limit] + "\n… 输出已截断"
+    return output
+
+
+def _apply_remote_config() -> tuple[bool, str]:
+    """Pull and decrypt in a worker thread, returning errors or Git status."""
+    if os.name == "nt":
+        shell = shutil.which("pwsh") or shutil.which("powershell")
+        if not shell:
+            return False, "❌ 远程配置更新失败：找不到 PowerShell"
+        apply_command = [
+            shell, "-NoProfile", "-NonInteractive", "-File",
+            os.path.join(REPO_ROOT, "scripts", "apply-encrypted-config.ps1"),
+        ]
+    else:
+        apply_command = ["bash", os.path.join(REPO_ROOT, "scripts", "apply-encrypted-config")]
+
+    env = os.environ.copy()
+    # Reload explicitly below; do not wait for the mtime watcher from the script.
+    env["WAIT_RELOAD"] = "0"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    git_pull_output = ""
+    for stage, command, timeout in (
+        ("git pull", ["git", "pull", "--ff-only"], 120),
+        ("apply-encrypted-config", apply_command, 60),
+    ):
+        try:
+            result = subprocess.run(
+                command, cwd=REPO_ROOT, env=env, capture_output=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            detail = _command_feedback(exc.stdout, exc.stderr)
+            message = f"❌ 远程配置更新失败：{stage} 超时（{timeout} 秒），后续步骤已停止"
+            if detail:
+                message += f"\n{detail}"
+            log.error("%s", message)
+            return False, message
+        except OSError as exc:
+            message = f"❌ 远程配置更新失败：无法执行 {stage}，后续步骤已停止\n{exc}"
+            log.error("%s", message)
+            return False, message
+        if result.returncode:
+            detail = _command_feedback(result.stdout, result.stderr) or "命令未输出错误详情"
+            message = f"❌ 远程配置更新失败：{stage} 退出码 {result.returncode}，后续步骤已停止\n{detail}"
+            log.error("%s", message)
+            return False, message
+        if stage == "git pull":
+            git_pull_output = _command_feedback(result.stdout, result.stderr)
+        log.info("远程配置更新：%s 完成", stage)
+
+    lines = ["Git 拉取结果：", git_pull_output or "git pull 完成（无输出）", "", "Git 状态："]
+    for args in (["status", "--short", "--branch"], ["--no-pager", "log", "-1", "--oneline"]):
+        try:
+            result = subprocess.run(
+                ["git", *args], cwd=REPO_ROOT, env=env, capture_output=True, timeout=15,
+            )
+            output = _command_feedback(result.stdout, result.stderr)
+            if result.returncode:
+                lines.append(f"读取 Git 状态失败（退出码 {result.returncode}）：{output or '无错误输出'}")
+            else:
+                lines.append(output or "无输出")
+        except subprocess.TimeoutExpired as exc:
+            lines.append("读取 Git 状态超时（15 秒）")
+            output = _command_feedback(exc.stdout, exc.stderr)
+            if output:
+                lines.append(output)
+        except OSError as exc:
+            lines.append(f"读取 Git 状态失败：{exc}")
+    return True, "\n".join(lines)
+
+
+async def run_reload_cfg(*, remote: bool = False) -> tuple[bool, str]:
+    """群/控制台共用：可先拉取仓库并解密，再重载配置。"""
+    if _reload_lock.locked():
+        return False, "❌ 配置更新正在执行，请稍后重试"
+    async with _reload_lock:
+        git_message = ""
+        if remote:
+            ok, git_message = await asyncio.to_thread(_apply_remote_config)
+            if not ok:
+                return False, git_message
+        ok, message = _reload_cfg_result(remote=remote)
+        if git_message:
+            message += f"\n\n{git_message}"
+        return ok, message
+
+
+def _reload_cfg_result(*, remote: bool) -> tuple[bool, str]:
     ok, restart_only_changes, error = force_reload_config(source="group_command")
     if not ok:
         return False, f"❌ 配置重载失败：{error}"
 
-    lines = ["🔄 配置已重载"]
+    lines = ["🔄 已拉取远程仓库、解密并重载配置" if remote else "🔄 配置已重载"]
+    if remote:
+        lines.append("代码变更需重启进程后生效")
     if restart_only_changes:
         lines.extend([
             "",

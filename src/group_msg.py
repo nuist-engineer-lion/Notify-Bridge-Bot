@@ -884,6 +884,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             "• .mute [分钟] – 临时静音（不带参数不限时；如 .mute 30 为 30 分钟）\n"
             "• .unmute – 解除静音，并汇总发出延后提醒\n"
             "• .reload – 重载当前明文配置（不拉代码、不展示内容；兼容 .reload cfg）\n"
+            "• .reload remote – git pull → 解密应用配置 → 重载配置\n"
             "• .help – 显示此帮助信息\n"
             "\n"
             "使用方法：优先回复机器人消息；或 .命令 <客户QQ|all>；无参且待回复仅 1 人时自动匹配该客户。\n"
@@ -1038,14 +1039,14 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             cmd_name = ".update"
         log.info("%s: user=%s group=%s arg=%s", cmd_name, event.user_id, gid, arg)
         # .reload / .update 可不带参数；cfg 为兼容旧写法
-        if arg not in ("", "cfg"):
+        if arg not in ("", "cfg", "remote"):
             await cfg.client.send_group_msg(
                 group_id=str(gid),
-                message=[Reply(id=str(msg_id)), Text(text="❌ 用法：.reload（可省略 cfg）")],
+                message=[Reply(id=str(msg_id)), Text(text="❌ 用法：.reload [cfg|remote]")],
             )
             return True
 
-        _success, update_message = await cfg.run_reload_cfg()
+        _success, update_message = await cfg.run_reload_cfg(remote=(arg == "remote"))
         await cfg.client.send_group_msg(
             group_id=str(gid),
             message=[Reply(id=str(msg_id)), Text(text=update_message)],

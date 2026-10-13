@@ -190,6 +190,7 @@ HELP_TEXT = """\
   mute [分钟]          临时静音；不带参数为不限时，直到 unmute
   unmute               解除静音并汇总延后提醒（与群内 .unmute 一致）
   reload               重载明文 config.yaml
+  reload remote        git pull → 解密应用配置 → 重载配置
   say <qq|all> <文本>  私聊发送；all=当前待回复队列
   say <文本…>          队列仅 1 人时自动匹配该客户
   bye <qq|all>         发送结束语并关闭会话；无参且队列仅 1 人时自动匹配
@@ -511,8 +512,12 @@ async def handle_shell_command(raw: str) -> bool:
         return True
 
     if op in ("reload", ".reload"):
-        # force_reload_config 已 log 成功/警告/失败，不再 _print 重复结果
-        await cfg.run_reload_cfg()
+        if args not in ([], ["cfg"], ["remote"]):
+            _print("用法：reload [cfg|remote]")
+            return True
+        success, message = await cfg.run_reload_cfg(remote=(args == ["remote"]))
+        if not success or args == ["remote"]:
+            _print(message)
         return True
 
     if op in ("quit", "exit", "stop"):
