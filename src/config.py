@@ -2,6 +2,7 @@ import asyncio
 import time
 import json
 import logging
+import math
 import os
 import subprocess
 import shutil
@@ -165,6 +166,7 @@ DEFAULT_EMOJI_MAPPING = {"close": 128, "more": 127, "bye": 100, "say": 123, "can
 EMOJI_MAPPING = dict(DEFAULT_EMOJI_MAPPING)
 EMOJI_TO_CMD = {v: k for k, v in EMOJI_MAPPING.items()}
 RECALL_WINDOW_SECONDS = 60  # .say 发送成功后允许通过表情撤回的时间窗口（秒）
+SAY_INPUT_TIMEOUT_SECONDS = 30.0
 # 过期撤回记录额外保留时长：窗口结束后仍可识别延迟点击并回复超时提示
 RECALL_CLEANUP_GRACE_SECONDS = 300
 
@@ -201,8 +203,12 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     global NIGHT_SUMMARY_TIME, ARCHIVE_DIR, STATE_FILE, RECENT_MESSAGE_MAX_AGE
     global ARCHIVE_RETENTION_DAYS
     global AI_SUGGESTION, NOTICE_PR, reply_durations
+    global SAY_INPUT_TIMEOUT_SECONDS
 
     applied_config = dict(new_config)
+    say_input_timeout = float(applied_config.get("say_input_timeout_seconds", 30))
+    if not math.isfinite(say_input_timeout) or say_input_timeout <= 0:
+        raise ValueError("say_input_timeout_seconds 必须为大于 0 的有限秒数")
     restart_only_changes: list[str] = []
 
     if not initial and config:
@@ -237,6 +243,7 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     EMOJI_MAPPING.setdefault("recall", DEFAULT_EMOJI_MAPPING["recall"])
     EMOJI_TO_CMD = {v: k for k, v in EMOJI_MAPPING.items()}
     RECALL_WINDOW_SECONDS = int(config.get("recall_window_seconds", 60))
+    SAY_INPUT_TIMEOUT_SECONDS = say_input_timeout
 
     # ================= 夜间模式配置 =================
     NIGHT_MODE = dict(config.get("night_mode", {}))

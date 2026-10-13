@@ -32,6 +32,41 @@ OPS_COMMAND_PREFIXES = ('.say', '.bye', '.more', '.help', '.close', '.list', '.r
 # 需要客户目标的会话命令：优先 Reply，否则可用 <客户QQ>
 SESSION_OP_PREFIXES = ('.say', '.bye', '.close', '.more')
 
+SAY_TIMEOUT_EMOJI_ID = 123  # ×（❌）
+_pending_say_tasks: dict[int, asyncio.Task] = {}
+
+
+def pop_pending_say(user_id: int) -> dict | None:
+    """结束等待，并取消对应的超时任务。"""
+    pending = cfg.pending_say.pop(user_id, None)
+    task = _pending_say_tasks.pop(user_id, None)
+    if task is not None and task is not asyncio.current_task():
+        task.cancel()
+    return pending
+
+
+async def expire_pending_say(user_id: int, pending: dict) -> None:
+    """只结束本次等待，在原提示上贴 ×，不发送新消息。"""
+    if cfg.pending_say.get(user_id) is not pending:
+        return
+    pop_pending_say(user_id)
+    prompt_msg_id = pending.get("prompt_msg_id")
+    if prompt_msg_id:
+        await add_emoji_to_message(prompt_msg_id, [SAY_TIMEOUT_EMOJI_ID])
+
+
+def register_pending_say(user_id: int, pending: dict) -> None:
+    pop_pending_say(user_id)
+    timeout = cfg.SAY_INPUT_TIMEOUT_SECONDS
+    pending["expires_at"] = asyncio.get_running_loop().time() + timeout
+    cfg.pending_say[user_id] = pending
+
+    async def wait_for_timeout() -> None:
+        await asyncio.sleep(timeout)
+        await expire_pending_say(user_id, pending)
+
+    _pending_say_tasks[user_id] = asyncio.create_task(wait_for_timeout())
+
 
 def parse_qq_arg(token: str) -> int | None:
     """解析客户 QQ 号；非正整数返回 None。"""
@@ -455,7 +490,7 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
     if pending and mid == pending["prompt_msg_id"]:
         cmd = cfg.EMOJI_TO_CMD.get(eid)
         if cmd == "cancel":
-            cfg.pending_say.pop(event.user_id, None)
+            pop_pending_say(event.user_id)
             await cfg.client.send_group_msg(
                 group_id=str(gid),
                 message=[Reply(id=str(mid)), Text(text="❌ 已取消发送。")],
@@ -508,7 +543,7 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
                 message=[Reply(id=str(mid)), Text(text="📝 请发送要回复给客户的消息内容：")],
             )
             prompt_msg_id = resp.get("message_id")
-            cfg.pending_say[event.user_id] = {
+            register_pending_say(event.user_id, {
                 "prompt_msg_id": prompt_msg_id,
                 "customer_id": targets[0],
                 "customer_ids": targets,
@@ -517,7 +552,7 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
                 "via": "emoji",
                 "target_source": "emoji_multi" if len(targets) > 1 else "emoji",
                 "debounce_key": (mid, "say"),
-            }
+            })
             for cust in targets:
                 await history.record_command(
                     cust, event.user_id, "say",
@@ -713,7 +748,7 @@ async def handle_session_command_by_qq(
                 message=[Reply(id=str(msg_id)), Text(text="📝 请发送要回复给客户的消息内容：")],
             )
             prompt_msg_id = resp.get("message_id")
-            cfg.pending_say[event.user_id] = {
+            register_pending_say(event.user_id, {
                 "prompt_msg_id": prompt_msg_id,
                 "customer_id": qq,
                 "customer_ids": [qq],
@@ -722,7 +757,7 @@ async def handle_session_command_by_qq(
                 "via": "group_qq",
                 "target_source": "auto" if not rest_parts or parse_qq_arg(rest_parts[0] if rest_parts else "") is None else "qq",
                 "debounce_key": key,
-            }
+            })
             await history.record_command(
                 qq, event.user_id, "say",
                 mode="pending", reply_id=None, group_id=gid, via="group_qq",
@@ -803,6 +838,9 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
     log.debug("群命令: reply_id=%s, cmd=%s", reply_id, cmd_text)
 
     # 检查是否处于等待 .say 内容的状态：收到消息立即发送
+    pending = cfg.pending_say.get(event.user_id)
+    if pending and asyncio.get_running_loop().time() >= pending["expires_at"]:
+        await expire_pending_say(event.user_id, pending)
     if event.user_id in cfg.pending_say and not any(cmd_text.startswith(prefix) for prefix in OPS_COMMAND_PREFIXES):
         segments = extract_sendable_segments(event.message)
         if not segments:
@@ -812,7 +850,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             )
             return True
 
-        pending = cfg.pending_say.pop(event.user_id)
+        pending = pop_pending_say(event.user_id)
         targets: list[int] = list(pending.get("customer_ids") or [])
         if not targets and pending.get("customer_id") is not None:
             targets = [int(pending["customer_id"])]
@@ -1095,7 +1133,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
                 message=[Reply(id=str(msg_id)), Text(text="📝 请发送要回复给客户的消息内容：")],
             )
             prompt_msg_id = resp.get("message_id")
-            cfg.pending_say[event.user_id] = {
+            register_pending_say(event.user_id, {
                 "prompt_msg_id": prompt_msg_id,
                 "customer_id": customer_id,
                 "reply_id": reply_id,
@@ -1103,7 +1141,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
                 "via": "group_reply",
                 "target_source": "reply",
                 "debounce_key": (reply_id, "say"),
-            }
+            })
             await history.record_command(
                 customer_id, event.user_id, "say",
                 mode="pending", reply_id=reply_id, group_id=gid, via="group_reply",
@@ -1126,26 +1164,15 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             )
             return True
 
-        customer_msg_id: int | None = None
-        try:
-            send_resp = await cfg.client.send_private_msg(
-                user_id=str(customer_id),
-                message=segments,
-            )
-            raw_mid = send_resp.get("message_id") if send_resp else None
-            customer_msg_id = int(raw_mid) if raw_mid is not None else None
-            await history.record_command(
-                customer_id, event.user_id, "say",
-                mode="content", reply_id=reply_id, group_id=gid, via="group_reply",
-            )
-            if customer_msg_id is not None:
-                await history.record_staff_reply(customer_id, customer_msg_id, time.time(), segments, actor_uid=event.user_id)
-            closed = await close_session(customer_id, send_closing=False, close_reason="say")
+        feedback, _closed, customer_msg_id = await send_private_and_close(
+            customer_id, segments,
+            operator_uid=event.user_id,
+            via="group_reply",
+            group_id=gid,
+            reply_id=reply_id,
+        )
+        if not feedback.startswith("❌"):
             cfg.last_command_time[key] = now
-            feedback = build_say_feedback(customer_id, closed, customer_msg_id is not None)
-        except Exception as e:
-            log.error("发送私聊消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
-            feedback = f"❌ 发送失败：{e}"
 
         resp = await cfg.client.send_group_msg(
             group_id=str(gid),
