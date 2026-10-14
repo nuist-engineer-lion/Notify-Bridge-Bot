@@ -109,9 +109,10 @@ emoji_mapping:
   say: 123
   cancel: 32
   recall: 89
+  say_timeout: 25  # 困：say 等待内容超时，仅用于状态提示
 
 # say 等待输入内容的超时（秒，必须大于 0；默认 30，支持热重载）
-# 超时取消等待，仅在“请发送”提示消息上贴 ×，不发送新消息
+# 超时取消等待，移除提示消息上的 cancel 表情，换成 say_timeout 表情，不发送新消息
 say_input_timeout_seconds: 120
 
 # .say 发送成功后允许通过点击撤回表情撤回消息的时间窗口（秒）

@@ -236,9 +236,21 @@ async def add_emoji_to_message(message_id: int, emoji_ids: list[int]) -> None:
             log.error("添加表情失败: message_id=%s, emoji_id=%s, err=%s", message_id, emoji_id, e)
 
 
+async def remove_emoji_from_message(message_id: int, emoji_ids: list[int]) -> None:
+    """移除机器人在指定消息上添加的表情贴纸。"""
+    for emoji_id in emoji_ids:
+        try:
+            await client.set_msg_emoji_like(
+                message_id=str(message_id), emoji_id=str(emoji_id), set=False,
+            )
+            log.debug("已为消息 %s 移除表情 %s", message_id, emoji_id)
+        except Exception as e:
+            log.error("移除表情失败: message_id=%s, emoji_id=%s, err=%s", message_id, emoji_id, e)
+
+
 def action_emoji_ids() -> list[int]:
-    """可操作消息默认贴上的表情（不含 cancel / recall 等仅用于特定消息的表情）"""
-    return [eid for cmd, eid in cfg.EMOJI_MAPPING.items() if cmd not in ("cancel", "recall")]
+    """可操作消息默认贴上的表情（不含仅用于提示消息的表情）。"""
+    return [eid for cmd, eid in cfg.EMOJI_MAPPING.items() if cmd not in ("cancel", "recall", "say_timeout")]
 
 
 def build_say_feedback(

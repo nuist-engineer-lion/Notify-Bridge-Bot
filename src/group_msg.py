@@ -21,6 +21,7 @@ from .message_sender import (
     send_and_track_feedback,
     track_forward_message,
     add_emoji_to_message,
+    remove_emoji_from_message,
     action_emoji_ids,
     build_say_feedback,
     register_recallable_send,
@@ -32,7 +33,6 @@ OPS_COMMAND_PREFIXES = ('.say', '.bye', '.more', '.help', '.close', '.list', '.r
 # 需要客户目标的会话命令：优先 Reply，否则可用 <客户QQ>
 SESSION_OP_PREFIXES = ('.say', '.bye', '.close', '.more')
 
-SAY_TIMEOUT_EMOJI_ID = 123  # ×（❌）
 _pending_say_tasks: dict[int, asyncio.Task] = {}
 
 
@@ -46,18 +46,22 @@ def pop_pending_say(user_id: int) -> dict | None:
 
 
 async def expire_pending_say(user_id: int, pending: dict) -> None:
-    """只结束本次等待，在原提示上贴 ×，不发送新消息。"""
+    """结束本次等待，将原提示上的取消表情换成配置的超时表情。"""
     if cfg.pending_say.get(user_id) is not pending:
         return
     pop_pending_say(user_id)
     prompt_msg_id = pending.get("prompt_msg_id")
     if prompt_msg_id:
-        await add_emoji_to_message(prompt_msg_id, [SAY_TIMEOUT_EMOJI_ID])
+        await remove_emoji_from_message(
+            prompt_msg_id, [pending.get("cancel_emoji_id", cfg.EMOJI_MAPPING["cancel"])],
+        )
+        await add_emoji_to_message(prompt_msg_id, [cfg.EMOJI_MAPPING["say_timeout"]])
 
 
 def register_pending_say(user_id: int, pending: dict) -> None:
     pop_pending_say(user_id)
     timeout = cfg.SAY_INPUT_TIMEOUT_SECONDS
+    pending["cancel_emoji_id"] = cfg.EMOJI_MAPPING["cancel"]
     pending["expires_at"] = asyncio.get_running_loop().time() + timeout
     cfg.pending_say[user_id] = pending
 
