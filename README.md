@@ -72,6 +72,7 @@
 | `.unmute` | 解除静音并汇总发出延后提醒（与终端 `unmute` 一致） | `.unmute` | 否 |
 | `.reload` | 重载当前明文配置（兼容 `.reload cfg`） | `.reload` | 否 |
 | `.reload remote` | 拉取远程仓库、解密应用配置后重载 | `.reload remote` | 否 |
+| `.reboot` | 保存状态并重启机器人进程 | `.reboot` | 否 |
 | `.help` | 显示帮助信息 | `.help` | 否 |
 
 补充说明：
@@ -161,6 +162,7 @@ bot 启动后会在同一进程读取终端 stdin。**控制台与 bot 运行绑
 | `unmute` | 解除静音并汇总延后提醒（与群内 `.unmute` 一致） |
 | `reload` | 重载明文 `config.yaml` |
 | `reload remote` | 拉取远程仓库、解密应用配置后重载 |
+| `reboot` | 保存状态并重启机器人进程 |
 | `say <qq\|all> <文本>` | 私聊发送纯文本；`all`=当前待回复队列；成功后关待回复会话 |
 | `bye <qq\|all>` | 发送结束语并关闭会话（`all`=队列全部） |
 | `close <qq\|all>` | 关闭会话、不发结束语（`all`=队列全部） |
@@ -182,6 +184,9 @@ bot 启动后会在同一进程读取终端 stdin。**控制台与 bot 运行绑
 4. 进程退出
 
 若信号处理器未能生效（极端情况），入口会兜底再保存一次状态。Shell 控制台的 `quit` / `exit` / `stop` 与 Ctrl+C 走同一优雅关停路径，**不会只退出控制台而让 bot 继续跑**。
+
+通知群 `.reboot` 或控制台 `reboot` 会先发送回执，再执行上述关停流程，最后以原解释器及启动参数重新启动机器人进程（读取最新代码和配置）。配置更新执行期间或机器人已在停止时拒绝重启；命令不接受参数。重启的是机器人进程，不是部署主机。
+使用 `uv run main.py` 启动时，重启会沿用当前 uv 虚拟环境的 Python。
 
 ## 配置说明
 
@@ -624,7 +629,8 @@ sudo install -m 600 /path/to/age.key /etc/notifybot/age.key
 - 兼容旧输入 `.reload cfg` / `.update cfg`，行为与 `.reload` 相同。
 - `.reload remote`（兼容 `.update remote`）：依次执行 `git pull --ff-only` → `scripts/apply-encrypted-config`（Windows 使用 `.ps1`）→ 重载配置。任一步失败即停止后续步骤；拉取限时 120 秒、解密限时 60 秒，执行期间重复重载请求会提示稍后重试。沿用部署主机的 sops 和 age 私钥配置，不展示解密内容。
 - 控制台支持相同的 `reload remote`。该命令仅热重载配置，拉取到的代码变更需重启进程后生效；Actions 仍按下文规则自动部署。
-- 失败回显失败步骤、退出码及命令错误输出（超时也回显已产生的输出）；成功返回 `git pull` 输出、`git status --short --branch` 和最新提交。单次命令输出最多回显 3000 字符。
+- 拉取成功后可执行 `.reboot`（控制台 `reboot`）使代码变更生效。
+- 失败回显失败步骤、退出码及命令错误输出（超时也回显已产生的输出，最多 3000 字符）；成功仅回显重载结果和 commit hash 变动，无更新时标注 hash 未变化。
 
 ### 代码发布 vs 配置热更
 

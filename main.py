@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import os
 import signal
+import sys
 
 from src import main as app
 from src.config import log
@@ -81,7 +83,7 @@ async def run_app() -> None:
             raise exc
 
 
-if __name__ == "__main__":
+def main() -> None:
     try:
         asyncio.run(run_app())
     except KeyboardInterrupt:
@@ -92,3 +94,13 @@ if __name__ == "__main__":
         except Exception:
             pass
         logging.getLogger("Notify-Bridge-Bot").info("程序已停止。")
+        return
+
+    if app.is_reboot_requested():
+        log.info("正在重新启动机器人进程...")
+        # 保留解释器参数（含 -m / -X 等）、入口和启动参数。
+        os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
+
+
+if __name__ == "__main__":
+    main()

@@ -29,7 +29,7 @@ from .message_sender import (
 from . import history
 
 # 运维类命令（无需引用机器人消息）
-OPS_COMMAND_PREFIXES = ('.say', '.bye', '.more', '.help', '.close', '.list', '.reload', '.update', '.mute', '.unmute', '.status')
+OPS_COMMAND_PREFIXES = ('.say', '.bye', '.more', '.help', '.close', '.list', '.reload', '.update', '.reboot', '.mute', '.unmute', '.status')
 # 需要客户目标的会话命令：优先 Reply，否则可用 <客户QQ>
 SESSION_OP_PREFIXES = ('.say', '.bye', '.close', '.more')
 
@@ -927,6 +927,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             "• .unmute – 解除静音，并汇总发出延后提醒\n"
             "• .reload – 重载当前明文配置（不拉代码、不展示内容；兼容 .reload cfg）\n"
             "• .reload remote – git pull → 解密应用配置 → 重载配置\n"
+            "• .reboot – 保存状态并重启机器人进程\n"
             "• .help – 显示此帮助信息\n"
             "\n"
             "使用方法：优先回复机器人消息；或 .命令 <客户QQ|all>；无参且待回复仅 1 人时自动匹配该客户。\n"
@@ -1069,6 +1070,20 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             log.info(".list 命令执行成功，返回 %d 名客户", len(customer_ids))
         except Exception as e:
             log.error("发送 .list 结果失败: %s", e, exc_info=True)
+        return True
+
+    elif cmd_text.startswith(".reboot"):
+        from . import main as app_main
+        if cmd_text != ".reboot":
+            message = "❌ 用法：.reboot"
+        else:
+            message = app_main.reboot_block_reason() or "🔄 正在重启机器人…"
+        await cfg.client.send_group_msg(
+            group_id=str(gid),
+            message=[Reply(id=str(msg_id)), Text(text=message)],
+        )
+        if cmd_text == ".reboot" and not message.startswith("❌"):
+            app_main.request_reboot(f"group:{gid}:user:{event.user_id}")
         return True
 
     elif cmd_text.startswith((".reload", ".update")):

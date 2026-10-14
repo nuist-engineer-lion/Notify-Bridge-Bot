@@ -27,6 +27,7 @@ from . import history
 _background_tasks: list[asyncio.Task] = []
 _shutdown_requested = False
 _shutdown_finished = False
+_reboot_requested = False
 # 入口 run_app 注入的 stop event：request_shutdown 时一并 set，用于打断 WS 等待
 _external_stop: asyncio.Event | None = None
 
@@ -53,6 +54,29 @@ def request_shutdown(reason: str = "manual") -> None:
 
 def is_shutdown_requested() -> bool:
     return _shutdown_requested
+
+
+def reboot_block_reason() -> str | None:
+    """重载执行期间不能重启，避免中断拉取或解密。"""
+    if _shutdown_requested:
+        return "❌ 机器人正在停止或重启，请稍后重试"
+    if cfg._reload_lock.locked():
+        return "❌ 配置更新正在执行，请稍后重试"
+    return None
+
+
+def request_reboot(reason: str = "manual") -> bool:
+    """请求保存状态并停止；入口在关停完成后重新执行进程。"""
+    global _reboot_requested
+    if reboot_block_reason():
+        return False
+    _reboot_requested = True
+    request_shutdown(f"reboot:{reason}")
+    return True
+
+
+def is_reboot_requested() -> bool:
+    return _reboot_requested
 
 
 async def _close_napcat_client() -> None:
