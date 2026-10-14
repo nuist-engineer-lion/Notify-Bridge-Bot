@@ -67,6 +67,7 @@ def _run_git_command(args: list[str]) -> str | None:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            timeout=15,
         )
     except Exception:
         return None
@@ -442,7 +443,7 @@ def _command_feedback(stdout: str | bytes | None, stderr: str | bytes | None) ->
 
 
 def _apply_remote_config() -> tuple[bool, str]:
-    """Pull and decrypt in a worker thread, returning errors or Git status."""
+    """Pull and decrypt in a worker thread, returning errors or commit hashes."""
     if os.name == "nt":
         shell = shutil.which("pwsh") or shutil.which("powershell")
         if not shell:
@@ -458,7 +459,7 @@ def _apply_remote_config() -> tuple[bool, str]:
     # Reload explicitly below; do not wait for the mtime watcher from the script.
     env["WAIT_RELOAD"] = "0"
     env["GIT_TERMINAL_PROMPT"] = "0"
-    git_pull_output = ""
+    old_head = get_current_git_head()
     for stage, command, timeout in (
         ("git pull", ["git", "pull", "--ff-only"], 120),
         ("apply-encrypted-config", apply_command, 60),
@@ -484,29 +485,14 @@ def _apply_remote_config() -> tuple[bool, str]:
             message = f"❌ 远程配置更新失败：{stage} 退出码 {result.returncode}，后续步骤已停止\n{detail}"
             log.error("%s", message)
             return False, message
-        if stage == "git pull":
-            git_pull_output = _command_feedback(result.stdout, result.stderr)
         log.info("远程配置更新：%s 完成", stage)
 
-    lines = ["Git 拉取结果：", git_pull_output or "git pull 完成（无输出）", "", "Git 状态："]
-    for args in (["status", "--short", "--branch"], ["--no-pager", "log", "-1", "--oneline"]):
-        try:
-            result = subprocess.run(
-                ["git", *args], cwd=REPO_ROOT, env=env, capture_output=True, timeout=15,
-            )
-            output = _command_feedback(result.stdout, result.stderr)
-            if result.returncode:
-                lines.append(f"读取 Git 状态失败（退出码 {result.returncode}）：{output or '无错误输出'}")
-            else:
-                lines.append(output or "无输出")
-        except subprocess.TimeoutExpired as exc:
-            lines.append("读取 Git 状态超时（15 秒）")
-            output = _command_feedback(exc.stdout, exc.stderr)
-            if output:
-                lines.append(output)
-        except OSError as exc:
-            lines.append(f"读取 Git 状态失败：{exc}")
-    return True, "\n".join(lines)
+    new_head = get_current_git_head()
+    if old_head and new_head:
+        if old_head == new_head:
+            return True, f"Git: {new_head[:7]}（未变化）"
+        return True, f"Git: {old_head[:7]} → {new_head[:7]}"
+    return True, f"Git: {(old_head or '未知')[:7]} → {(new_head or '未知')[:7]}"
 
 
 async def run_reload_cfg(*, remote: bool = False) -> tuple[bool, str]:
@@ -521,7 +507,7 @@ async def run_reload_cfg(*, remote: bool = False) -> tuple[bool, str]:
                 return False, git_message
         ok, message = _reload_cfg_result(remote=remote)
         if git_message:
-            message += f"\n\n{git_message}"
+            message += f"\n{git_message}"
         return ok, message
 
 
