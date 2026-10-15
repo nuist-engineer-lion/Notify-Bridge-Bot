@@ -98,7 +98,7 @@ def build_notice_markdown(text: str, max_title_chars: int, msg_time: float) -> t
     """把群消息文本转换为通知 md 文件。
 
     返回 (md内容, 标题, YYYY-MM-DD日期, 内容hash前8位)。
-    首行作标题，其余作摘要与正文，遵循主页仓库 notices/README.md 的约定。
+    首行作标题，正文首段作摘要，分隔符后只写剩余段落，遵循主页仓库 notices/README.md 的约定。
     首行仅为 @全体成员 时，标题写作「mm月dd日通知」。
     """
     stripped = [ln.strip() for ln in text.splitlines()]
@@ -125,17 +125,19 @@ def build_notice_markdown(text: str, max_title_chars: int, msg_time: float) -> t
             "---\n"
         )
     else:
-        paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
-        summary = paragraphs[0] if paragraphs else body
+        # 摘要也是详情页正文的一部分；分隔符只是列表摘要的截取位置，
+        # 其后若再写完整 body，详情页就会重复显示首段。
+        summary, _, remainder = body.partition("\n\n")
         md = (
             "---\n"
             f"title: {_yaml_quote(title)}\n"
             f"date: {date_str}\n"
             "---\n\n"
             f"{summary}\n\n"
-            "<!-- more -->\n\n"
-            f"{body}\n"
+            "<!-- more -->\n"
         )
+        if remainder.strip():
+            md += f"\n{remainder.strip()}\n"
     return md, title, date_str, hash8
 
 
