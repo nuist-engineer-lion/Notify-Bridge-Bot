@@ -2,17 +2,7 @@
 
 一个基于 [`napcat-sdk`](https://github.com/faithleysath/napcat-sdk) 的 QQ 私聊客服催回复机器人。
 
-它的目标很简单：客户发来私聊消息后，如果客服迟迟没有回复，机器人就把消息整理后推送到内部群里提醒；如果超时更久，再按里程碑继续催办；客服处理完成后，再自动结束监控并存档会话。
-
-当前仓库已经实现了完整的消息监听、好友申请自动处理、群内快捷指令、夜间免打扰、状态持久化与会话归档。本文档基于当前代码现状整理，尽量保留原有使用视角。
-
-## 适用场景
-
-- QQ 私聊作为客服入口
-- 需要把未回复客户集中提醒到内部群
-- 希望减少人工盯聊天窗口的成本
-- 希望通过群内引用命令、贴表情、戳一戳来快速处理会话
-- 希望保留客服响应耗时和会话记录，方便追踪
+主要功能：客户发来私聊消息后，如果客服迟迟没有回复，机器人就把消息整理后推送到内部群里提醒；如果超时更久，再按里程碑继续催办；客服处理完成后，再自动结束监控并存档会话。
 
 ## 功能概览
 
@@ -34,8 +24,8 @@
 - 支持状态持久化：程序重启后自动恢复待回复客户、监听消息和夜间延后通知
 - 支持会话归档：对话周期内事件实时写入本地 SQLite 会话库，会话关闭后再按时间段拉取历史对账补漏，双保险保证记录完整
 - 支持统计已完结会话的最短、最长、平均和中位回复耗时
-- 支持临时静音开关：群内 `.mute`（无参数不限时）/ `.unmute`，或本地 Shell 控制台开启；静音期间提醒暂存，解除后汇总发出；**shell `unmute` 与群内 `.unmute` 行为一致**
-- 支持本地终端 Shell 控制台：与 bot 同进程、同生命周期绑定；命令回执仅本地；日志插入时自动重绘 prompt，避免打断输入
+- 支持临时静音开关：群内 `.mute`（无参数不限时）/ `.unmute`，或本地 Shell 控制台开启；静音期间提醒暂存，解除后汇总发出
+- 支持本地终端 Shell 控制台
 - 终端支持会话处理：`say` / `bye` / `close`（可用客户 QQ 或 `all`=当前待回复队列）；**终端不提供 `more`**
 - 群内会话命令在引用消息之外，也支持用客户 QQ 或 `all` 直接操作：`.say <QQ|all> …` / `.bye <QQ|all>` / `.close <QQ|all>` / `.more <QQ|all>`（带 Reply 时仍以引用为准；`all`=待回复队列）
 
@@ -137,7 +127,6 @@
 - 开启（不限时，默认）：内部群 `.mute` 或终端 `mute`；直到手动解除
 - 开启（限时）：`.mute 30` / `mute 30`（单位分钟）
 - 解除并汇总：群内 `.unmute` 或终端 `unmute`（**两者行为一致**：解除静音 + 向通知群汇总发出延后提醒）
-- 命令回执：群命令回在群里；终端命令只打本地 stdout，不向群发送命令 ACK
 - 限时静音到期：巡检任务自动解除，并汇总发出延后提醒
 - 静音期间：新客户提醒与里程碑催办不会立刻推送到内部群，而是与夜间模式共用延后队列
 - 解除或到期：若当前不在夜间时段，则将延后通知按客户聚合后汇总发出；若仍在夜间，则继续留给次日夜间汇总
@@ -146,10 +135,7 @@
 
 ## 本地 Shell 控制台
 
-bot 启动后会在同一进程读取终端 stdin。**控制台与 bot 运行绑定**：随 bot 启动，随 bot 优雅关停结束；控制台内 `quit` / `exit` / `stop` 会请求停止整个 bot（与 Ctrl+C 相同路径）。在 systemd 等无 stdin 环境下控制台会自动禁用，不影响 bot 主流程。
-
-**约束：终端命令的回执只写本地 stdout，不向任何 QQ 群发送命令 ACK。**  
-`unmute` 除外——它与群内 `.unmute` 一致，会汇总把延后客户提醒发到通知群（业务消息，不是命令回执）。
+bot 启动后会在同一进程读取终端 stdin。控制台内 `quit` / `exit` / `stop` 会请求停止整个 bot（与 Ctrl+C 相同路径）。在 systemd 等无 stdin 环境下控制台会自动禁用，不影响 bot 主流程。
 
 日志与输入协调：运行中日志插入终端时，会清行打印日志并重绘 `notifybot> ` 与已键入内容，避免命令被日志“打断”。
 
@@ -172,9 +158,9 @@ bot 启动后会在同一进程读取终端 stdin。**控制台与 bot 运行绑
 
 终端说明：
 
-- **命令 ACK 只写本地**，不向 QQ 群发送命令回执；`unmute` 的汇总提醒、以及群内 `.more <QQ>` 的合并转发属于业务消息，不在「命令 ACK」范围内。
+- 命令 ACK 不向 QQ 群发送回执。
 - **终端没有 `more`**；历史合并转发只通过群内 `.more` / `.more <QQ>` 完成。
-- **`all` 仅指当前待回复队列**，不是全部好友；群内 `say/bye/close` 支持 all，**`.more` 不支持 all**；无参且队列仅 1 人时自动匹配。
+- `all` 指当前待回复队列；群内 `say/bye/close` 支持 all，**`.more` 不支持 all**；无参且队列仅 1 人时自动匹配。
 - `say` / `bye` 在客户端未运行时会本地拒绝；`close` 不要求客户端在线。
 
 停止 bot 也可使用终端 `Ctrl+C`（或向进程发送 `SIGTERM`）。触发后会执行**优雅关停**：
@@ -186,8 +172,8 @@ bot 启动后会在同一进程读取终端 stdin。**控制台与 bot 运行绑
 
 若信号处理器未能生效（极端情况），入口会兜底再保存一次状态。Shell 控制台的 `quit` / `exit` / `stop` 与 Ctrl+C 走同一优雅关停路径，**不会只退出控制台而让 bot 继续跑**。
 
-通知群 `.reboot` 或控制台 `reboot` 会先发送回执，再执行上述关停流程，最后以原解释器及启动参数重新启动机器人进程（读取最新代码和配置）。配置更新执行期间或机器人已在停止时拒绝重启；命令不接受参数。重启的是机器人进程，不是部署主机。
-使用 `uv run main.py` 启动时，重启会沿用当前 uv 虚拟环境的 Python。
+通知群 `.reboot` 或控制台 `reboot` 会先发送回执，再执行上述关停流程，最后以原解释器及启动参数重新启动机器人进程（读取最新代码和配置）。配置更新执行期间或机器人已在停止时拒绝重启；命令不接受参数。
+使用 `uv` 启动时，重启会沿用当前 uv 虚拟环境的 Python。
 
 ## 配置说明
 
@@ -199,154 +185,6 @@ bot 启动后会在同一进程读取终端 stdin。**控制台与 bot 运行绑
 - 本机私有：明文 `config.yaml`（已 gitignore）、age 私钥 `*.agekey`
 - 远端主机：解密后的明文 `config.yaml`，以及 `/etc/notifybot/age.key`（权限 600）
 
-### 配置文件示例
-
-```yaml
-# WebSocket 连接
-ws_url: "ws://127.0.0.1:3001"
-ws_token: "your_ws_token"
-
-# 内部通知群号
-internal_group_id: 123456789
-
-# 白名单（这些 QQ 不会进入待回复队列）
-whitelist:
-  - 100000
-  - 100001
-
-# 超时里程碑（分钟）
-milestones:
-  - 15
-  - 30
-  - 60
-  - 120
-  - 180
-  - 360
-  - 720
-  - 1440
-  - 2880
-  - 4320
-
-# 最多监听多少条机器人发出的可操作消息
-monitored_forward_limit: 15
-
-# 会话结束语
-closing_message: |-
-  本次会话暂时结束。感谢您的支持与信任，再见。（请勿回复）
-
-# 新好友通过后发送的欢迎消息
-welcome_message: |-
-  [自动回复]您好，感谢您添加好友。
-  如有问题可直接留言，我们会在工作时间尽快回复。
-
-# 群内命令防抖（秒）
-debounce_seconds:
-  say: 5
-  more: 5
-  bye: 5
-  close: 5
-  list: 5
-
-# 好友申请去重窗口（秒）
-processed_friend_requests_expire: 5
-
-# 通过好友后，延迟多久再发送欢迎消息
-friend_welcome_delay: 5
-
-# 欢迎消息失败重试
-friend_welcome_retries: 3
-friend_welcome_retry_interval: 3
-
-# 好友数阈值，达到后在群通知中附带警告
-friend_count_limit: 3000
-
-# 回复耗时统计最多保留多少条样本
-reply_duration_maxlen: 1000
-
-# 值班时间表：QQ -> 星期 -> 时间段列表
-availability:
-  123456789:
-    monday:
-      - ["09:00", "12:00"]
-      - ["13:00", "18:00"]
-    tuesday: []
-    wednesday: []
-    thursday: []
-    friday: []
-    saturday: []
-    sunday: []
-
-# 机器人消息监听有效期（秒）
-max_listen_age: 86400
-
-# 夜间免打扰配置
-night_mode:
-  start: "23:30"
-  end: "07:00"
-  summary_time: "07:00"
-
-# 状态持久化文件
-state_file: "archives/state.json"
-
-# 会话归档目录（SQLite 会话库 archive.db 也存放在此）
-archive_dir: "archives"
-
-# 会话库保留期（天），0 = 永久保留
-archive_retention_days: 0
-
-# 构造合并转发时，最多回看多久以内的历史消息（秒）
-recent_message_max_age: 86400
-
-# 表情映射：动作 -> QQ 表情 ID
-emoji_mapping:
-  close: 75
-  more: 289
-  bye: 124
-  say: 123
-  cancel: 96
-  recall: 89
-  say_timeout: 25  # 困：say 等待内容超时
-
-# say 等待输入内容的超时（秒，必须大于 0；默认 30）
-say_input_timeout_seconds: 30
-
-# .say 发送成功后允许通过表情撤回的时间窗口（秒）
-recall_window_seconds: 60
-
-# AI 回复建议（OpenAI 兼容接口：DeepSeek / 通义 / GLM / one-api 等均可）
-# 注意：客户对话内容会发送给所配置的 LLM 服务；api_key 属敏感信息，走加密配置流程
-ai_suggestion:
-  enabled: false
-  base_url: "https://api.deepseek.com/v1"
-  api_key: "sk-xxxx"
-  # 图片输入需视觉模型：DeepSeek 请用 deepseek-flash（deepseek-v4-pro 不支持 vision）
-  model: "deepseek-flash"
-  vision_enabled: true
-  image_detail: "low"
-  max_images_per_suggestion: 3
-  # system 提示词可自定义（多行），留空使用内置默认
-  system_prompt: |-
-    你是一家维修客服的助手。请根据以下客服与客户的最近对话，以客服身份草拟下一条发给客户的回复。
-    要求：只输出回复内容本身，不要任何解释、前缀或引号；语气友好专业、简洁；如果客户诉求还不明确，先回应已知信息并礼貌追问。
-  temperature: 0.7          # 采样温度，越高越发散
-  timeout_seconds: 12       # 单次生成超时，失败不影响提醒正常发送
-  max_context_messages: 20  # 送入模型的最近对话条数
-  max_suggestion_chars: 300 # 建议文本截断长度
-```
-
-### 结构化消息示例
-
-`closing_message` 和 `welcome_message` 除了支持字符串，也支持结构化消息段列表。当前代码内置支持的类型有：`text`、`image`、`face`、`at`、`poke`。
-
-```yaml
-welcome_message:
-  - type: text
-    data:
-      text: "您好，感谢您添加好友。"
-  - type: image
-    data:
-      file: "https://example.com/welcome.png"
-```
 
 ### 主要配置项
 
@@ -405,21 +243,11 @@ uv run python main.py
 python main.py
 ```
 
-启动后程序会：
-
-- 加载 `config.yaml`
-- 恢复 `state_file` 中的运行状态
-- 启动每 60 秒执行一次的巡检任务
-- 连接 NapCat WebSocket，并在断开后自动重连
-- 首次连通后向内部群发送“机器人已启动”通知
-- 初始化当前好友数缓存
-
 ## 提醒、收尾与统计机制
 
 ### 新客户提醒
 
-- 客户首次发消息后不会立刻提醒
-- 只有当“距离最后一条客户消息已满 1 分钟”时，才会推送到内部群
+- 客户首次发消息后不会立刻提醒，只有当“距离最后一条客户消息已满 1 分钟”时，才会推送到内部群
 - 如果客户在等待期间继续发消息，会重置计时并清空已上报的里程碑
 - 开启 `ai_suggestion` 后，提醒合并转发的第一层会附上根据该客户最近对话生成的 AI 建议回复，供客服参考后用 `.say` 发送；生成失败或超时会自动省略，不影响提醒本身
 - `vision_enabled: true` 时，消息中的图片会先由 bot 下载并转为 `data:image/...;base64,...`，再以 OpenAI 兼容 `image_url` 送入模型（优先客户侧，最多 `max_images_per_suggestion` 张）；下载失败的图片会跳过，请求失败或无可用图时自动回退 `[图片]` 占位/纯文本重试
@@ -514,18 +342,9 @@ uv run python scripts/import_jsonl.py             # 导入
 
 - [`use-napcat-sdk/SKILL.md`](https://raw.githubusercontent.com/faithleysath/napcat-sdk/refs/heads/main/skills/use-napcat-sdk/SKILL.md)
 
-这样通常能更快对齐：
-
-- `napcat-sdk` 的核心对象和消息段类型
-- `NapCatClient` 的使用方式
-- 事件模型和 `Reply` / `Text` / `NodeReference` / `NodeInline` 等常见段类型
-- `user_id` / `group_id` 等字段的类型注意事项
-
 ## 已知限制
 
-- 多客户合并转发目前不能直接执行 `.say` / `.more` / `.bye` / `.close`，需要手动处理。
 - 可操作消息的监听依赖 `monitored_forward_limit` 和 `max_listen_age`；超出窗口后再引用旧消息，机器人可能返回“操作已过期”。
-- `.say` 的等待输入状态保存在内存中，程序重启后不会恢复。
 - 夜间汇总按客户聚合，不保留原始通知类型和里程碑层级。
 - 状态文件和会话库会随使用时间持续增长；会话库可通过 `archive_retention_days` 自动清理，状态文件需自行关注。
 - 归档中的图片等媒体仅保存 URL，QQ 媒体链接会过期，无法永久还原原始文件。
