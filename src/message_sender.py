@@ -113,6 +113,39 @@ def pop_tracked_forward(message_id: int) -> dict | None:
 
 # ======================= 合并转发构造 =======================
 
+async def get_customer_profiles(user_ids: list[int]) -> dict[int, tuple[str, str]]:
+    """批量读取客户昵称和好友备注；资料获取失败不影响转发。"""
+    friends = {}
+    try:
+        friends = {
+            int(info["user_id"]): info
+            for info in await client.get_friend_list()
+        }
+    except Exception as e:
+        log.warning("获取好友资料失败，将尝试获取客户昵称: %s", e)
+
+    profiles = {}
+    for user_id in user_ids:
+        info = friends.get(user_id, {})
+        nickname = info.get("nickname") or ""
+        remark = info.get("remark") or "（无）"
+        if not nickname:
+            try:
+                stranger = await client.get_stranger_info(user_id=str(user_id))
+                nickname = stranger.get("nickname") or ""
+            except Exception as e:
+                log.warning("获取客户 %d 昵称失败: %s", user_id, e)
+        profiles[user_id] = (
+            str(nickname or "未知昵称"),
+            str(remark if user_id in friends else "（未获取到）"),
+        )
+    return profiles
+
+
+def format_customer_profile(user_id: int, nickname: str, remark: str) -> str:
+    return f"QQ号：{user_id}\n昵称：{nickname}\n备注：{remark}"
+
+
 async def send_nested_forward(group_id: int, customer_list: list[tuple[int, CustomerData]], summary_text: str, max_age_seconds: int | None = None) -> int | None:
     """
     构造嵌套合并转发并发送，每个客户的消息通过 get_recent_message_ids 获取最近指定时间内的消息
@@ -126,62 +159,74 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
 
     log.info("开始构造合并转发 -> 群 %d, 共 %d 名客户", group_id, len(customer_list))
 
-    # AI 回复建议：未启用/失败/超时返回空，不影响提醒发送
-    try:
-        suggestions = await ai.suggest_for_customers(customer_list)
-    except Exception as e:
-        log.warning("AI建议生成失败，本次提醒不含建议: %s", e)
-        suggestions = {}
-
-    first_node_segments: list[Message] = [Text(text="https://lion-qq.laysath.cn")]
-    ai_block_count = 0
-    for qq, _ in customer_list:
-        suggestion = suggestions.get(qq)
-        if not suggestion:
-            log.debug("提醒: 客户 %d 本次无 AI 建议", qq)
-            continue
-        ai_block_count += 1
-        label = f"（{qq}）" if len(customer_list) > 1 else ""
-        first_node_segments.append(Text(text=f"\n🤖 AI建议回复{label}：\n{suggestion}"))
-    if not suggestions:
-        log.info("提醒合并转发第一层无 AI 建议（客户 %d 名）", len(customer_list))
-    else:
-        log.info(
-            "提醒合并转发: 第一层附加 AI 建议 %d 条 / 客户 %d 名",
-            ai_block_count,
-            len(customer_list),
-        )
-
+    profiles = await get_customer_profiles([qq for qq, _ in customer_list])
     outer_nodes: list[Message] = [
         NodeInline(
-            nickname="快捷传送门",
+            nickname="客服系统提示",
             user_id=str(client.self_id),
-            content=serialize_message_segments(first_node_segments),
+            content=serialize_message_segments([Text(text=summary_text)]),
         ),
     ]
+    forwarded_customers = []
+    customer_message_ids: dict[int, list[int]] = {}
 
-    for qq, _ in customer_list:
+    for qq, data in customer_list:
         msg_ids = await get_recent_message_ids(qq, count=200, max_age_seconds=max_age_seconds)
         if not msg_ids:
             log.warning("客户 %d 无%d秒内消息，跳过该客户节点", qq, max_age_seconds)
             continue
 
-        inner_nodes: list[Message] = [
-            NodeReference(id=str(msg_id))
-            for msg_id in msg_ids
-        ]
+        customer_message_ids[qq] = msg_ids
+        forwarded_customers.append((qq, data))
 
-        outer_nodes.append(
-            NodeInline(
-                nickname="客户",
-                user_id=str(qq),
-                content=serialize_message_segments(inner_nodes),
-            )
-        )
-
-    if len(outer_nodes) <= 1:
+    if not forwarded_customers:
         log.warning("所有客户均无%d秒内消息，取消发送合并转发", max_age_seconds)
         return None
+
+    # AI 建议在合并转发第一层独立成条；失败不影响客户资料和历史消息。
+    try:
+        suggestions = await ai.suggest_for_customers(forwarded_customers)
+    except Exception as e:
+        log.warning("AI建议生成失败，本次提醒不含建议: %s", e)
+        suggestions = {}
+
+    suggestion_count = 0
+    for qq, _ in forwarded_customers:
+        nickname, remark = profiles[qq]
+        outer_nodes.append(
+            NodeInline(
+                nickname="客户信息",
+                user_id=str(client.self_id),
+                content=serialize_message_segments([
+                    Text(text=format_customer_profile(qq, nickname, remark)),
+                ]),
+            )
+        )
+        suggestion = suggestions.get(qq)
+        if suggestion:
+            outer_nodes.append(
+                NodeInline(
+                    nickname="AI建议",
+                    user_id=str(client.self_id),
+                    content=serialize_message_segments([
+                        Text(text=f"🤖 AI建议回复（客户 {qq}）：\n{suggestion}"),
+                    ]),
+                )
+            )
+            suggestion_count += 1
+        outer_nodes.append(
+            NodeInline(
+                nickname=nickname,
+                user_id=str(qq),
+                content=serialize_message_segments([
+                    NodeReference(id=str(msg_id)) for msg_id in customer_message_ids[qq]
+                ]),
+            )
+        )
+    log.info(
+        "提醒合并转发: 独立 AI 建议节点 %d 条 / 客户 %d 名",
+        suggestion_count, len(forwarded_customers),
+    )
 
     try:
         response = await client.send_group_forward_msg(
@@ -201,14 +246,18 @@ async def send_forward_from_message_ids(group_id: int, title: str, user_id: int,
     """根据消息ID列表发送合并转发到群"""
     if not message_ids:
         return None
+    profiles = await get_customer_profiles([user_id])
+    nickname, remark = profiles[user_id]
     outer_nodes: list[Message] = [
         NodeInline(
             nickname="客服系统提示",
             user_id=str(client.self_id),
-            content=serialize_message_segments([Text(text=title)]),
+            content=serialize_message_segments([
+                Text(text=f"{title}\n\n{format_customer_profile(user_id, nickname, remark)}"),
+            ]),
         ),
         NodeInline(
-            nickname="消息记录",
+            nickname=nickname,
             user_id=str(user_id),
             content=serialize_message_segments([
                 NodeReference(id=str(msg_id)) for msg_id in message_ids
