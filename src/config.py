@@ -355,12 +355,7 @@ mute_until: float = 0.0
 
 _apply_config(load_config(CONFIG_PATH), initial=True)
 
-async def _local_history(user_id: int, count: int) -> list[dict]:
-    from .storage import get_recent_messages
-    return await get_recent_messages(user_id, count)
-
-
-client: OneBotClient = OneBotClient(WS_URL, WS_TOKEN, history_provider=_local_history)
+client: OneBotClient = OneBotClient(WS_URL, WS_TOKEN)
 _config_mtime = _get_config_mtime(CONFIG_PATH)
 _failed_config_mtime: float | None = None
 

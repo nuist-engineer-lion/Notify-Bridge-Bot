@@ -1,16 +1,16 @@
 """OneBot v11 接入：NoneBot 官方适配器负责通信，复用 NapCat SDK 的业务类型。
 
 适配器的生命周期由现有 asyncio 入口管理，不启动另一套框架主循环。
-历史消息、合并转发和表情回应属于扩展 API；仅在明确返回 1404 时降级。
+历史消息、合并转发和表情回应直接调用服务端扩展 API。
 """
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 from napcat import NapCatClient, NapCatEvent
-from napcat.exceptions import NapCatAPIError, NapCatError, NapCatStateError
+from napcat.exceptions import NapCatError, NapCatStateError
 from nonebot.adapters import Adapter as BaseAdapter
 from nonebot.adapters.onebot.v11 import Adapter, Message, MessageSegment
 from nonebot.adapters.onebot.v11.config import Config as OneBotConfig
@@ -19,12 +19,10 @@ from nonebot.adapters.onebot.v11.exception import ActionFailed, NetworkError
 from nonebot.config import Config, Env
 from nonebot.drivers.aiohttp import Driver
 
-from .messages import message_label, message_segments
+from .messages import message_segments
 
 log = logging.getLogger("Notify-Bridge-Bot")
-HistoryProvider = Callable[[int, int], Awaitable[list[dict[str, Any]]]]
 _STOP = object()
-_EXTENSIONS = {"get_friend_msg_history", "send_group_forward_msg", "set_msg_emoji_like"}
 
 
 def normalize_event(data: dict[str, Any]) -> dict[str, Any]:
@@ -62,11 +60,13 @@ def normalize_event(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _forward_nodes(messages: Any) -> list[dict[str, Any]]:
-    """为 SDK 的转发节点同时提供通用实现使用的 name / uin 字段。"""
+    """省略未设置的节点字段，并补齐通用实现使用的 name / uin 别名。"""
     result = []
     for segment in message_segments(messages):
         if segment["type"] == "node":
-            data = segment["data"]
+            data = segment["data"] = {
+                key: value for key, value in segment["data"].items() if value is not None
+            }
             if "content" in data:
                 data["name"] = data.get("name") or data.get("nickname") or "未知发送者"
                 data["uin"] = data.get("uin") or data.get("user_id") or "0"
@@ -110,7 +110,6 @@ class _BridgeAdapter(Adapter):
         super().bot_connect(bot)
         self.owner.self_id = int(bot.self_id)
         self.owner._bot = bot
-        self.owner._unsupported_actions.clear()
 
     async def _ignore_lifecycle(self, event):
         pass
@@ -123,34 +122,20 @@ class _BridgeAdapter(Adapter):
 class OneBotClient(NapCatClient):
     """保留 SDK 的消息构造和 API 方法，通信交由 NoneBot 官方适配器完成。"""
 
-    def __init__(self, ws_url: str, token: str = "", *, history_provider: HistoryProvider | None = None):
+    def __init__(self, ws_url: str, token: str = ""):
         super().__init__(ws_url, token)
-        self._history_provider = history_provider
         self._bot = None
         self._worker: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._queue: asyncio.Queue = asyncio.Queue()
-        self._unsupported_actions: set[str] = set()
-        self._messages: dict[str, dict[str, Any]] = {}
 
     @property
     def is_running(self) -> bool:
         return self._bot is not None
 
-    def _remember(self, message: dict[str, Any], peer_id: int) -> None:
-        if message.get("message_id") is None:
-            return
-        self._messages[str(message["message_id"])] = {**message, "_peer_id": peer_id}
-        while len(self._messages) > 2000:
-            self._messages.pop(next(iter(self._messages)))
-
     def _receive(self, raw: dict[str, Any]) -> None:
         data = normalize_event(raw)
         event = NapCatEvent.from_dict(data, client=self)
-        if data.get("message_type") == "private":
-            peer_id = data.get("target_id") if data["post_type"] == "message_sent" else data["user_id"]
-            if peer_id is not None:
-                self._remember(data, int(peer_id))
         self._queue.put_nowait(event)
 
     async def _run(self) -> None:
@@ -208,72 +193,4 @@ class OneBotClient(NapCatClient):
         params = dict(params or {})
         if action == "send_group_forward_msg":
             params["messages"] = _forward_nodes(params.get("messages", []))
-        if action not in self._unsupported_actions:
-            try:
-                result = await super().call_action(action, params)
-                if action == "get_friend_msg_history" and isinstance(result, dict):
-                    for message in result.get("messages", []) or []:
-                        self._remember(message, int(params["user_id"]))
-                return result
-            except NapCatAPIError as exc:
-                if action not in _EXTENSIONS or exc.retcode != 1404:
-                    raise
-                self._unsupported_actions.add(action)
-                log.warning("OneBot 服务端不支持 %s，启用降级处理", action)
-        if action == "get_friend_msg_history":
-            uid = int(params["user_id"])
-            count = max(0, int(params.get("count", 20)))
-            stored = await self._history_provider(uid, count) if self._history_provider else []
-            messages = {str(m["message_id"]): m for m in stored}
-            messages.update({
-                key: value for key, value in self._messages.items()
-                if value.get("_peer_id") == uid
-            })
-            recent = sorted(messages.values(), key=lambda m: m.get("time", 0))
-            recent = recent[-count:] if count else []
-            for message in recent:
-                self._remember(message, uid)
-            return {"messages": recent, "source": "local"}
-        if action == "send_group_forward_msg":
-            text = await self._forward_text(params["messages"])
-            result = None
-            # 标准实现没有合并转发 API 时，保留完整文本并分段发送。
-            for offset in range(0, len(text), 3000):
-                result = await super().call_action("send_group_msg", {
-                    "group_id": params["group_id"],
-                    "message": [{"type": "text", "data": {"text": text[offset:offset + 3000]}}],
-                })
-            return result
-        if action == "set_msg_emoji_like":
-            return None
-        raise NapCatStateError(f"没有 {action} 的降级实现")
-
-    async def _forward_text(self, nodes: list[dict[str, Any]], depth: int = 0) -> str:
-        if depth >= 8:
-            return "【已省略更深层合并转发】"
-        parts = []
-        for segment in nodes:
-            kind, data = segment["type"], segment["data"]
-            if kind == "node":
-                if "id" in data:
-                    message = self._messages.get(str(data["id"]))
-                    if message is None:
-                        try:
-                            message = await super().call_action("get_msg", {"message_id": data["id"]})
-                        except NapCatError:
-                            message = None
-                    if not message:
-                        parts.append(f"【原消息 {data['id']} 无法获取】")
-                        continue
-                    sender = message.get("sender") or {}
-                    name = sender.get("nickname") or sender.get("user_id") or "未知发送者"
-                    content = message.get("message", message.get("raw_message", ""))
-                else:
-                    name = data.get("name") or data.get("nickname") or "未知发送者"
-                    content = data.get("content", [])
-                parts.append(f"\n【{name}】\n{await self._forward_text(message_segments(content), depth + 1)}")
-            elif kind == "text":
-                parts.append(str(data.get("text", "")))
-            else:
-                parts.append(f"【{message_label(kind)}】")
-        return "".join(parts) or "（无消息内容）"
+        return await super().call_action(action, params)
