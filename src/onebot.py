@@ -26,11 +26,20 @@ from .messages import message_segments
 log = logging.getLogger("Notify-Bridge-Bot")
 _STOP = object()
 
+# 协议字段核对基线（2026-10-31）：
+# SnowLuma/SnowLuma v2.2.1 @8ffd314260e9e2b6967eeca494d87aa5be046c34，已实测；
+# NapNeko/NapCatQQ main @98d781d19815d1625b24d717ce280ecf0a4f6d0c，仅源码核对，待实测。
+# 下方 SnowLuma 路径相对 packages/onebot/src/，NapCat 路径相对 packages/napcat-onebot/。
+
 
 class PrivateMessageEvent(BasePrivateMessageEvent):
     """接收私聊及自身发出的私聊，保留回复对象。"""
 
     post_type: Literal["message", "message_sent"]
+    # 两端均以 user_id 表示发送者、target_id 表示私聊对象：
+    # SnowLuma event-converter/to-message.ts::convertPrivateMessage、
+    # modules/message-actions.ts::cacheSelfSentMessage；NapCat index.ts::handleMsg。
+    # SnowLuma 发给自己的 QQ 回推可缺 target_id（已实测），此时不能猜测为某位客户。
     target_id: int | None = None
 
 
@@ -52,6 +61,7 @@ class GroupMsgEmojiLikeEvent(NoticeEvent):
 def normalize_event(data: dict[str, Any]) -> dict[str, Any]:
     """统一消息格式和不同协议端的事件字段。"""
     result = dict(data)
+    # 通用 OneBot 输入处理：统一 ID、数组/CQ 消息和标准字段，不依赖具体协议端。
     for key in ("self_id", "user_id", "group_id", "target_id", "sender_id", "message_id"):
         if result.get(key) is not None:
             result[key] = int(result[key])
@@ -68,29 +78,33 @@ def normalize_event(data: dict[str, Any]) -> dict[str, Any]:
         sender.setdefault("user_id", result["user_id"])
         sender.setdefault("nickname", "")
         result["sender"] = sender
-        if post_type == "message_sent" and result.get("message_type") == "private":
-            # 有些实现把 user_id 作为私聊对象，自身 ID 则位于 self_id。
-            if result.get("target_id") is None and result["user_id"] != result["self_id"]:
-                result["target_id"], result["user_id"] = result["user_id"], result["self_id"]
     if result.get("notice_type") == "group_msg_emoji_like":
+        # SnowLuma event-converter/to-notice.ts::convertGroupMsgEmojiLike 用 sub_type=add/remove；
+        # NapCat event/notice/OB11MsgEmojiLikeEvent.ts 直接给 is_add，必须保留其 False 值。
         result.setdefault("is_add", result.get("sub_type", "add") == "add")
     if result.get("notice_type") == "notify" and result.get("sub_type") == "poke":
         if result.get("group_id") is None:
+            # 两端私聊戳一戳的 user_id 是会话对象，sender_id 才是实际操作者：
+            # SnowLuma event-converter/to-notice.ts::convertFriendPoke；
+            # NapCat api/friend.ts::parsePrivatePokeEvent。
+            # 转成官方 PokeNotifyEvent 的 user_id；无 sender_id 的输入沿用官方字段语义。
             result["user_id"] = result.get("sender_id") or result.get("user_id", 0)
     return result
 
 
 def _forward_nodes(messages: Any) -> list[dict[str, Any]]:
-    """省略未设置的节点字段，并补齐通用实现使用的 name / uin 别名。"""
+    """递归转换转发节点，并省略未设置的可选字段。"""
+    # 统一发送 nickname/user_id：SnowLuma modules/message-actions.ts::parseForwardNodes
+    # 与 NapCat action/msg/SendMsg.ts::uploadForwardedNodesPacket 均直接接受这组字段。
     result = []
     for segment in message_segments(messages):
         if segment["type"] == "node":
+            # SnowLuma assertForwardNodeMetadata 拒绝 source 等字符串元数据为 null，
+            # 已实测会返回 1400；NapCat types/message.ts 同样将这些字段声明为可选字符串。
             data = segment["data"] = {
                 key: value for key, value in segment["data"].items() if value is not None
             }
             if "content" in data:
-                data["name"] = data.get("name") or data.get("nickname") or "未知发送者"
-                data["uin"] = data.get("uin") or data.get("user_id") or "0"
                 data["content"] = _forward_nodes(data["content"])
         result.append(segment)
     return result

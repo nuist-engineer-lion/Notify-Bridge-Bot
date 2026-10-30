@@ -486,7 +486,9 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
         return True
     first = event.likes[0]
     try:
-        eid = int(first.get("emoji_id") or first.get("face_id") or first.get("id"))
+        # SnowLuma convertGroupMsgEmojiLike 与 NapCat OB11MsgEmojiLikeEvent 均用 emoji_id；
+        # 源码版本及路径见 onebot.py 的核对基线，SnowLuma 添加/移除事件均已实测。
+        eid = int(first.get("emoji_id"))
     except (TypeError, ValueError):
         return True
 
