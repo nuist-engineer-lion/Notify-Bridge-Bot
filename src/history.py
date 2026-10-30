@@ -206,6 +206,16 @@ async def reconcile_session_history(
             count=500,
             parse_mult_msg=True,
         )
+        # 本地降级只能复用已采集数据，不能声称从服务端补齐了离线消息。
+        if resp.get("source") == "local":
+            await _safe_record(
+                session_id, "history_reconcile",
+                window=[window_start, window_end],
+                source="local", remote_history_available=False,
+                pulled=0, inserted=0,
+            )
+            log.info("会话 %d 服务端不支持历史 API，保留实时采集记录", session_id)
+            return
         msgs = resp.get("messages", []) or []
     except Exception as e:
         log.error("会话 %d 历史拉取失败（实时事件已在库中，跳过补录）: uid=%s, err=%s",

@@ -13,6 +13,8 @@ import asyncio
 import json
 import os
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from . import config as cfg
 from .config import log
@@ -59,12 +61,17 @@ CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_id, time
 """
 
 
-def _connect() -> sqlite3.Connection:
+@contextmanager
+def _connect() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(get_db_path(), timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 # ======================= 同步核心接口 =======================
@@ -147,6 +154,33 @@ def get_session_message_ids_sync(session_id: int) -> set[int]:
             (session_id,),
         ).fetchall()
     return {int(r[0]) for r in rows}
+
+
+def get_recent_messages_sync(customer_uid: int, count: int) -> list[dict]:
+    """服务端没有历史扩展时，从本地归档读取已采集的双方消息。"""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT e.message_id, e.time, e.actor_uid, e.payload "
+            "FROM session_events e JOIN sessions s ON s.id = e.session_id "
+            "WHERE s.customer_uid = ? AND e.message_id IS NOT NULL "
+            "AND e.event_type IN ('customer_message', 'staff_reply', 'bot_send') "
+            "ORDER BY e.time DESC, e.id DESC LIMIT ?",
+            (customer_uid, max(0, count)),
+        ).fetchall()
+    messages = []
+    for message_id, timestamp, actor_uid, payload in reversed(rows):
+        content = json.loads(payload)
+        messages.append({
+            "message_id": message_id,
+            "time": timestamp,
+            "sender": {"user_id": actor_uid, "nickname": content.get("n", "")},
+            "message": content.get("msg", []),
+        })
+    return messages
+
+
+async def get_recent_messages(customer_uid: int, count: int) -> list[dict]:
+    return await asyncio.to_thread(get_recent_messages_sync, customer_uid, count)
 
 
 def load_recent_durations_sync(limit: int) -> list[float]:

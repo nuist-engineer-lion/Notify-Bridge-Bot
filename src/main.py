@@ -79,29 +79,10 @@ def is_reboot_requested() -> bool:
     return _reboot_requested
 
 
-async def _close_napcat_client() -> None:
-    """尽量优雅关闭 NapCat WebSocket；失败不抛出。"""
-    client = cfg.client
-    conn = getattr(client, "_conn", None)
-    if conn is not None:
-        close = getattr(conn, "close", None)
-        if close is not None:
-            try:
-                await close()
-                log.info("NapCat WebSocket 连接已关闭")
-                return
-            except Exception as e:
-                log.warning("connection.close() 失败: %s", e)
-
-    # 回退：按引用计数退出客户端上下文
-    try:
-        refs = int(getattr(client, "_context_refs", 0) or 0)
-        for _ in range(max(refs, 0)):
-            await client.__aexit__(None, None, None)
-        if refs > 0:
-            log.info("NapCat 客户端上下文已退出")
-    except Exception as e:
-        log.warning("client.__aexit__ 失败: %s", e)
+async def _close_onebot_client() -> None:
+    """通过客户端公开接口停止适配器及其 WebSocket 连接。"""
+    await cfg.client.close()
+    log.info("OneBot WebSocket 连接已关闭")
 
 
 async def graceful_shutdown(reason: str = "signal") -> None:
@@ -141,9 +122,9 @@ async def graceful_shutdown(reason: str = "signal") -> None:
                 log.debug("后台任务结束时异常: %s", exc)
 
     try:
-        await _close_napcat_client()
+        await _close_onebot_client()
     except Exception as e:
-        log.warning("关闭 NapCat 客户端时出错: %s", e)
+        log.warning("关闭 OneBot 客户端时出错: %s", e)
 
     try:
         save_state()

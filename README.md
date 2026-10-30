@@ -1,6 +1,6 @@
 # Notify-Bridge-Bot
 
-一个基于 [`napcat-sdk`](https://github.com/faithleysath/napcat-sdk) 的 QQ 私聊客服催回复机器人。
+一个通过 OneBot v11 正向 WebSocket 接入的 QQ 私聊客服催回复机器人。连接、重连与 API 通信使用 NoneBot2 官方 OneBot 适配器；现有消息类型和业务 API 方法复用 `napcat-sdk`。
 
 主要功能：客户发来私聊消息后，如果客服迟迟没有回复，机器人就把消息整理后推送到内部群里提醒；如果超时更久，再按里程碑继续催办；客服处理完成后，再自动结束监控并存档会话。
 
@@ -166,7 +166,7 @@ bot 启动后会在同一进程读取终端 stdin。控制台内 `quit` / `exit`
 停止 bot 也可使用终端 `Ctrl+C`（或向进程发送 `SIGTERM`）。触发后会执行**优雅关停**：
 
 1. 停止接收新事件，取消后台任务（巡检 / 控制台 / 通知 ack 冲刷）
-2. 关闭 NapCat WebSocket 连接
+2. 关闭 OneBot WebSocket 连接
 3. 最后一次将运行状态写入 `state_file`
 4. 进程退出
 
@@ -190,7 +190,7 @@ bot 启动后会在同一进程读取终端 stdin。控制台内 `quit` / `exit`
 
 | 配置项 | 说明 |
 |--------|------|
-| `ws_url` / `ws_token` | NapCat WebSocket 地址与令牌 |
+| `ws_url` / `ws_token` | OneBot v11 正向 WebSocket 地址与访问令牌 |
 | `internal_group_id` | 接收提醒、执行命令、查看状态的内部群号 |
 | `whitelist` | 不参与待回复监控的 QQ 号 |
 | `milestones` | 超时催办节点，单位为分钟 |
@@ -214,8 +214,26 @@ bot 启动后会在同一进程读取终端 stdin。控制台内 `quit` / `exit`
 ## 运行要求
 
 - Python `3.14+`
-- 可用的 NapCat / OneBot WebSocket 服务
+- 可用的 OneBot v11 正向 WebSocket 服务（如 NapCat、SnowLuma）
 - 一个用于接收提醒和执行命令的内部 QQ 群
+
+## OneBot v11 接入与扩展功能
+
+机器人主动连接 `ws_url`，需要服务端提供同时支持事件上报和 API 调用的正向 WS 接口（通常称为 `Universal`）；本项目不监听反向 WS 连接。服务端应在连接建立时发送 OneBot v11 的 `meta_event.lifecycle.connect` 事件。`ws_token` 会作为 `Authorization: Bearer ...` 发送。
+
+消息上报同时支持数组和 CQ 字符串格式，不要求提供 NapCat 的 `message_seq`、`real_id` 等扩展字段。原有 NapCat 配置可继续使用，业务命令不变。SnowLuma 的表情回应 `sub_type: add/remove` 会转换成现有业务处理需要的添加/移除标志。
+
+SnowLuma 配置建议：在 `wsServers` 中启用服务，选择 `role: Universal`，`messageFormat: array`，并打开 `reportSelfMessage: true`。本项目的 `ws_url` 对应服务地址，`ws_token` 对应 `accessToken`。客服直接在 QQ 回复后自动结束会话，依赖协议端上报 `message_sent`，且事件必须能识别私聊对象；纯标准协议未提供这项扩展时，请使用群内 `.say` / `.bye` / `.close` 处理会话。
+
+以下能力属于扩展 API。服务端明确返回 OneBot 的“不支持 action”错误（`retcode: 1404`）后，机器人会缓存结果并降级；重连后重新探测。权限错误、参数错误和网络故障仍按原来的失败路径处理。
+
+| 扩展 API | 支持时 | 不支持时 |
+|----------|--------|----------|
+| `get_friend_msg_history` | 从服务端拉取双方历史，用于提醒、`.more`、AI 建议和会话对账 | 读取已归档与本次运行已采集的消息；无法补回机器人离线期间的消息，不再进行远端补漏对账 |
+| `send_group_forward_msg` | 保留现有嵌套合并转发 | 将内容整理成普通群文本提醒，长文本分段发送，媒体用类型占位；多段提醒请引用最后一段执行命令 |
+| `set_msg_emoji_like` | 自动贴上或移除操作表情 | 跳过贴表情，继续使用群内文字命令；表情点击操作仍依赖协议端提供对应事件 |
+
+首次使用新服务端前，请确认机器人能收取私聊消息、向内部群发送提醒，以及通过 `.say <QQ> ...` 回复。真实服务端的媒体、历史消息和表情功能取决于具体实现。
 
 ## 安装
 

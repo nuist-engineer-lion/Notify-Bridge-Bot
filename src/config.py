@@ -11,10 +11,10 @@ from typing import Any
 
 import yaml
 
-from napcat import NapCatClient
 from napcat.types import Text, Image, Face, At, Poke
 
 from .models import CustomerData, ForwardMonitorData, DelayedNotification, RecallableSendData
+from .onebot import OneBotClient
 
 # ================= 日志配置 =================
 logging.basicConfig(
@@ -355,7 +355,12 @@ mute_until: float = 0.0
 
 _apply_config(load_config(CONFIG_PATH), initial=True)
 
-client: NapCatClient = NapCatClient(WS_URL, WS_TOKEN)
+async def _local_history(user_id: int, count: int) -> list[dict]:
+    from .storage import get_recent_messages
+    return await get_recent_messages(user_id, count)
+
+
+client: OneBotClient = OneBotClient(WS_URL, WS_TOKEN, history_provider=_local_history)
 _config_mtime = _get_config_mtime(CONFIG_PATH)
 _failed_config_mtime: float | None = None
 

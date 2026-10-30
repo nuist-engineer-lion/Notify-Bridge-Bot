@@ -1,4 +1,5 @@
-# WebSocket 连接配置（修改后需重启生效）
+# OneBot v11 正向 WebSocket（事件 + API / Universal，修改后需重启生效）
+# ws_token 对应服务端 accessToken；SnowLuma 请开启 reportSelfMessage 以监听客服直接回复
 ws_url: "ws://127.0.0.1:3001"
 ws_token: "your_ws_token"
 

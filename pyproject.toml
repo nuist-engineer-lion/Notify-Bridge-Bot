@@ -9,4 +9,6 @@ dependencies = [
     "pyyaml>=6.0.3",
     "aiohttp>=3.13.3",
     "pyjwt[crypto]>=2.10.1",
+    "nonebot2>=2.5.0,<3",
+    "nonebot-adapter-onebot>=2.4.6,<3",
 ]
