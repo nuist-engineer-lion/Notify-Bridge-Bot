@@ -9,7 +9,10 @@ $ErrorActionPreference = "Stop"
 # project-local .tools\bin, never system paths; config-encrypt.ps1 and
 # apply-encrypted-config.ps1 pick it up automatically.
 
-$ProgressPreference = "SilentlyContinue"
+# Keep Invoke-WebRequest's download progress visible in interactive installs.
+# This is especially useful for the Windows binary, which is large enough that
+# a silent download looks like a hung installer.
+$ProgressPreference = "Continue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
@@ -35,7 +38,9 @@ if (Test-Path $target) {
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "sops-install-$PID"
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 try {
+  Write-Host "downloading $asset"
   Invoke-WebRequest -UseBasicParsing -Uri "$base/$asset" -OutFile (Join-Path $tmp "sops.exe")
+  Write-Host "downloading checksums.txt"
   Invoke-WebRequest -UseBasicParsing -Uri "$base/sops-$Version.checksums.txt" -OutFile (Join-Path $tmp "checksums.txt")
 
   # checksums.txt is sha256sum-formatted; match the exact asset name so

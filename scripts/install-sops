@@ -47,8 +47,10 @@ tmp="$(mktemp -d)"
 cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT
 
-curl -fsSL -o "$tmp/$ASSET" "${BASE}/${ASSET}"
-curl -fsSL -o "$tmp/checksums.txt" "${BASE}/sops-${SOPS_VERSION}.checksums.txt"
+echo "downloading ${ASSET}"
+curl -fL --progress-bar -o "$tmp/$ASSET" "${BASE}/${ASSET}"
+echo "downloading checksums.txt"
+curl -fL --progress-bar -o "$tmp/checksums.txt" "${BASE}/sops-${SOPS_VERSION}.checksums.txt"
 
 # checksums.txt is sha256sum-formatted; anchor on the exact asset name so
 # similarly prefixed artifacts (e.g. *.spdx.sbom.json) cannot match. The
