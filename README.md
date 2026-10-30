@@ -1,6 +1,6 @@
 # Notify-Bridge-Bot
 
-一个通过 OneBot v11 正向 WebSocket 接入的 QQ 私聊客服催回复机器人。连接、重连与 API 通信使用 NoneBot2 官方 OneBot 适配器；现有消息类型和业务 API 方法复用 `napcat-sdk`。
+一个通过 OneBot v11 正向 WebSocket 接入的 QQ 私聊客服催回复机器人。连接、重连、消息类型、标准事件与 API 通信使用 NoneBot2 官方 OneBot 适配器。
 
 主要功能：客户发来私聊消息后，如果客服迟迟没有回复，机器人就把消息整理后推送到内部群里提醒；如果超时更久，再按里程碑继续催办；客服处理完成后，再自动结束监控并存档会话。
 
@@ -359,12 +359,6 @@ uv run python scripts/import_jsonl.py             # 导入
 
 `archive_retention_days`（默认 `0` = 永久保留）设置保留天数后，巡检任务每小时清理超期的已完结会话。
 
-## AI 开发指引
-
-如果你使用 Claude Code、Codex 或其他编码代理来修改这个项目，建议先阅读 `napcat-sdk` 的专用说明：
-
-- [`use-napcat-sdk/SKILL.md`](https://raw.githubusercontent.com/faithleysath/napcat-sdk/refs/heads/main/skills/use-napcat-sdk/SKILL.md)
-
 ## 已知限制
 
 - 可操作消息的监听依赖 `monitored_forward_limit` 和 `max_listen_age`；超出窗口后再引用旧消息，机器人可能返回“操作已过期”。
@@ -405,7 +399,7 @@ uv run python scripts/import_jsonl.py             # 导入
 各模块职责：
 
 - `src/main.py`：程序入口逻辑、事件分发、启动通知、重连、优雅关停（信号→取消任务→关连接→落盘状态）
-- `src/config.py`：配置加载、全局状态初始化、NapCat 客户端实例
+- `src/config.py`：配置加载、全局状态初始化、OneBot 客户端实例
 - `src/private_msg.py`：处理客户私聊消息、客服私聊回复、私聊戳一戳
 - `src/new_user.py`：好友申请自动通过、欢迎消息发送、好友数提醒
 - `src/group_msg.py`：群命令、群表情快捷操作、群戳一戳状态面板

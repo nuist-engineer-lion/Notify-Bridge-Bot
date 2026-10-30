@@ -1,14 +1,10 @@
 import time
 import asyncio
 
-from napcat import (
-    GroupMsgEmojiLikeEvent,
-    GroupMessageEvent,
-    GroupPokeEvent,
-    Reply,
-    Text,
-    Message,
-)
+from nonebot.adapters.onebot.v11 import MessageSegment
+from nonebot.adapters.onebot.v11.event import PokeNotifyEvent
+
+from .onebot import GroupMsgEmojiLikeEvent, GroupMessageEvent
 
 from . import config as cfg
 from .config import log
@@ -90,17 +86,17 @@ def split_session_op(cmd_text: str) -> tuple[str, str] | None:
     return None
 
 
-def extract_say_target_segments(message: list[Message]) -> tuple[str | None, list[Message]]:
+def extract_say_target_segments(message: list[MessageSegment]) -> tuple[str | None, list[MessageSegment]]:
     """无 Reply 时解析 .say <qq|all> [内容…]：返回 (目标 token, 可发送消息段)。"""
     target: str | None = None
-    segments: list[Message] = []
+    segments: list[MessageSegment] = []
     first_text_done = False
     for seg in message:
-        if isinstance(seg, Reply):
+        if seg.type == "reply":
             continue
-        if isinstance(seg, Text) and not first_text_done:
+        if seg.type == "text" and not first_text_done:
             first_text_done = True
-            text = seg.text.strip()
+            text = seg.data["text"].strip()
             if not text.startswith(".say"):
                 continue
             rest = text[len(".say"):].strip()
@@ -109,13 +105,13 @@ def extract_say_target_segments(message: list[Message]) -> tuple[str | None, lis
                 return None, []
             target = parts[0]
             if len(parts) > 1 and parts[1].strip():
-                segments.append(Text(text=parts[1]))
+                segments.append(MessageSegment.text(parts[1]))
         else:
             segments.append(seg)
     return target, segments
 
 
-def extract_say_qq_segments(message: list[Message]) -> tuple[int | None, list[Message]]:
+def extract_say_qq_segments(message: list[MessageSegment]) -> tuple[int | None, list[MessageSegment]]:
     """兼容旧语义：仅接受数字 QQ；all/非法返回 (None, [])。"""
     target, segments = extract_say_target_segments(message)
     if target is None:
@@ -135,20 +131,20 @@ def format_batch_result(op_label: str, ok: int, failed: list[int]) -> str:
     return f"{op_label} 完成：成功 {ok}，失败 {len(failed)}{suffix}"
 
 
-def extract_say_plain_content(message: list[Message]) -> list[Message]:
+def extract_say_plain_content(message: list[MessageSegment]) -> list[MessageSegment]:
     """无目标参数时：.say 后全部内容作为正文（自动匹配客户用）。"""
-    segments: list[Message] = []
+    segments: list[MessageSegment] = []
     first_text_done = False
     for seg in message:
-        if isinstance(seg, Reply):
+        if seg.type == "reply":
             continue
-        if isinstance(seg, Text) and not first_text_done:
+        if seg.type == "text" and not first_text_done:
             first_text_done = True
-            text = seg.text.strip()
+            text = seg.data["text"].strip()
             if text.startswith(".say"):
                 rest = text[len(".say"):].strip()
                 if rest:
-                    segments.append(Text(text=rest))
+                    segments.append(MessageSegment.text(rest))
             else:
                 segments.append(seg)
         else:
@@ -170,7 +166,7 @@ async def apply_session_op_to_customers(
     operator_uid: int | None,
     via: str,
     reply_id: int | None = None,
-    segments: list[Message] | None = None,
+    segments: list[MessageSegment] | None = None,
 ) -> tuple[int, list[int]]:
     """对一组客户执行 say/bye/close（不含 more）。返回 (成功数, 失败 QQ 列表)。"""
     ok = 0
@@ -208,7 +204,7 @@ async def apply_session_op_to_customers(
 
 async def send_private_and_close(
     customer_id: int,
-    segments: list[Message],
+    segments: list[MessageSegment],
     *,
     operator_uid: int | None,
     via: str,
@@ -219,7 +215,8 @@ async def send_private_and_close(
     """私聊发送并关闭待回复会话（终端 say / 群 .say <qq> 共用）。返回 (feedback, closed, msg_id)。"""
     customer_msg_id: int | None = None
     try:
-        send_resp = await cfg.client.send_private_msg(
+        send_resp = await cfg.client.call_api(
+            "send_private_msg",
             user_id=str(customer_id),
             message=segments,
         )
@@ -251,9 +248,10 @@ async def send_say_feedback(
     feedback: str, customer_msg_id: int | None,
 ) -> None:
     """各类 .say 共用反馈、监听和限时撤回登记。"""
-    resp = await cfg.client.send_group_msg(
+    resp = await cfg.client.call_api(
+        "send_group_msg",
         group_id=str(gid),
-        message=[Reply(id=str(reply_id)), Text(text=feedback)],
+        message=[MessageSegment.reply(str(reply_id)), MessageSegment.text(feedback)],
     )
     feedback_msg_id = resp.get("message_id")
     if feedback_msg_id:
@@ -273,7 +271,7 @@ async def get_nicknames_batch(user_ids: list[int], delay: float = 0.2) -> dict[i
     nicknames: dict[int, str] = {}
     for uid in user_ids:
         try:
-            info = await cfg.client.get_stranger_info(user_id=str(uid))
+            info = await cfg.client.call_api("get_stranger_info", user_id=str(uid))
             nickname = info.get("nickname", "未知昵称")
             nicknames[uid] = str(nickname)
         except Exception as e:
@@ -285,19 +283,19 @@ async def get_nicknames_batch(user_ids: list[int], delay: float = 0.2) -> dict[i
 
 # ======================= 命令处理辅助 =======================
 
-def extract_sendable_segments(message: list[Message], strip_prefix: str | None = None) -> list[Message]:
+def extract_sendable_segments(message: list[MessageSegment], strip_prefix: str | None = None) -> list[MessageSegment]:
     """从群消息中提取可私聊发送的消息段（去掉 Reply），可选去掉首个 Text 段的命令前缀。"""
-    segments: list[Message] = []
+    segments: list[MessageSegment] = []
     for seg in message:
-        if isinstance(seg, Reply):
+        if seg.type == "reply":
             continue
-        if isinstance(seg, Text) and strip_prefix:
-            text = seg.text
+        if seg.type == "text" and strip_prefix:
+            text = seg.data["text"]
             if text.startswith(strip_prefix):
                 text = text[len(strip_prefix):]
                 if not text:
                     continue
-            segments.append(Text(text=text))
+            segments.append(MessageSegment.text(text))
         else:
             segments.append(seg)
     return segments
@@ -313,7 +311,7 @@ async def resolve_target_from_reply(reply_id: int) -> tuple[list[int] | None, st
         return data["customer_ids"], None
 
     try:
-        msg_detail = await cfg.client.get_msg(message_id=str(reply_id))
+        msg_detail = await cfg.client.call_api("get_msg", message_id=str(reply_id))
         sender_id = int(msg_detail.get("user_id", 0))
         self_id = int(cfg.client.self_id)
         if sender_id == self_id:
@@ -338,7 +336,8 @@ async def handle_bye_command(
             customer_id, operator_uid, "bye",
             reply_id=reply_id, group_id=gid, via=via,
         )
-        resp = await cfg.client.send_private_msg(
+        resp = await cfg.client.call_api(
+            "send_private_msg",
             user_id=str(customer_id),
             message=cfg.CLOSING_MESSAGE,
         )
@@ -389,7 +388,8 @@ async def handle_more_command(
             customer_id, operator_uid, "more",
             reply_id=reply_id, group_id=gid, via=via,
         )
-        resp = await cfg.client.get_friend_msg_history(
+        resp = await cfg.client.call_api(
+            "get_friend_msg_history",
             user_id=str(customer_id),
             count=100,
             parse_mult_msg=True,
@@ -429,23 +429,25 @@ async def handle_recall_click(gid: int, mid: int, user_id: int) -> bool:
     elapsed = time.time() - data["sent_at"]
     if elapsed > cfg.RECALL_WINDOW_SECONDS:
         log.info("撤回请求已超时: feedback_msg=%d, 耗时 %.1f 秒, 点击者=%d", mid, elapsed, user_id)
-        await cfg.client.send_group_msg(
+        await cfg.client.call_api(
+            "send_group_msg",
             group_id=str(gid),
-            message=[Reply(id=str(mid)), Text(text=f"⏰ 已超过 {cfg.RECALL_WINDOW_SECONDS} 秒，无法撤回该消息。")],
+            message=[MessageSegment.reply(str(mid)), MessageSegment.text(f"⏰ 已超过 {cfg.RECALL_WINDOW_SECONDS} 秒，无法撤回该消息。")],
         )
         return True
 
     try:
-        await cfg.client.delete_msg(message_id=str(data["customer_msg_id"]))
+        await cfg.client.call_api("delete_msg", message_id=str(data["customer_msg_id"]))
     except Exception as e:
         log.error("撤回私聊消息失败: customer=%s, msg_id=%s, err=%s",
                   customer_id, data["customer_msg_id"], e, exc_info=True)
         # 仍在时限内则恢复记录，允许重试
         if time.time() - data["sent_at"] <= cfg.RECALL_WINDOW_SECONDS:
             cfg.recallable_sends[mid] = data
-        await cfg.client.send_group_msg(
+        await cfg.client.call_api(
+            "send_group_msg",
             group_id=str(gid),
-            message=[Reply(id=str(mid)), Text(text="❌ 撤回失败，请稍后重试。")],
+            message=[MessageSegment.reply(str(mid)), MessageSegment.text("❌ 撤回失败，请稍后重试。")],
         )
         return True
 
@@ -462,9 +464,10 @@ async def handle_recall_click(gid: int, mid: int, user_id: int) -> bool:
         )
     except Exception as e:
         log.error("记录撤回事件失败: customer=%s, err=%s", customer_id, e)
-    await cfg.client.send_group_msg(
+    await cfg.client.call_api(
+        "send_group_msg",
         group_id=str(gid),
-        message=[Reply(id=str(mid)), Text(text=f"🧹 已撤回发送给客户 {customer_id} 的消息。")],
+        message=[MessageSegment.reply(str(mid)), MessageSegment.text(f"🧹 已撤回发送给客户 {customer_id} 的消息。")],
     )
     return True
 
@@ -479,25 +482,12 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
     if gid != cfg.INTERNAL_GROUP_ID or event.user_id == cfg.client.self_id:
         return False
 
-    # 动态提取表情 ID
-    eid = None
+    if not event.is_add or not event.likes:
+        return True
+    first = event.likes[0]
     try:
-        likes = getattr(event, 'likes', [])
-        if likes and len(likes) > 0:
-            first = likes[0]
-            for field in ('emoji_id', 'face_id', 'id'):
-                if hasattr(first, field):
-                    eid = getattr(first, field, None)
-                    break
-            if eid is None and isinstance(first, dict):
-                eid = first.get('emoji_id') or first.get('face_id') or first.get('id')
-            if eid is not None:
-                eid = int(eid)
-    except Exception:
-        pass
-
-    is_add = bool(getattr(event, 'is_add', True))
-    if eid is None or not is_add:
+        eid = int(first.get("emoji_id") or first.get("face_id") or first.get("id"))
+    except (TypeError, ValueError):
         return True
 
     # 检查是否点击了 .say 通报消息上的撤回表情
@@ -512,9 +502,10 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
         cmd = cfg.EMOJI_TO_CMD.get(eid)
         if cmd == "cancel":
             pop_pending_say(event.user_id)
-            await cfg.client.send_group_msg(
+            await cfg.client.call_api(
+                "send_group_msg",
                 group_id=str(gid),
-                message=[Reply(id=str(mid)), Text(text="❌ 已取消发送。")],
+                message=[MessageSegment.reply(str(mid)), MessageSegment.text("❌ 已取消发送。")],
             )
         return True
 
@@ -531,9 +522,10 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
     if not customer_ids:
         return True
     if cmd == "more" and len(customer_ids) != 1:
-        await cfg.client.send_group_msg(
+        await cfg.client.call_api(
+            "send_group_msg",
             group_id=str(gid),
-            message=[Reply(id=str(mid)), Text(text="暂不支持：该合并转发包含多个客户，more 请手动处理单客户。")],
+            message=[MessageSegment.reply(str(mid)), MessageSegment.text("暂不支持：该合并转发包含多个客户，more 请手动处理单客户。")],
         )
         return True
     if cmd == "more":
@@ -555,9 +547,10 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
     targets = customer_ids
     try:
         if cmd == "say":
-            resp = await cfg.client.send_group_msg(
+            resp = await cfg.client.call_api(
+                "send_group_msg",
                 group_id=str(gid),
-                message=[Reply(id=str(mid)), Text(text="📝 请发送要回复给客户的消息内容：")],
+                message=[MessageSegment.reply(str(mid)), MessageSegment.text("📝 请发送要回复给客户的消息内容：")],
             )
             prompt_msg_id = resp.get("message_id")
             register_pending_say(event.user_id, {
@@ -581,9 +574,10 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
                     hint = f"（将发送给合并转发中的 {len(targets)} 名客户）"
                 await add_emoji_to_message(prompt_msg_id, [cfg.EMOJI_MAPPING["cancel"]])
                 if hint:
-                    await cfg.client.send_group_msg(
+                    await cfg.client.call_api(
+                        "send_group_msg",
                         group_id=str(gid),
-                        message=[Reply(id=str(prompt_msg_id)), Text(text=hint)],
+                        message=[MessageSegment.reply(str(prompt_msg_id)), MessageSegment.text(hint)],
                     )
         elif cmd in ("close", "bye"):
             op_name = cmd
@@ -607,16 +601,17 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
                     reply_id=mid,
                 )
                 summary = format_batch_result(f"emoji {label} all", ok, failed)
-                await cfg.client.send_group_msg(
+                await cfg.client.call_api(
+                    "send_group_msg",
                     group_id=str(gid),
-                    message=[Reply(id=str(mid)), Text(text=summary)],
+                    message=[MessageSegment.reply(str(mid)), MessageSegment.text(summary)],
                 )
     except Exception:
         pass
     return True
 
 
-async def handle_group_poke(event: GroupPokeEvent) -> bool:
+async def handle_group_poke(event: PokeNotifyEvent) -> bool:
     """处理内部群戳一戳：发送状态面板"""
     if event.group_id == cfg.INTERNAL_GROUP_ID and event.target_id == cfg.client.self_id:
         log.info("内部群戳一戳触发状态面板: group=%d", event.group_id)
@@ -642,9 +637,10 @@ async def handle_session_command_by_qq(
     op_name = op.lstrip(".")
 
     async def _reply(text: str) -> None:
-        await cfg.client.send_group_msg(
+        await cfg.client.call_api(
+            "send_group_msg",
             group_id=str(gid),
-            message=[Reply(id=str(msg_id)), Text(text=text)],
+            message=[MessageSegment.reply(str(msg_id)), MessageSegment.text(text)],
         )
 
     rest_parts = rest.split()
@@ -690,7 +686,7 @@ async def handle_session_command_by_qq(
     # ---- 目标解析：显式 QQ / all 已处理；否则无参自动匹配 ----
     auto_qq = sole_unreplied_customer()
     queue_len = len(cfg.unreplied_customers)
-    say_segments: list[Message] | None = None
+    say_segments: list[MessageSegment] | None = None
     qq: int | None = None
 
     if op == ".say":
@@ -733,9 +729,10 @@ async def handle_session_command_by_qq(
 
     if op == ".say":
         if not say_segments:
-            resp = await cfg.client.send_group_msg(
+            resp = await cfg.client.call_api(
+                "send_group_msg",
                 group_id=str(gid),
-                message=[Reply(id=str(msg_id)), Text(text="📝 请发送要回复给客户的消息内容：")],
+                message=[MessageSegment.reply(str(msg_id)), MessageSegment.text("📝 请发送要回复给客户的消息内容：")],
             )
             prompt_msg_id = resp.get("message_id")
             register_pending_say(event.user_id, {
@@ -806,10 +803,10 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
     reply_id = None
     cmd_parts: list[str] = []
     for seg in event.message:
-        if isinstance(seg, Reply) and seg.id is not None:
-            reply_id = int(seg.id)
-        elif isinstance(seg, Text):
-            cmd_parts.append(seg.text)
+        if seg.type == "reply" and seg.data.get("id") is not None:
+            reply_id = int(seg.data.get("id"))
+        elif seg.type == "text":
+            cmd_parts.append(seg.data["text"])
 
     cmd_text = ''.join(cmd_parts).strip()
     log.debug("群命令: reply_id=%s, cmd=%s", reply_id, cmd_text)
@@ -821,9 +818,10 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
     if event.user_id in cfg.pending_say and not any(cmd_text.startswith(prefix) for prefix in OPS_COMMAND_PREFIXES):
         segments = extract_sendable_segments(event.message)
         if not segments:
-            await cfg.client.send_group_msg(
+            await cfg.client.call_api(
+                "send_group_msg",
                 group_id=str(gid),
-                message=[Reply(id=str(msg_id)), Text(text="⚠️ 消息内容为空，已忽略。")],
+                message=[MessageSegment.reply(str(msg_id)), MessageSegment.text("⚠️ 消息内容为空，已忽略。")],
             )
             return True
 
@@ -863,9 +861,10 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         if ok:
             cfg.last_command_time[debounce_key] = time.time()
         summary = format_batch_result("say", ok, failed)
-        await cfg.client.send_group_msg(
+        await cfg.client.call_api(
+            "send_group_msg",
             group_id=str(gid),
-            message=[Reply(id=str(msg_id)), Text(text=summary)],
+            message=[MessageSegment.reply(str(msg_id)), MessageSegment.text(summary)],
         )
         return True
 
@@ -893,9 +892,10 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             "说明：all = 当前待回复队列；.say all 必须带内容；群内不允许 .more all。\n"
             "表情：多客户合并转发上 say/bye/close 作用域为该消息内全部客户；more 仅单客户。"
         )
-        await cfg.client.send_group_msg(
+        await cfg.client.call_api(
+            "send_group_msg",
             group_id=str(gid),
-            message=[Text(text=help_text)],
+            message=[MessageSegment.text(help_text)],
         )
         return True
 
@@ -909,18 +909,20 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         debounce_sec = cfg.DEBOUNCE_SECONDS.get("unmute", cfg.DEBOUNCE_SECONDS.get("close", 5))
         last_time = cfg.last_command_time.get(key, 0.0)
         if now_ts - last_time < debounce_sec:
-            await cfg.client.send_group_msg(
+            await cfg.client.call_api(
+                "send_group_msg",
                 group_id=str(gid),
-                message=[Reply(id=str(msg_id)), Text(text=f"⏳ 操作过于频繁，请 {debounce_sec:.0f} 秒后重试。")],
+                message=[MessageSegment.reply(str(msg_id)), MessageSegment.text(f"⏳ 操作过于频繁，请 {debounce_sec:.0f} 秒后重试。")],
             )
             return True
         cfg.last_command_time[key] = now_ts
 
         # 与终端 unmute 共用同一套业务逻辑
         _was, _flushed, text = await mute.unmute_and_flush()
-        await cfg.client.send_group_msg(
+        await cfg.client.call_api(
+            "send_group_msg",
             group_id=str(gid),
-            message=[Reply(id=str(msg_id)), Text(text="✅ " + text)],
+            message=[MessageSegment.reply(str(msg_id)), MessageSegment.text("✅ " + text)],
         )
         return True
 
@@ -930,9 +932,10 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         debounce_sec = cfg.DEBOUNCE_SECONDS.get("mute", cfg.DEBOUNCE_SECONDS.get("close", 5))
         last_time = cfg.last_command_time.get(key, 0.0)
         if now_ts - last_time < debounce_sec:
-            await cfg.client.send_group_msg(
+            await cfg.client.call_api(
+                "send_group_msg",
                 group_id=str(gid),
-                message=[Reply(id=str(msg_id)), Text(text=f"⏳ 操作过于频繁，请 {debounce_sec:.0f} 秒后重试。")],
+                message=[MessageSegment.reply(str(msg_id)), MessageSegment.text(f"⏳ 操作过于频繁，请 {debounce_sec:.0f} 秒后重试。")],
             )
             return True
         cfg.last_command_time[key] = now_ts
@@ -944,15 +947,17 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             try:
                 minutes = float(arg)
             except ValueError:
-                await cfg.client.send_group_msg(
+                await cfg.client.call_api(
+                    "send_group_msg",
                     group_id=str(gid),
-                    message=[Reply(id=str(msg_id)), Text(text=f"❌ 无效时长：{arg}，示例：.mute 30；直接发送 .mute 表示不限时")],
+                    message=[MessageSegment.reply(str(msg_id)), MessageSegment.text(f"❌ 无效时长：{arg}，示例：.mute 30；直接发送 .mute 表示不限时")],
                 )
                 return True
             if minutes <= 0:
-                await cfg.client.send_group_msg(
+                await cfg.client.call_api(
+                    "send_group_msg",
                     group_id=str(gid),
-                    message=[Reply(id=str(msg_id)), Text(text="❌ 静音时长必须大于 0 分钟；不限时请直接发送 .mute")],
+                    message=[MessageSegment.reply(str(msg_id)), MessageSegment.text("❌ 静音时长必须大于 0 分钟；不限时请直接发送 .mute")],
                 )
                 return True
 
@@ -968,9 +973,10 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
                 f"🔕 已开启临时静音 {minutes:g} 分钟（至 {until_str}）。\n"
                 "期间新客户提醒与里程碑催办将暂存；解除静音或到期后汇总发出。"
             )
-        await cfg.client.send_group_msg(
+        await cfg.client.call_api(
+            "send_group_msg",
             group_id=str(gid),
-            message=[Reply(id=str(msg_id)), Text(text=text)],
+            message=[MessageSegment.reply(str(msg_id)), MessageSegment.text(text)],
         )
         return True
 
@@ -980,19 +986,21 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         debounce_list = cfg.DEBOUNCE_SECONDS.get("list", 5)
         last_time = cfg.last_command_time.get(key, 0.0)
         if now - last_time < debounce_list:
-            await cfg.client.send_group_msg(
+            await cfg.client.call_api(
+                "send_group_msg",
                 group_id=str(gid),
                 message=[
-                    Reply(id=str(msg_id)),
-                    Text(text=f"⏳ 操作过于频繁，请 {debounce_list:.0f} 秒后重试。")
+                    MessageSegment.reply(str(msg_id)),
+                    MessageSegment.text(f"⏳ 操作过于频繁，请 {debounce_list:.0f} 秒后重试。")
                 ],
             )
             return True
 
         if not cfg.unreplied_customers:
-            await cfg.client.send_group_msg(
+            await cfg.client.call_api(
+                "send_group_msg",
                 group_id=str(gid),
-                message=[Reply(id=str(msg_id)), Text(text="📭 当前没有待回复的客户。")],
+                message=[MessageSegment.reply(str(msg_id)), MessageSegment.text("📭 当前没有待回复的客户。")],
             )
             return True
 
@@ -1018,9 +1026,10 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             full_text = "\n".join(lines)
 
         try:
-            resp = await cfg.client.send_group_msg(
+            resp = await cfg.client.call_api(
+                "send_group_msg",
                 group_id=str(gid),
-                message=[Reply(id=str(msg_id)), Text(text=full_text)],
+                message=[MessageSegment.reply(str(msg_id)), MessageSegment.text(full_text)],
             )
             feedback_msg_id = resp.get("message_id")
             if feedback_msg_id:
@@ -1037,9 +1046,10 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             message = "❌ 用法：.reboot"
         else:
             message = app_main.reboot_block_reason() or "🔄 正在重启机器人…"
-        await cfg.client.send_group_msg(
+        await cfg.client.call_api(
+            "send_group_msg",
             group_id=str(gid),
-            message=[Reply(id=str(msg_id)), Text(text=message)],
+            message=[MessageSegment.reply(str(msg_id)), MessageSegment.text(message)],
         )
         if cmd_text == ".reboot" and not message.startswith("❌"):
             app_main.request_reboot(f"group:{gid}:user:{event.user_id}")
@@ -1056,16 +1066,18 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         log.info("%s: user=%s group=%s arg=%s", cmd_name, event.user_id, gid, arg)
         # .reload / .update 可不带参数；cfg 为兼容旧写法
         if arg not in ("", "cfg", "remote"):
-            await cfg.client.send_group_msg(
+            await cfg.client.call_api(
+                "send_group_msg",
                 group_id=str(gid),
-                message=[Reply(id=str(msg_id)), Text(text="❌ 用法：.reload [cfg|remote]")],
+                message=[MessageSegment.reply(str(msg_id)), MessageSegment.text("❌ 用法：.reload [cfg|remote]")],
             )
             return True
 
         _success, update_message = await cfg.run_reload_cfg(remote=(arg == "remote"))
-        await cfg.client.send_group_msg(
+        await cfg.client.call_api(
+            "send_group_msg",
             group_id=str(gid),
-            message=[Reply(id=str(msg_id)), Text(text=update_message)],
+            message=[MessageSegment.reply(str(msg_id)), MessageSegment.text(update_message)],
         )
         return True
 
@@ -1078,23 +1090,26 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
 
     customer_ids, err_msg = await resolve_target_from_reply(reply_id)
     if err_msg:
-        await cfg.client.send_group_msg(
+        await cfg.client.call_api(
+            "send_group_msg",
             group_id=str(gid),
-            message=[Reply(id=str(msg_id)), Text(text=err_msg)],
+            message=[MessageSegment.reply(str(msg_id)), MessageSegment.text(err_msg)],
         )
         return True
 
     if not customer_ids:
-        await cfg.client.send_group_msg(
+        await cfg.client.call_api(
+            "send_group_msg",
             group_id=str(gid),
-            message=[Reply(id=str(msg_id)), Text(text="无法确定要处理的客户，请使用命令指定客户 QQ。")],
+            message=[MessageSegment.reply(str(msg_id)), MessageSegment.text("无法确定要处理的客户，请使用命令指定客户 QQ。")],
         )
         return True
 
     if len(customer_ids) != 1:
-        await cfg.client.send_group_msg(
+        await cfg.client.call_api(
+            "send_group_msg",
             group_id=str(gid),
-            message=[Reply(id=str(msg_id)), Text(text="暂不支持：该合并转发包含多个客户，请手动处理。")],
+            message=[MessageSegment.reply(str(msg_id)), MessageSegment.text("暂不支持：该合并转发包含多个客户，请手动处理。")],
         )
         return True
 
@@ -1106,9 +1121,10 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         segments = extract_sendable_segments(event.message, strip_prefix=".say")
         if not segments:
             # 无内容：进入等待模式，收集用户后续消息
-            resp = await cfg.client.send_group_msg(
+            resp = await cfg.client.call_api(
+                "send_group_msg",
                 group_id=str(gid),
-                message=[Reply(id=str(msg_id)), Text(text="📝 请发送要回复给客户的消息内容：")],
+                message=[MessageSegment.reply(str(msg_id)), MessageSegment.text("📝 请发送要回复给客户的消息内容：")],
             )
             prompt_msg_id = resp.get("message_id")
             register_pending_say(event.user_id, {
@@ -1133,11 +1149,12 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         key = (reply_id, "say")
         last_time = cfg.last_command_time.get(key, 0)
         if now - last_time < cfg.DEBOUNCE_SECONDS["say"]:
-            await cfg.client.send_group_msg(
+            await cfg.client.call_api(
+                "send_group_msg",
                 group_id=str(gid),
                 message=[
-                    Reply(id=str(msg_id)),
-                    Text(text=f"⏳ 操作过于频繁，请 {cfg.DEBOUNCE_SECONDS['say']} 秒后重试。")
+                    MessageSegment.reply(str(msg_id)),
+                    MessageSegment.text(f"⏳ 操作过于频繁，请 {cfg.DEBOUNCE_SECONDS['say']} 秒后重试。")
                 ],
             )
             return True
@@ -1162,11 +1179,12 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         key = (reply_id, "bye")
         last_time = cfg.last_command_time.get(key, 0)
         if now - last_time < cfg.DEBOUNCE_SECONDS["bye"]:
-            await cfg.client.send_group_msg(
+            await cfg.client.call_api(
+                "send_group_msg",
                 group_id=str(gid),
                 message=[
-                    Reply(id=str(msg_id)),
-                    Text(text=f"⏳ 操作过于频繁，请 {cfg.DEBOUNCE_SECONDS['bye']} 秒后重试。")
+                    MessageSegment.reply(str(msg_id)),
+                    MessageSegment.text(f"⏳ 操作过于频繁，请 {cfg.DEBOUNCE_SECONDS['bye']} 秒后重试。")
                 ],
             )
             return True
@@ -1183,11 +1201,12 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         last_time = cfg.last_command_time.get(key, 0)
         debounce_sec = cfg.DEBOUNCE_SECONDS.get("close", 5)
         if now - last_time < debounce_sec:
-            await cfg.client.send_group_msg(
+            await cfg.client.call_api(
+                "send_group_msg",
                 group_id=str(gid),
                 message=[
-                    Reply(id=str(msg_id)),
-                    Text(text=f"⏳ 操作过于频繁，请 {debounce_sec} 秒后重试。")
+                    MessageSegment.reply(str(msg_id)),
+                    MessageSegment.text(f"⏳ 操作过于频繁，请 {debounce_sec} 秒后重试。")
                 ],
             )
             return True
@@ -1203,11 +1222,12 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         key = (reply_id, "more")
         last_time = cfg.last_command_time.get(key, 0)
         if now - last_time < cfg.DEBOUNCE_SECONDS["more"]:
-            await cfg.client.send_group_msg(
+            await cfg.client.call_api(
+                "send_group_msg",
                 group_id=str(gid),
                 message=[
-                    Reply(id=str(msg_id)),
-                    Text(text=f"⏳ 操作过于频繁，请 {cfg.DEBOUNCE_SECONDS['more']} 秒后重试。")
+                    MessageSegment.reply(str(msg_id)),
+                    MessageSegment.text(f"⏳ 操作过于频繁，请 {cfg.DEBOUNCE_SECONDS['more']} 秒后重试。")
                 ],
             )
             return True

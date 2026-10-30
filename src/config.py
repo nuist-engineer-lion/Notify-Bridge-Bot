@@ -11,7 +11,7 @@ from typing import Any
 
 import yaml
 
-from napcat.types import Text, Image, Face, At, Poke
+from nonebot.adapters.onebot.v11 import MessageSegment
 
 from .models import CustomerData, ForwardMonitorData, DelayedNotification, RecallableSendData
 from .onebot import OneBotClient
@@ -122,32 +122,20 @@ WHITELIST: list[int] = []
 MILESTONES: list[int] = []
 MONITORED_FORWARD_LIMIT = 0
 
-# ================= 结构化消息类型映射 =================
-SEGMENT_TYPE_MAP = {
-    "text": Text,
-    "image": Image,
-    "face": Face,
-    "at": At,
-    "poke": Poke,
-}
-
 
 def parse_message_config(raw):
-    """将配置中的消息值转换为 napcat SDK 可接受的格式。
+    """将配置中的消息值转换为 OneBot 消息格式。
 
     支持两种格式：
     - 字符串：直接返回字符串（去除末尾多余换行）
-    - 列表：每个元素为 {"type": "text", "data": {...}}，返回 napcat 消息段对象列表
+    - 列表：每个元素为 {"type": "text", "data": {...}}，返回消息段对象列表
     """
     if isinstance(raw, str):
         return raw.rstrip("\n")
     if isinstance(raw, list):
         segments = []
         for item in raw:
-            seg_type = item["type"]
-            seg_data = item.get("data", {})
-            cls = SEGMENT_TYPE_MAP[seg_type.lower()]
-            segments.append(cls(**seg_data))
+            segments.append(MessageSegment(item["type"].lower(), dict(item.get("data", {}))))
         return segments
     return raw
 

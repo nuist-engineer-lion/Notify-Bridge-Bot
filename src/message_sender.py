@@ -3,14 +3,7 @@ import asyncio
 import random
 import statistics
 
-from napcat import (
-    Message,
-    NodeInline,
-    NodeReference,
-    Text,
-    At,
-    Reply,
-)
+from nonebot.adapters.onebot.v11 import MessageSegment
 
 from . import config as cfg
 from . import ai
@@ -27,13 +20,6 @@ from .utils import format_duration, get_current_available_members
 from .state import save_state
 from . import history
 from . import mute
-
-
-# ======================= 消息序列化 =======================
-
-def serialize_message_segments(segments: list[Message]) -> list[dict]:
-    """将 SDK 消息段序列化为 NodeInline 所需的原始 OB11 结构。"""
-    return [dict(segment) for segment in segments]
 
 
 # ======================= 历史消息获取 =======================
@@ -54,7 +40,8 @@ async def get_recent_message_ids(
     if max_age_seconds is None:
         max_age_seconds = cfg.RECENT_MESSAGE_MAX_AGE
     try:
-        resp = await client.get_friend_msg_history(
+        resp = await client.call_api(
+            "get_friend_msg_history",
             user_id=str(user_id),
             count=count,
             parse_mult_msg=True,
@@ -136,7 +123,7 @@ def _forward_segments(content) -> list[dict]:
 async def build_forward_history_nodes(
     message_ids: list[int],
     messages_by_id: dict[str, dict] | None = None,
-) -> list[Message]:
+) -> list[MessageSegment]:
     """引用消息展开为快照，避免跨会话转发后 Reply 失去上下文。"""
     cache: dict[str, dict | None] = dict(messages_by_id or {})
 
@@ -156,7 +143,7 @@ async def build_forward_history_nodes(
     async def load(message_id: str) -> dict | None:
         if message_id not in cache:
             try:
-                detail = await client.get_msg(message_id=message_id)
+                detail = await client.call_api("get_msg", message_id=message_id)
                 cache[message_id] = detail if isinstance(detail, dict) else None
             except Exception as e:
                 log.warning("获取转发引用消息 %s 失败: %s", message_id, e)
@@ -221,26 +208,27 @@ async def build_forward_history_nodes(
             result.append(text("\n【回复】\n"))
         return result
 
-    nodes: list[Message] = []
+    nodes: list[MessageSegment] = []
     for message_id in message_ids:
         key = str(message_id)
         message = await load(key)
         content = segments(message) if message is not None else []
         if not any(segment.get("type") == "reply" for segment in content):
-            nodes.append(NodeReference(id=key))
+            nodes.append(MessageSegment.node(key))
             continue
         sender = sender_info(message)
         nickname = sender.get("card") or sender.get("nickname") or sender.get("user_id") or "未知发送者"
         native_ids: dict[str, None] = {}
         expanded = await expand(content, frozenset({key}), key, native_ids)
         # 用原发送者和时间重建引用说明，特殊内容通过相邻原消息节点保留。
-        nodes.append(NodeInline(
+        nodes.append(MessageSegment.node_custom(
             nickname=str(nickname),
             user_id=str(sender.get("user_id") or client.self_id),
-            time=message.get("time"),
             content=expanded,
         ))
-        nodes.extend(NodeReference(id=native_id) for native_id in native_ids)
+        if message.get("time") is not None:
+            nodes[-1].data["time"] = message["time"]
+        nodes.extend(MessageSegment.node(native_id) for native_id in native_ids)
     return nodes
 
 
@@ -250,7 +238,7 @@ async def get_customer_profiles(user_ids: list[int]) -> dict[int, tuple[str, str
     try:
         friends = {
             int(info["user_id"]): info
-            for info in await client.get_friend_list()
+            for info in await client.call_api("get_friend_list")
         }
     except Exception as e:
         log.warning("获取好友资料失败，将尝试获取客户昵称: %s", e)
@@ -262,7 +250,7 @@ async def get_customer_profiles(user_ids: list[int]) -> dict[int, tuple[str, str
         remark = info.get("remark") or "（无）"
         if not nickname:
             try:
-                stranger = await client.get_stranger_info(user_id=str(user_id))
+                stranger = await client.call_api("get_stranger_info", user_id=str(user_id))
                 nickname = stranger.get("nickname") or ""
             except Exception as e:
                 log.warning("获取客户 %d 昵称失败: %s", user_id, e)
@@ -291,11 +279,11 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
     log.info("开始构造合并转发 -> 群 %d, 共 %d 名客户", group_id, len(customer_list))
 
     profiles = await get_customer_profiles([qq for qq, _ in customer_list])
-    outer_nodes: list[Message] = [
-        NodeInline(
+    outer_nodes: list[MessageSegment] = [
+        MessageSegment.node_custom(
             nickname="客服系统提示",
             user_id=str(client.self_id),
-            content=serialize_message_segments([Text(text=summary_text)]),
+            content=message_segments([MessageSegment.text(summary_text)]),
         ),
     ]
     forwarded_customers = []
@@ -329,31 +317,31 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
     for qq, _ in forwarded_customers:
         nickname, remark = profiles[qq]
         outer_nodes.append(
-            NodeInline(
+            MessageSegment.node_custom(
                 nickname="客户信息",
                 user_id=str(client.self_id),
-                content=serialize_message_segments([
-                    Text(text=format_customer_profile(qq, nickname, remark)),
+                content=message_segments([
+                    MessageSegment.text(format_customer_profile(qq, nickname, remark)),
                 ]),
             )
         )
         suggestion = suggestions.get(qq)
         if suggestion:
             outer_nodes.append(
-                NodeInline(
+                MessageSegment.node_custom(
                     nickname="AI建议",
                     user_id=str(client.self_id),
-                    content=serialize_message_segments([
-                        Text(text=f"🤖 AI建议回复（客户 {qq}）：\n{suggestion}"),
+                    content=message_segments([
+                        MessageSegment.text(f"🤖 AI建议回复（客户 {qq}）：\n{suggestion}"),
                     ]),
                 )
             )
             suggestion_count += 1
         outer_nodes.append(
-            NodeInline(
+            MessageSegment.node_custom(
                 nickname=nickname,
                 user_id=str(qq),
-                content=serialize_message_segments(
+                content=message_segments(
                     await build_forward_history_nodes(customer_message_ids[qq], messages_by_id)
                 ),
             )
@@ -364,7 +352,8 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
     )
 
     try:
-        response = await client.send_group_forward_msg(
+        response = await client.call_api(
+            "send_group_forward_msg",
             group_id=str(group_id),
             messages=outer_nodes,
         )
@@ -390,22 +379,23 @@ async def send_forward_from_message_ids(
         message_ids,
         {str(m["message_id"]): m for m in messages or [] if "message_id" in m},
     )
-    outer_nodes: list[Message] = [
-        NodeInline(
+    outer_nodes: list[MessageSegment] = [
+        MessageSegment.node_custom(
             nickname="客服系统提示",
             user_id=str(client.self_id),
-            content=serialize_message_segments([
-                Text(text=f"{title}\n\n{format_customer_profile(user_id, nickname, remark)}"),
+            content=message_segments([
+                MessageSegment.text(f"{title}\n\n{format_customer_profile(user_id, nickname, remark)}"),
             ]),
         ),
-        NodeInline(
+        MessageSegment.node_custom(
             nickname=nickname,
             user_id=str(user_id),
-            content=serialize_message_segments(history_nodes),
+            content=message_segments(history_nodes),
         )
     ]
     try:
-        response = await client.send_group_forward_msg(
+        response = await client.call_api(
+            "send_group_forward_msg",
             group_id=str(group_id),
             messages=outer_nodes,
         )
@@ -419,7 +409,9 @@ async def add_emoji_to_message(message_id: int, emoji_ids: list[int]) -> None:
     """为指定消息添加多个表情贴纸"""
     for emoji_id in emoji_ids:
         try:
-            await client.set_msg_emoji_like(message_id=str(message_id), emoji_id=str(emoji_id))
+            await client.call_api(
+                "set_msg_emoji_like", message_id=str(message_id), emoji_id=str(emoji_id), set=True,
+            )
             log.debug("已为消息 %s 添加表情 %s", message_id, emoji_id)
         except Exception as e:
             log.error("添加表情失败: message_id=%s, emoji_id=%s, err=%s", message_id, emoji_id, e)
@@ -429,7 +421,8 @@ async def remove_emoji_from_message(message_id: int, emoji_ids: list[int]) -> No
     """移除机器人在指定消息上添加的表情贴纸。"""
     for emoji_id in emoji_ids:
         try:
-            await client.set_msg_emoji_like(
+            await client.call_api(
+                "set_msg_emoji_like",
                 message_id=str(message_id), emoji_id=str(emoji_id), set=False,
             )
             log.debug("已为消息 %s 移除表情 %s", message_id, emoji_id)
@@ -506,12 +499,12 @@ async def send_reminder_with_at(
     available = get_current_available_members()
     if available:
         chosen = random.choice(available)
-        at_msg: list[Message] = [
-            At(qq=str(chosen)),
-            Text(text=f" {summary}"),
+        at_msg: list[MessageSegment] = [
+            MessageSegment.at(str(chosen)),
+            MessageSegment.text(f" {summary}"),
         ]
         try:
-            await client.send_group_msg(group_id=str(group_id), message=at_msg)
+            await client.call_api("send_group_msg", group_id=str(group_id), message=at_msg)
             log.info("已发送 @%d 提醒: %s", chosen, summary)
         except Exception as e:
             log.error("发送 @ 提醒失败: %s", e, exc_info=True)
@@ -539,9 +532,10 @@ async def send_reminder_with_at(
 async def send_and_track_feedback(gid: int, reply_id: int, feedback: str, customer_id: int) -> None:
     """发送带引用的反馈消息，并将其加入监听列表"""
     try:
-        resp = await client.send_group_msg(
+        resp = await client.call_api(
+            "send_group_msg",
             group_id=str(gid),
-            message=[Reply(id=str(reply_id)), Text(text=feedback)],
+            message=[MessageSegment.reply(str(reply_id)), MessageSegment.text(feedback)],
         )
         feedback_msg_id = resp.get("message_id")
         if feedback_msg_id:
@@ -574,7 +568,8 @@ async def close_session(user_id: int, send_closing: bool = False, close_reason: 
 
     if send_closing:
         try:
-            resp = await client.send_private_msg(
+            resp = await client.call_api(
+                "send_private_msg",
                 user_id=str(user_id),
                 message=cfg.CLOSING_MESSAGE,
             )
@@ -637,7 +632,8 @@ async def send_status_panel(group_id: int):
     )
 
     try:
-        await client.send_group_msg(
+        await client.call_api(
+            "send_group_msg",
             group_id=str(group_id),
             message=panel,
         )

@@ -18,7 +18,7 @@ from typing import Any
 import aiohttp
 import jwt
 
-from napcat import At, GroupMessageEvent, Text
+from .onebot import GroupMessageEvent
 
 from . import config as cfg
 from .config import log
@@ -52,7 +52,7 @@ def _notice_cfg() -> dict[str, Any]:
 # ======================= 消息过滤与内容提取 =======================
 
 def _is_at_all(seg) -> bool:
-    return isinstance(seg, At) and str(seg.qq).strip().lower() in {"all", "全体成员"}
+    return seg.type == "at" and str(seg.data.get("qq")).strip().lower() in {"all", "全体成员"}
 
 
 def extract_notice_text(message: list) -> str | None:
@@ -63,8 +63,8 @@ def extract_notice_text(message: list) -> str | None:
     """
     parts: list[str] = []
     for seg in message:
-        if isinstance(seg, Text):
-            parts.append(seg.text)
+        if seg.type == "text":
+            parts.append(seg.data["text"])
         elif _is_at_all(seg):
             parts.append(_AT_ALL_TEXT)
         else:
@@ -433,7 +433,7 @@ async def _ack_pr_created(text: str) -> None:
     if not ncfg.get("ack_to_internal", True) or not cfg.INTERNAL_GROUP_ID:
         return
     try:
-        await cfg.client.send_group_msg(group_id=str(cfg.INTERNAL_GROUP_ID), message=text)
+        await cfg.client.call_api("send_group_msg", group_id=str(cfg.INTERNAL_GROUP_ID), message=text)
         log.debug("通知 PR ack 已发送至内部群")
     except Exception as e:
         log.error("发送通知 PR ack 到内部群失败，加入重试队列: %s", e)
@@ -456,7 +456,8 @@ async def flush_pending_acks() -> None:
     remaining = []
     for ack in acks:
         try:
-            await cfg.client.send_group_msg(
+            await cfg.client.call_api(
+                "send_group_msg",
                 group_id=str(cfg.INTERNAL_GROUP_ID), message=ack["text"],
             )
             log.info("重发通知 PR ack 成功")
@@ -478,7 +479,8 @@ async def _ack_retry_loop() -> None:
         remaining = []
         for ack in acks:
             try:
-                await cfg.client.send_group_msg(
+                await cfg.client.call_api(
+                    "send_group_msg",
                     group_id=str(cfg.INTERNAL_GROUP_ID), message=ack["text"],
                 )
                 log.info("重发通知 PR ack 成功")

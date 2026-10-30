@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 
-from napcat import Text
+from nonebot.adapters.onebot.v11 import MessageSegment
 
 from . import config as cfg
 from .config import log
@@ -153,7 +153,7 @@ def install_console_log_handler() -> None:
             attached_non_propagating.append(name)
 
     # 确保关键 logger 会冒泡到 root（不各自挂 handler）
-    for name in ("Notify-Bridge-Bot", "napcat", "napcat.client", "napcat.connection"):
+    for name in ("Notify-Bridge-Bot",):
         lg = logging.getLogger(name)
         _remove_console_handlers(lg)
         lg.propagate = True
@@ -299,7 +299,7 @@ async def _shell_say(args: list[str]) -> None:
     if not cfg.client.is_running:
         _print("客户端未运行，无法发送私聊消息。")
         return
-    segments = [Text(text=text)]
+    segments = [MessageSegment.text(text)]
 
     if is_all:
         targets = list(cfg.unreplied_customers.keys())

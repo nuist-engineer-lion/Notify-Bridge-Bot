@@ -19,7 +19,7 @@ def message_label(kind: str) -> str:
 
 
 def message_segments(message, *, tolerant: bool = False) -> list[dict]:
-    """统一字符串、字典与 SDK 消息段；容错模式为损坏的历史消息保留占位。"""
+    """统一字符串、字典与消息段；容错模式为损坏的历史消息保留占位。"""
     if isinstance(message, str):
         message = Message(message)
     elif isinstance(message, Mapping):

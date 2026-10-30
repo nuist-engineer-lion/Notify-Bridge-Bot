@@ -1,14 +1,10 @@
 import time
-from typing import Iterable, Union
+from collections.abc import Iterable
 
-from napcat import (
-    PrivateMessageEvent,
-    FriendPokeEvent,
-    Text,
-    Message,
-    UnknownMessageSegment,
-)
+from nonebot.adapters.onebot.v11 import MessageSegment
+from nonebot.adapters.onebot.v11.event import PokeNotifyEvent
 
+from .onebot import PrivateMessageEvent
 from . import config as cfg
 from .config import log
 from .state import save_state
@@ -16,15 +12,15 @@ from .message_sender import close_session
 from . import history
 
 
-def extract_message_text(segments: Iterable[Union[Message, UnknownMessageSegment]]) -> str:
+def extract_message_text(segments: Iterable[MessageSegment]) -> str:
     """
     从消息段可迭代对象中提取纯文本，用于日志记录。
     只提取 Text 段中的文本，忽略其他类型。
     """
     texts: list[str] = []
     for seg in segments:
-        if isinstance(seg, Text):
-            texts.append(seg.text)
+        if seg.type == "text":
+            texts.append(seg.data["text"])
     full = ''.join(texts).strip()
     if len(full) > 100:
         full = full[:100] + '…'
@@ -90,9 +86,9 @@ async def handle_sent_msg(event: PrivateMessageEvent) -> bool:
     return False
 
 
-async def handle_friend_poke(event: FriendPokeEvent) -> bool:
+async def handle_friend_poke(event: PokeNotifyEvent) -> bool:
     """处理私聊戳一戳：自动发送结束语并从队列移除"""
-    sid = event.sender_id
+    sid = event.user_id
     if event.target_id == cfg.client.self_id and sid not in cfg.WHITELIST:
         await history.record_poke(sid, actor_uid=int(sid), direction="customer_to_bot")
         closed = await close_session(sid, send_closing=True, close_reason="customer_poke")

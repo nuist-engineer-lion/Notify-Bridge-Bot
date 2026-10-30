@@ -1,14 +1,16 @@
 import asyncio
 import signal
 
-from napcat import (
+from nonebot.adapters.onebot.v11.event import (
     FriendAddNoticeEvent,
     FriendRequestEvent,
+    PokeNotifyEvent,
+)
+
+from .onebot import (
     GroupMsgEmojiLikeEvent,
     PrivateMessageEvent,
-    FriendPokeEvent,
     GroupMessageEvent,
-    GroupPokeEvent,
 )
 
 from . import config as cfg
@@ -154,7 +156,8 @@ async def _bot_event_loop() -> None:
 
                 if not startup_notified:
                     try:
-                        await cfg.client.send_group_msg(
+                        await cfg.client.call_api(
+                            "send_group_msg",
                             group_id=str(cfg.INTERNAL_GROUP_ID),
                             message="🤖 客服机器人已启动，开始监听消息。",
                         )
@@ -167,14 +170,10 @@ async def _bot_event_loop() -> None:
                         if _shutdown_requested:
                             break
                         try:
-                            friend_list = await cfg.client.send(
-                                {"action": "get_friend_list", "params": {}},
-                                timeout=30.0,
-                            )
-                            if friend_list.get("status") == "ok" and friend_list.get("retcode") == 0:
-                                cfg.friend_count = len(friend_list.get("data", []))
-                                log.info("好友数量已初始化: %d", cfg.friend_count)
-                                break
+                            friend_list = await cfg.client.call_api("get_friend_list", _timeout=30.0)
+                            cfg.friend_count = len(friend_list)
+                            log.info("好友数量已初始化: %d", cfg.friend_count)
+                            break
                         except Exception as e:
                             log.warning("初始化好友数量失败 (尝试 %d/3): %s", attempt + 1, e)
                             if attempt < 2:
@@ -200,10 +199,10 @@ async def _bot_event_loop() -> None:
                     case PrivateMessageEvent(post_type="message"):
                         await handle_private_msg(event)
 
-                    case FriendPokeEvent():
+                    case PokeNotifyEvent(group_id=None):
                         await handle_friend_poke(event)
 
-                    case GroupPokeEvent():
+                    case PokeNotifyEvent():
                         await handle_group_poke(event)
 
                     case GroupMessageEvent():

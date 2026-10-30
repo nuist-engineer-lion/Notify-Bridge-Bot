@@ -1,4 +1,4 @@
-"""OneBot v11 接入：NoneBot 官方适配器负责通信，复用 NapCat SDK 的业务类型。
+"""OneBot v11 接入：通信、消息与标准事件使用 NoneBot 官方适配器。
 
 适配器的生命周期由现有 asyncio 入口管理，不启动另一套框架主循环。
 历史消息、合并转发和表情回应直接调用服务端扩展 API。
@@ -6,18 +6,20 @@
 
 import asyncio
 import logging
-from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
-from napcat import NapCatClient, NapCatEvent
-from napcat.exceptions import NapCatError, NapCatStateError
 from nonebot.adapters import Adapter as BaseAdapter
 from nonebot.adapters.onebot.v11 import Adapter, Message, MessageSegment
 from nonebot.adapters.onebot.v11.config import Config as OneBotConfig
-from nonebot.adapters.onebot.v11.event import LifecycleMetaEvent
-from nonebot.adapters.onebot.v11.exception import ActionFailed, NetworkError
+from nonebot.adapters.onebot.v11.event import (
+    GroupMessageEvent as BaseGroupMessageEvent,
+    LifecycleMetaEvent,
+    NoticeEvent,
+    PrivateMessageEvent as BasePrivateMessageEvent,
+)
 from nonebot.config import Config, Env
 from nonebot.drivers.aiohttp import Driver
+from pydantic import Field
 
 from .messages import message_segments
 
@@ -25,8 +27,30 @@ log = logging.getLogger("Notify-Bridge-Bot")
 _STOP = object()
 
 
+class PrivateMessageEvent(BasePrivateMessageEvent):
+    """接收私聊及自身发出的私聊，保留回复对象。"""
+
+    post_type: Literal["message", "message_sent"]
+    target_id: int | None = None
+
+
+class GroupMessageEvent(BaseGroupMessageEvent):
+    post_type: Literal["message", "message_sent"]
+
+
+class GroupMsgEmojiLikeEvent(NoticeEvent):
+    """群消息表情回应扩展。"""
+
+    notice_type: Literal["group_msg_emoji_like"]
+    group_id: int
+    user_id: int
+    message_id: int
+    likes: list[dict[str, Any]] = Field(default_factory=list)
+    is_add: bool = True
+
+
 def normalize_event(data: dict[str, Any]) -> dict[str, Any]:
-    """补齐 SDK 的非标准必填字段，不要求协议端伪造 NapCat 扩展。"""
+    """统一消息格式和不同协议端的事件字段。"""
     result = dict(data)
     for key in ("self_id", "user_id", "group_id", "target_id", "sender_id", "message_id"):
         if result.get(key) is not None:
@@ -34,8 +58,6 @@ def normalize_event(data: dict[str, Any]) -> dict[str, Any]:
     post_type = result.get("post_type")
     if post_type in ("message", "message_sent"):
         result["message"] = message_segments(result.get("message", []))
-        result.setdefault("message_seq", result["message_id"])
-        result.setdefault("real_id", result["message_id"])
         if "raw_message" not in result:
             result["raw_message"] = str(Message([
                 MessageSegment(**segment) for segment in result["message"]
@@ -47,15 +69,14 @@ def normalize_event(data: dict[str, Any]) -> dict[str, Any]:
         sender.setdefault("nickname", "")
         result["sender"] = sender
         if post_type == "message_sent" and result.get("message_type") == "private":
-            # 有些实现把 user_id 作为私聊对象；NapCat 业务类型另用 target_id。
+            # 有些实现把 user_id 作为私聊对象，自身 ID 则位于 self_id。
             if result.get("target_id") is None and result["user_id"] != result["self_id"]:
                 result["target_id"], result["user_id"] = result["user_id"], result["self_id"]
     if result.get("notice_type") == "group_msg_emoji_like":
         result.setdefault("is_add", result.get("sub_type", "add") == "add")
     if result.get("notice_type") == "notify" and result.get("sub_type") == "poke":
-        result.setdefault("raw_info", [])
         if result.get("group_id") is None:
-            result.setdefault("sender_id", result.get("user_id", 0))
+            result["user_id"] = result.get("sender_id") or result.get("user_id", 0)
     return result
 
 
@@ -119,11 +140,13 @@ class _BridgeAdapter(Adapter):
         super().bot_disconnect(bot)
 
 
-class OneBotClient(NapCatClient):
-    """保留 SDK 的消息构造和 API 方法，通信交由 NoneBot 官方适配器完成。"""
+class OneBotClient:
+    """将官方适配器嵌入现有异步入口，按顺序分发原始消息事件。"""
 
     def __init__(self, ws_url: str, token: str = ""):
-        super().__init__(ws_url, token)
+        self.ws_url = ws_url
+        self.token = token
+        self.self_id = 0
         self._bot = None
         self._worker: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -135,8 +158,18 @@ class OneBotClient(NapCatClient):
 
     def _receive(self, raw: dict[str, Any]) -> None:
         data = normalize_event(raw)
-        event = NapCatEvent.from_dict(data, client=self)
-        self._queue.put_nowait(event)
+        if data["post_type"] in ("message", "message_sent"):
+            model = {
+                "private": PrivateMessageEvent,
+                "group": GroupMessageEvent,
+            }.get(data.get("message_type"))
+            event = model.model_validate(data) if model else Adapter.json_to_event(data)
+        elif data.get("notice_type") == "group_msg_emoji_like":
+            event = GroupMsgEmojiLikeEvent.model_validate(data)
+        else:
+            event = Adapter.json_to_event(data)
+        if event is not None:
+            self._queue.put_nowait(event)
 
     async def _run(self) -> None:
         try:
@@ -152,9 +185,12 @@ class OneBotClient(NapCatClient):
             self._bot = None
             self._queue.put_nowait(_STOP)
 
-    async def events(self, filter_waiters: bool = False):
+    def __aiter__(self):
+        return self.events()
+
+    async def events(self):
         if self._worker is not None:
-            raise NapCatStateError("OneBot 事件循环已启动")
+            raise RuntimeError("OneBot 事件循环已启动")
         self._stop.clear()
         self._queue = asyncio.Queue()
         worker = self._worker = asyncio.create_task(self._run(), name="onebot-adapter")
@@ -177,20 +213,11 @@ class OneBotClient(NapCatClient):
             finally:
                 self._worker = None
 
-    async def send(self, data: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:
+    async def call_api(self, action: str, **params: Any) -> Any:
+        """直接使用官方 API 调用与异常语义，扩展接口同样按 action 调用。"""
         bot = self._bot
         if bot is None:
-            raise NapCatStateError("OneBot 客户端未连接")
-        try:
-            result = await bot.call_api(data["action"], **data.get("params", {}), _timeout=timeout)
-            return {"status": "ok", "retcode": 0, "data": result}
-        except ActionFailed as exc:
-            return dict(exc.info)
-        except NetworkError as exc:
-            raise NapCatError(f"OneBot API 通信失败: {data['action']}") from exc
-
-    async def call_action(self, action: str, params: Mapping[str, Any] | None = None):
-        params = dict(params or {})
+            raise RuntimeError("OneBot 客户端未连接")
         if action == "send_group_forward_msg":
             params["messages"] = _forward_nodes(params.get("messages", []))
-        return await super().call_action(action, params)
+        return await bot.call_api(action, **params)
