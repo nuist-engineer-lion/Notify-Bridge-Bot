@@ -2,6 +2,7 @@ import time
 import asyncio
 import random
 import statistics
+import re
 
 from napcat import (
     Message,
@@ -37,10 +38,17 @@ def serialize_message_segments(segments: list[Message]) -> list[dict]:
 
 # ======================= 历史消息获取 =======================
 
-async def get_recent_message_ids(user_id: int, count: int = 200, max_age_seconds: int | None = None) -> list[int]:
+async def get_recent_message_ids(
+    user_id: int,
+    count: int = 200,
+    max_age_seconds: int | None = None,
+    *,
+    messages_by_id: dict[str, dict] | None = None,
+) -> list[int]:
     """
     通过 API 获取与指定用户的最近消息，筛选出最近 max_age_seconds 秒内的消息（双方消息）。
     返回按时间正序排列的 message_id 列表。
+    messages_by_id 可接收完整历史缓存，供转发时补全引用原文。
     """
     now = time.time()
     if max_age_seconds is None:
@@ -60,6 +68,11 @@ async def get_recent_message_ids(user_id: int, count: int = 200, max_age_seconds
             if (now - m.get("time", 0)) <= max_age_seconds
         ]
         msg_ids = [m["message_id"] for m in filtered if "message_id" in m]
+        if messages_by_id is not None:
+            # 保留整个拉取窗口，引用目标可能在提醒时间范围之外。
+            messages_by_id.update({
+                str(m["message_id"]): m for m in messages if "message_id" in m
+            })
         log.debug("客户 %d 历史消息: 获取到 %d 条，过滤后 %d 条（%d 秒内）",
                   user_id, len(messages), len(msg_ids), max_age_seconds)
         return msg_ids
@@ -112,6 +125,166 @@ def pop_tracked_forward(message_id: int) -> dict | None:
 
 
 # ======================= 合并转发构造 =======================
+
+def _forward_segments(content) -> list[dict]:
+    """统一历史 API 的数组、单段和 CQ 字符串格式；不改动原消息。"""
+    def text(value: str) -> dict:
+        return {"type": "text", "data": {"text": value}}
+
+    def unescape(value: str) -> str:
+        return value.replace("&#91;", "[").replace("&#93;", "]").replace("&#44;", ",").replace("&amp;", "&")
+
+    if isinstance(content, str):
+        segments = []
+        offset = 0
+        for match in re.finditer(r"\[CQ:([a-zA-Z0-9_]+)((?:,[^,\[\]]+=[^,\[\]]*)*)\]", content):
+            if match.start() > offset:
+                segments.append(text(unescape(content[offset:match.start()])))
+            data = {}
+            for parameter in match[2].split(",")[1:]:
+                key, value = parameter.split("=", 1)
+                data[key] = unescape(value)
+            segments.append({"type": match[1], "data": data})
+            offset = match.end()
+        if offset < len(content):
+            segments.append(text(unescape(content[offset:])))
+        return segments
+    if isinstance(content, dict):
+        content = [content]
+    if not isinstance(content, list):
+        return []
+    result = []
+    for segment in content:
+        try:
+            raw = dict(segment)
+        except (TypeError, ValueError):
+            result.append(text("【无法解析的消息段】"))
+            continue
+        if not isinstance(raw.get("type"), str) or not isinstance(raw.get("data"), dict):
+            result.append(text("【无法解析的消息段】"))
+            continue
+        result.append({"type": raw["type"], "data": dict(raw["data"])})
+    return result
+
+
+async def build_forward_history_nodes(
+    message_ids: list[int],
+    messages_by_id: dict[str, dict] | None = None,
+) -> list[Message]:
+    """引用消息展开为快照，避免跨会话转发后 Reply 失去上下文。"""
+    cache: dict[str, dict | None] = dict(messages_by_id or {})
+
+    def text(value: str) -> dict:
+        return {"type": "text", "data": {"text": value}}
+
+    def segments(message: dict) -> list[dict]:
+        content = message.get("message")
+        if content is None:
+            content = message.get("raw_message")
+        return _forward_segments(content)
+
+    def sender_info(message: dict) -> dict:
+        sender = message.get("sender")
+        return sender if isinstance(sender, dict) else {}
+
+    async def load(message_id: str) -> dict | None:
+        if message_id not in cache:
+            try:
+                detail = await client.get_msg(message_id=message_id)
+                cache[message_id] = detail if isinstance(detail, dict) else None
+            except Exception as e:
+                log.warning("获取转发引用消息 %s 失败: %s", message_id, e)
+                cache[message_id] = None
+        return cache[message_id]
+
+    async def expand(
+        content: list[dict], path: frozenset[str],
+        current_id: str, native_ids: dict[str, None],
+    ) -> list[dict]:
+        result = []
+        for segment in content:
+            kind, data = segment["type"], segment["data"]
+            if kind != "reply":
+                if kind in ("text", "face", "at"):
+                    required = {"text": "text", "face": "id", "at": "qq"}[kind]
+                    if data.get(required) is not None:
+                        result.append(segment)
+                        continue
+                if kind == "image":
+                    # 收到的 file 可能只是媒体标识；重新构造时优先使用可发送的地址。
+                    source = data.get("file")
+                    if not isinstance(source, str) or not source.startswith(
+                        ("http://", "https://", "file://", "base64://")
+                    ):
+                        source = data.get("url")
+                    if isinstance(source, str) and source.startswith(
+                        ("http://", "https://", "file://", "base64://")
+                    ):
+                        result.append({"type": "image", "data": {**data, "file": source}})
+                        continue
+                # 特殊消息不可与说明文字混发。保留原生节点，也保护未知扩展类型。
+                labels = {
+                    "record": "语音", "video": "视频", "file": "文件",
+                    "forward": "合并转发", "node": "合并转发",
+                    "json": "JSON卡片", "xml": "XML卡片", "music": "音乐",
+                    "markdown": "Markdown", "miniapp": "小程序",
+                    "onlinefile": "在线文件", "flashtransfer": "闪传",
+                    "mface": "商城表情", "image": "图片",
+                }
+                label = labels.get(kind, f"消息段 {kind}")
+                name = data.get("name")
+                if kind in ("file", "onlinefile") and isinstance(name, str) and name:
+                    label += f"：{name}"
+                native_ids[current_id] = None
+                result.append(text(f"\n【{label}，见下方原消息 {current_id}】\n"))
+                continue
+            reply_id = data.get("id")
+            if reply_id is None:
+                result.append(text("【引用消息：缺少消息 ID，无法获取原文】\n"))
+                continue
+            key = str(reply_id)
+            if key in path or len(path) >= 4:
+                result.append(text(f"【引用消息 {key}：已省略更深层引用】\n"))
+                continue
+            quoted = await load(key)
+            if quoted is None:
+                result.append(text(f"【引用消息 {key}：原消息无法获取】\n"))
+                continue
+            sender = sender_info(quoted)
+            uid = sender.get("user_id")
+            name = sender.get("card") or sender.get("nickname") or str(uid or "未知发送者")
+            label = f"{name}（{uid}）" if uid is not None else name
+            result.append(text(f"【引用 {label}】\n"))
+            quoted_content = segments(quoted)
+            result.extend(
+                await expand(quoted_content, path | {key}, key, native_ids)
+                if quoted_content else [text("（原消息内容不可用）")]
+            )
+            result.append(text("\n【回复】\n"))
+        return result
+
+    nodes: list[Message] = []
+    for message_id in message_ids:
+        key = str(message_id)
+        message = await load(key)
+        content = segments(message) if message is not None else []
+        if not any(segment.get("type") == "reply" for segment in content):
+            nodes.append(NodeReference(id=key))
+            continue
+        sender = sender_info(message)
+        nickname = sender.get("card") or sender.get("nickname") or sender.get("user_id") or "未知发送者"
+        native_ids: dict[str, None] = {}
+        expanded = await expand(content, frozenset({key}), key, native_ids)
+        # 用原发送者和时间重建引用说明，特殊内容通过相邻原消息节点保留。
+        nodes.append(NodeInline(
+            nickname=str(nickname),
+            user_id=str(sender.get("user_id") or client.self_id),
+            time=message.get("time"),
+            content=expanded,
+        ))
+        nodes.extend(NodeReference(id=native_id) for native_id in native_ids)
+    return nodes
+
 
 async def get_customer_profiles(user_ids: list[int]) -> dict[int, tuple[str, str]]:
     """批量读取客户昵称和好友备注；资料获取失败不影响转发。"""
@@ -169,9 +342,13 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
     ]
     forwarded_customers = []
     customer_message_ids: dict[int, list[int]] = {}
+    messages_by_id: dict[str, dict] = {}
 
     for qq, data in customer_list:
-        msg_ids = await get_recent_message_ids(qq, count=200, max_age_seconds=max_age_seconds)
+        msg_ids = await get_recent_message_ids(
+            qq, count=200, max_age_seconds=max_age_seconds,
+            messages_by_id=messages_by_id,
+        )
         if not msg_ids:
             log.warning("客户 %d 无%d秒内消息，跳过该客户节点", qq, max_age_seconds)
             continue
@@ -218,9 +395,9 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
             NodeInline(
                 nickname=nickname,
                 user_id=str(qq),
-                content=serialize_message_segments([
-                    NodeReference(id=str(msg_id)) for msg_id in customer_message_ids[qq]
-                ]),
+                content=serialize_message_segments(
+                    await build_forward_history_nodes(customer_message_ids[qq], messages_by_id)
+                ),
             )
         )
     log.info(
@@ -242,12 +419,19 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         return None
 
 
-async def send_forward_from_message_ids(group_id: int, title: str, user_id: int, message_ids: list[int]) -> int | None:
+async def send_forward_from_message_ids(
+    group_id: int, title: str, user_id: int, message_ids: list[int],
+    *, messages: list[dict] | None = None,
+) -> int | None:
     """根据消息ID列表发送合并转发到群"""
     if not message_ids:
         return None
     profiles = await get_customer_profiles([user_id])
     nickname, remark = profiles[user_id]
+    history_nodes = await build_forward_history_nodes(
+        message_ids,
+        {str(m["message_id"]): m for m in messages or [] if "message_id" in m},
+    )
     outer_nodes: list[Message] = [
         NodeInline(
             nickname="客服系统提示",
@@ -259,9 +443,7 @@ async def send_forward_from_message_ids(group_id: int, title: str, user_id: int,
         NodeInline(
             nickname=nickname,
             user_id=str(user_id),
-            content=serialize_message_segments([
-                NodeReference(id=str(msg_id)) for msg_id in message_ids
-            ]),
+            content=serialize_message_segments(history_nodes),
         )
     ]
     try:

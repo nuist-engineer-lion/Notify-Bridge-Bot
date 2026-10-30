@@ -389,6 +389,7 @@ async def handle_more_command(
             title=title,
             user_id=customer_id,
             message_ids=msg_ids,
+            messages=messages,
         )
         if new_fwd_id:
             return True, None, new_fwd_id
