@@ -243,7 +243,24 @@ async def send_private_and_close(
         return feedback, closed, customer_msg_id
     except Exception as e:
         log.error("发送私聊消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
-        return f"❌ 发送失败：{e}", False, customer_msg_id
+        return "❌ 发送失败，请稍后重试。", False, customer_msg_id
+
+
+async def send_say_feedback(
+    gid: int, reply_id: int, customer_id: int, operator_uid: int,
+    feedback: str, customer_msg_id: int | None,
+) -> None:
+    """各类 .say 共用反馈、监听和限时撤回登记。"""
+    resp = await cfg.client.send_group_msg(
+        group_id=str(gid),
+        message=[Reply(id=str(reply_id)), Text(text=feedback)],
+    )
+    feedback_msg_id = resp.get("message_id")
+    if feedback_msg_id:
+        track_forward_message(feedback_msg_id, [customer_id], gid)
+        if customer_msg_id is not None and not feedback.startswith("❌"):
+            register_recallable_send(feedback_msg_id, customer_msg_id, customer_id, gid, operator_uid)
+            asyncio.create_task(add_emoji_to_message(feedback_msg_id, [cfg.EMOJI_MAPPING["recall"]]))
 
 
 # ======================= 昵称批量获取 =======================
@@ -333,7 +350,7 @@ async def handle_bye_command(
         return f"✅ 已向客户 {customer_id} 发送结束语。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
     except Exception as e:
         log.error("发送结束语失败: customer=%s, err=%s", customer_id, e, exc_info=True)
-        return f"❌ 发送失败：{e}"
+        return "❌ 发送失败，请稍后重试。"
 
 
 async def handle_close_command(
@@ -353,7 +370,7 @@ async def handle_close_command(
         return f"✅ 已关闭客户 {customer_id} 的会话（未发送结束语）。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
     except Exception as e:
         log.error("关闭会话失败: customer=%s, err=%s", customer_id, e, exc_info=True)
-        return f"❌ 关闭失败：{e}"
+        return "❌ 关闭失败，请稍后重试。"
 
 
 async def handle_more_command(
@@ -393,11 +410,10 @@ async def handle_more_command(
         )
         if new_fwd_id:
             return True, None, new_fwd_id
-        else:
-            return False, f"❌ 构造合并转发失败", None
+        return False, "❌ 历史消息发送失败，请稍后重试。", None
     except Exception as e:
         log.error("获取历史消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
-        return False, f"❌ 获取历史消息失败：{e}", None
+        return False, "❌ 获取历史消息失败，请稍后重试。", None
 
 
 async def handle_recall_click(gid: int, mid: int, user_id: int) -> bool:
@@ -429,7 +445,7 @@ async def handle_recall_click(gid: int, mid: int, user_id: int) -> bool:
             cfg.recallable_sends[mid] = data
         await cfg.client.send_group_msg(
             group_id=str(gid),
-            message=[Reply(id=str(mid)), Text(text=f"❌ 撤回失败：{e}")],
+            message=[Reply(id=str(mid)), Text(text="❌ 撤回失败，请稍后重试。")],
         )
         return True
 
@@ -526,15 +542,11 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
             success, feedback, new_fwd_id = await handle_more_command(
                 gid, mid, customer_id, operator_uid=event.user_id, via="emoji",
             )
-            if success:
-                if new_fwd_id:
-                    track_forward_message(new_fwd_id, [customer_id], gid)
-                    await add_emoji_to_message(new_fwd_id, action_emoji_ids())
-                if feedback:
-                    await send_and_track_feedback(gid, mid, feedback, customer_id)
-            else:
-                if feedback:
-                    await send_and_track_feedback(gid, mid, feedback, customer_id)
+            if success and new_fwd_id:
+                track_forward_message(new_fwd_id, [customer_id], gid)
+                await add_emoji_to_message(new_fwd_id, action_emoji_ids())
+            if feedback:
+                await send_and_track_feedback(gid, mid, feedback, customer_id)
         except Exception:
             pass
         return True
@@ -651,7 +663,7 @@ async def handle_session_command_by_qq(
                 return True
         key = ("__all__", op_name)
         if now - cfg.last_command_time.get(key, 0) < debounce_sec:
-            await _reply(f"⏳ 操作过于频繁，请稍后再试（防抖 {debounce_sec} 秒）")
+            await _reply(f"⏳ 操作过于频繁，请 {debounce_sec} 秒后重试。")
             return True
 
         targets = list(cfg.unreplied_customers.keys())
@@ -663,42 +675,17 @@ async def handle_session_command_by_qq(
             await _reply("❌ 客户端未运行，无法执行批量 " + op)
             return True
 
-        if op == ".say":
-            ok, failed = await apply_session_op_to_customers(
-                "say", targets,
-                gid=gid,
-                operator_uid=event.user_id,
-                via="group_qq",
-                segments=segments,
-            )
-            if ok:
-                cfg.last_command_time[key] = now
-            await _reply(format_batch_result("say all", ok, failed))
-            return True
-
-        if op == ".bye":
-            ok, failed = await apply_session_op_to_customers(
-                "bye", targets,
-                gid=gid,
-                operator_uid=event.user_id,
-                via="group_qq",
-            )
-            if ok:
-                cfg.last_command_time[key] = now
-            await _reply(format_batch_result("bye all", ok, failed))
-            return True
-
-        if op == ".close":
-            ok, failed = await apply_session_op_to_customers(
-                "close", targets,
-                gid=gid,
-                operator_uid=event.user_id,
-                via="group_qq",
-            )
-            if ok:
-                cfg.last_command_time[key] = now
-            await _reply(format_batch_result("close all", ok, failed))
-            return True
+        ok, failed = await apply_session_op_to_customers(
+            op_name, targets,
+            gid=gid,
+            operator_uid=event.user_id,
+            via="group_qq",
+            segments=segments if op == ".say" else None,
+        )
+        if ok:
+            cfg.last_command_time[key] = now
+        await _reply(format_batch_result(f"{op_name} all", ok, failed))
+        return True
 
     # ---- 目标解析：显式 QQ / all 已处理；否则无参自动匹配 ----
     auto_qq = sole_unreplied_customer()
@@ -708,8 +695,6 @@ async def handle_session_command_by_qq(
 
     if op == ".say":
         qq, say_segments = extract_say_qq_segments(event.message)
-        if qq is None and rest_parts and rest_parts[0].lower() == "all":
-            return True  # 已处理
         if qq is None:
             # 无合法 QQ 参数：队列唯一则自动匹配，正文为 .say 后全部内容
             if auto_qq is not None:
@@ -741,9 +726,9 @@ async def handle_session_command_by_qq(
                 await _reply("❌ " + msg)
                 return True
 
-    key = (qq, op_name if op != ".say" else "say")
+    key = (qq, op_name)
     if now - cfg.last_command_time.get(key, 0) < debounce_sec:
-        await _reply(f"⏳ 操作过于频繁，请稍后再试（防抖 {debounce_sec} 秒）")
+        await _reply(f"⏳ 操作过于频繁，请 {debounce_sec} 秒后重试。")
         return True
 
     if op == ".say":
@@ -760,7 +745,7 @@ async def handle_session_command_by_qq(
                 "reply_id": None,
                 "group_id": gid,
                 "via": "group_qq",
-                "target_source": "auto" if not rest_parts or parse_qq_arg(rest_parts[0] if rest_parts else "") is None else "qq",
+                "target_source": "qq" if rest_parts and parse_qq_arg(rest_parts[0]) else "auto",
                 "debounce_key": key,
             })
             await history.record_command(
@@ -780,27 +765,14 @@ async def handle_session_command_by_qq(
         )
         if not feedback.startswith("❌"):
             cfg.last_command_time[key] = now
-        resp = await cfg.client.send_group_msg(
-            group_id=str(gid),
-            message=[Reply(id=str(msg_id)), Text(text=feedback)],
+        await send_say_feedback(
+            gid, msg_id, qq, event.user_id, feedback, customer_msg_id,
         )
-        feedback_msg_id = resp.get("message_id")
-        if feedback_msg_id:
-            track_forward_message(feedback_msg_id, [qq], gid)
-            if customer_msg_id is not None:
-                register_recallable_send(feedback_msg_id, customer_msg_id, qq, gid, event.user_id)
-                asyncio.create_task(add_emoji_to_message(feedback_msg_id, [cfg.EMOJI_MAPPING["recall"]]))
         return True
 
-    if op == ".bye":
-        feedback = await handle_bye_command(gid, None, qq, operator_uid=event.user_id, via="group_qq")
-        if not feedback.startswith("❌"):
-            cfg.last_command_time[key] = now
-        await send_and_track_feedback(gid, msg_id, feedback, qq)
-        return True
-
-    if op == ".close":
-        feedback = await handle_close_command(gid, None, qq, operator_uid=event.user_id, via="group_qq")
+    if op in (".bye", ".close"):
+        handler = handle_bye_command if op == ".bye" else handle_close_command
+        feedback = await handler(gid, None, qq, operator_uid=event.user_id, via="group_qq")
         if not feedback.startswith("❌"):
             cfg.last_command_time[key] = now
         await send_and_track_feedback(gid, msg_id, feedback, qq)
@@ -865,32 +837,18 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
 
         if len(targets) == 1:
             customer_id = targets[0]
-            customer_msg_id: int | None = None
-            try:
-                feedback, _closed, customer_msg_id = await send_private_and_close(
-                    customer_id, segments,
-                    operator_uid=event.user_id,
-                    via=via,
-                    close_reason="say",
-                    group_id=gid,
-                    reply_id=orig_reply_id,
-                )
-                if not feedback.startswith("❌"):
-                    cfg.last_command_time[debounce_key] = time.time()
-            except Exception as e:
-                log.error("发送私聊消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
-                feedback = f"❌ 发送失败：{e}"
-
-            resp = await cfg.client.send_group_msg(
-                group_id=str(gid),
-                message=[Reply(id=str(msg_id)), Text(text=feedback)],
+            feedback, _closed, customer_msg_id = await send_private_and_close(
+                customer_id, segments,
+                operator_uid=event.user_id,
+                via=via,
+                group_id=gid,
+                reply_id=orig_reply_id,
             )
-            feedback_msg_id = resp.get("message_id")
-            if feedback_msg_id:
-                track_forward_message(feedback_msg_id, [customer_id], gid)
-                if customer_msg_id is not None and not feedback.startswith("❌"):
-                    register_recallable_send(feedback_msg_id, customer_msg_id, customer_id, gid, event.user_id)
-                    asyncio.create_task(add_emoji_to_message(feedback_msg_id, [cfg.EMOJI_MAPPING["recall"]]))
+            if not feedback.startswith("❌"):
+                cfg.last_command_time[debounce_key] = time.time()
+            await send_say_feedback(
+                gid, msg_id, customer_id, event.user_id, feedback, customer_msg_id,
+            )
             return True
 
         # 多客户 pending（emoji 多客户合并转发 / 后续扩展）
@@ -926,9 +884,9 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             "• .status – 查看运行状态面板\n"
             "• .mute [分钟] – 临时静音（不带参数不限时；如 .mute 30 为 30 分钟）\n"
             "• .unmute – 解除静音，并汇总发出延后提醒\n"
-            "• .reload – 重载当前明文配置（不拉代码、不展示内容；兼容 .reload cfg）\n"
-            "• .reload remote – git pull → 解密应用配置 → 重载配置\n"
-            "• .reboot – 保存状态并重启机器人进程\n"
+            "• .reload – 重新加载本地配置\n"
+            "• .reload remote – 获取并应用远程更新\n"
+            "• .reboot – 保存状态并重启机器人\n"
             "• .help – 显示此帮助信息\n"
             "\n"
             "使用方法：优先回复机器人消息；或 .命令 <客户QQ|all>；无参且待回复仅 1 人时自动匹配该客户。\n"
@@ -953,7 +911,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         if now_ts - last_time < debounce_sec:
             await cfg.client.send_group_msg(
                 group_id=str(gid),
-                message=[Reply(id=str(msg_id)), Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {debounce_sec:.0f} 秒）")],
+                message=[Reply(id=str(msg_id)), Text(text=f"⏳ 操作过于频繁，请 {debounce_sec:.0f} 秒后重试。")],
             )
             return True
         cfg.last_command_time[key] = now_ts
@@ -974,7 +932,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         if now_ts - last_time < debounce_sec:
             await cfg.client.send_group_msg(
                 group_id=str(gid),
-                message=[Reply(id=str(msg_id)), Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {debounce_sec:.0f} 秒）")],
+                message=[Reply(id=str(msg_id)), Text(text=f"⏳ 操作过于频繁，请 {debounce_sec:.0f} 秒后重试。")],
             )
             return True
         cfg.last_command_time[key] = now_ts
@@ -1026,7 +984,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
                 group_id=str(gid),
                 message=[
                     Reply(id=str(msg_id)),
-                    Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {debounce_list:.0f} 秒）")
+                    Text(text=f"⏳ 操作过于频繁，请 {debounce_list:.0f} 秒后重试。")
                 ],
             )
             return True
@@ -1129,7 +1087,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
     if not customer_ids:
         await cfg.client.send_group_msg(
             group_id=str(gid),
-            message=[Reply(id=str(msg_id)), Text(text="内部错误：无法解析客户列表")],
+            message=[Reply(id=str(msg_id)), Text(text="无法确定要处理的客户，请使用命令指定客户 QQ。")],
         )
         return True
 
@@ -1179,7 +1137,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
                 group_id=str(gid),
                 message=[
                     Reply(id=str(msg_id)),
-                    Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {cfg.DEBOUNCE_SECONDS['say']} 秒）")
+                    Text(text=f"⏳ 操作过于频繁，请 {cfg.DEBOUNCE_SECONDS['say']} 秒后重试。")
                 ],
             )
             return True
@@ -1194,16 +1152,9 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         if not feedback.startswith("❌"):
             cfg.last_command_time[key] = now
 
-        resp = await cfg.client.send_group_msg(
-            group_id=str(gid),
-            message=[Reply(id=str(msg_id)), Text(text=feedback)],
+        await send_say_feedback(
+            gid, msg_id, customer_id, event.user_id, feedback, customer_msg_id,
         )
-        feedback_msg_id = resp.get("message_id")
-        if feedback_msg_id:
-            track_forward_message(feedback_msg_id, [customer_id], gid)
-            if customer_msg_id is not None:
-                register_recallable_send(feedback_msg_id, customer_msg_id, customer_id, gid, event.user_id)
-                asyncio.create_task(add_emoji_to_message(feedback_msg_id, [cfg.EMOJI_MAPPING["recall"]]))
         return True
 
     # ---- .bye ----
@@ -1215,7 +1166,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
                 group_id=str(gid),
                 message=[
                     Reply(id=str(msg_id)),
-                    Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {cfg.DEBOUNCE_SECONDS['bye']} 秒）")
+                    Text(text=f"⏳ 操作过于频繁，请 {cfg.DEBOUNCE_SECONDS['bye']} 秒后重试。")
                 ],
             )
             return True
@@ -1236,7 +1187,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
                 group_id=str(gid),
                 message=[
                     Reply(id=str(msg_id)),
-                    Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {debounce_sec} 秒）")
+                    Text(text=f"⏳ 操作过于频繁，请 {debounce_sec} 秒后重试。")
                 ],
             )
             return True
@@ -1256,7 +1207,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
                 group_id=str(gid),
                 message=[
                     Reply(id=str(msg_id)),
-                    Text(text=f"⏳ 操作过于频繁，请稍后再试（防抖 {cfg.DEBOUNCE_SECONDS['more']} 秒）")
+                    Text(text=f"⏳ 操作过于频繁，请 {cfg.DEBOUNCE_SECONDS['more']} 秒后重试。")
                 ],
             )
             return True
@@ -1269,11 +1220,8 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             if new_fwd_id:
                 track_forward_message(new_fwd_id, [customer_id], gid)
                 asyncio.create_task(add_emoji_to_message(new_fwd_id, action_emoji_ids()))
-            if feedback:
-                asyncio.create_task(send_and_track_feedback(gid, msg_id, feedback, customer_id))
-        else:
-            if feedback:
-                asyncio.create_task(send_and_track_feedback(gid, msg_id, feedback, customer_id))
+        if feedback:
+            asyncio.create_task(send_and_track_feedback(gid, msg_id, feedback, customer_id))
         return True
 
     else:

@@ -2,7 +2,6 @@ import time
 import asyncio
 import random
 import statistics
-import re
 
 from napcat import (
     Message,
@@ -23,6 +22,7 @@ from .config import (
     client,
 )
 from .models import CustomerData
+from .messages import message_label, message_segments
 from .utils import format_duration, get_current_available_members
 from .state import save_state
 from . import history
@@ -128,43 +128,9 @@ def pop_tracked_forward(message_id: int) -> dict | None:
 
 def _forward_segments(content) -> list[dict]:
     """统一历史 API 的数组、单段和 CQ 字符串格式；不改动原消息。"""
-    def text(value: str) -> dict:
-        return {"type": "text", "data": {"text": value}}
-
-    def unescape(value: str) -> str:
-        return value.replace("&#91;", "[").replace("&#93;", "]").replace("&#44;", ",").replace("&amp;", "&")
-
-    if isinstance(content, str):
-        segments = []
-        offset = 0
-        for match in re.finditer(r"\[CQ:([a-zA-Z0-9_]+)((?:,[^,\[\]]+=[^,\[\]]*)*)\]", content):
-            if match.start() > offset:
-                segments.append(text(unescape(content[offset:match.start()])))
-            data = {}
-            for parameter in match[2].split(",")[1:]:
-                key, value = parameter.split("=", 1)
-                data[key] = unescape(value)
-            segments.append({"type": match[1], "data": data})
-            offset = match.end()
-        if offset < len(content):
-            segments.append(text(unescape(content[offset:])))
-        return segments
-    if isinstance(content, dict):
-        content = [content]
-    if not isinstance(content, list):
-        return []
-    result = []
-    for segment in content:
-        try:
-            raw = dict(segment)
-        except (TypeError, ValueError):
-            result.append(text("【无法解析的消息段】"))
-            continue
-        if not isinstance(raw.get("type"), str) or not isinstance(raw.get("data"), dict):
-            result.append(text("【无法解析的消息段】"))
-            continue
-        result.append({"type": raw["type"], "data": dict(raw["data"])})
-    return result
+    if isinstance(content, (str, dict, list, tuple)):
+        return message_segments(content, tolerant=True)
+    return []
 
 
 async def build_forward_history_nodes(
@@ -223,15 +189,7 @@ async def build_forward_history_nodes(
                         result.append({"type": "image", "data": {**data, "file": source}})
                         continue
                 # 特殊消息不可与说明文字混发。保留原生节点，也保护未知扩展类型。
-                labels = {
-                    "record": "语音", "video": "视频", "file": "文件",
-                    "forward": "合并转发", "node": "合并转发",
-                    "json": "JSON卡片", "xml": "XML卡片", "music": "音乐",
-                    "markdown": "Markdown", "miniapp": "小程序",
-                    "onlinefile": "在线文件", "flashtransfer": "闪传",
-                    "mface": "商城表情", "image": "图片",
-                }
-                label = labels.get(kind, f"消息段 {kind}")
+                label = message_label(kind)
                 name = data.get("name")
                 if kind in ("file", "onlinefile") and isinstance(name, str) and name:
                     label += f"：{name}"

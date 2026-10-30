@@ -19,28 +19,12 @@ from nonebot.adapters.onebot.v11.exception import ActionFailed, NetworkError
 from nonebot.config import Config, Env
 from nonebot.drivers.aiohttp import Driver
 
+from .messages import message_label, message_segments
+
 log = logging.getLogger("Notify-Bridge-Bot")
 HistoryProvider = Callable[[int, int], Awaitable[list[dict[str, Any]]]]
 _STOP = object()
 _EXTENSIONS = {"get_friend_msg_history", "send_group_forward_msg", "set_msg_emoji_like"}
-
-
-def message_segments(message: Any) -> list[dict[str, Any]]:
-    """用官方适配器解析 CQ 字符串和数组，保留未知消息段。"""
-    if isinstance(message, Mapping):
-        message = [message]
-    if isinstance(message, tuple):
-        message = list(message)
-    if isinstance(message, str):
-        message = Message(message)
-    result = []
-    for segment in message:
-        raw = (
-            {"type": segment.type, "data": segment.data}
-            if isinstance(segment, MessageSegment) else dict(segment)
-        )
-        result.append({"type": raw["type"], "data": dict(raw["data"])})
-    return result
 
 
 def normalize_event(data: dict[str, Any]) -> dict[str, Any]:
@@ -54,9 +38,10 @@ def normalize_event(data: dict[str, Any]) -> dict[str, Any]:
         result["message"] = message_segments(result.get("message", []))
         result.setdefault("message_seq", result["message_id"])
         result.setdefault("real_id", result["message_id"])
-        result.setdefault("raw_message", str(Message([
-            MessageSegment(**segment) for segment in result["message"]
-        ])))
+        if "raw_message" not in result:
+            result["raw_message"] = str(Message([
+                MessageSegment(**segment) for segment in result["message"]
+            ]))
         result.setdefault("font", 0)
         result.setdefault("sub_type", "friend" if result.get("message_type") == "private" else "normal")
         sender = dict(result.get("sender") or {})
@@ -66,8 +51,7 @@ def normalize_event(data: dict[str, Any]) -> dict[str, Any]:
         if post_type == "message_sent" and result.get("message_type") == "private":
             # 有些实现把 user_id 作为私聊对象；NapCat 业务类型另用 target_id。
             if result.get("target_id") is None and result["user_id"] != result["self_id"]:
-                result["target_id"] = result["user_id"]
-                result["user_id"] = result["self_id"]
+                result["target_id"], result["user_id"] = result["user_id"], result["self_id"]
     if result.get("notice_type") == "group_msg_emoji_like":
         result.setdefault("is_add", result.get("sub_type", "add") == "add")
     if result.get("notice_type") == "notify" and result.get("sub_type") == "poke":
@@ -291,5 +275,5 @@ class OneBotClient(NapCatClient):
             elif kind == "text":
                 parts.append(str(data.get("text", "")))
             else:
-                parts.append(f"【{kind}】")
+                parts.append(f"【{message_label(kind)}】")
         return "".join(parts) or "（无消息内容）"
