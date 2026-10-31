@@ -146,6 +146,15 @@ def record_event_sync(
         return cur.rowcount > 0
 
 
+def has_message_sync(message_id: int) -> bool:
+    """复用消息唯一索引，识别重连、重启或会话关闭后重投的消息。"""
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT 1 FROM session_events WHERE message_id = ?",
+            (message_id,),
+        ).fetchone() is not None
+
+
 def get_session_message_ids_sync(session_id: int) -> set[int]:
     """查询会话内已有 message_id 的事件集合（用于对账核对）。"""
     with _connect() as conn:
@@ -224,6 +233,10 @@ async def record_event(
         record_event_sync, session_id, event_type,
         time=time, actor_uid=actor_uid, message_id=message_id, payload=payload,
     )
+
+
+async def has_message(message_id: int) -> bool:
+    return await asyncio.to_thread(has_message_sync, message_id)
 
 
 async def get_session_message_ids(session_id: int) -> set[int]:

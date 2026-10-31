@@ -224,6 +224,10 @@ bot 启动后会在同一进程读取终端 stdin。控制台内 `quit` / `exit`
 
 NapCat 的 `heartInterval: 30000` 表示每 30 秒上报一次心跳。客户端接收超时默认使用 90 秒，给心跳延迟留出余量；旧配置未填写 `ws_receive_timeout` 时也使用此默认值。若服务端心跳间隔更长，请相应增大该值并重启。连续超过该时长未收到任何 WS 消息仍会触发官方重连流程；消息发送等 API 调用的超时独立计算。
 
+事件按接收顺序处理，内存队列最多保留 1024 条原始事件；超出部分使用临时 SQLite 磁盘缓冲，避免业务处理较慢时持续占用内存，也让同一 WebSocket 上的 API 响应继续被接收。心跳不进入业务队列。临时缓冲仅用于当前运行，关闭客户端时清理，不提供崩溃后的事件重放保证。
+
+私聊消息在更新待回复状态前，先检查当前会话的消息 ID 和会话库中的消息唯一索引，避免重复上报重置提醒、重复记录消息，或让已关闭的会话重新入队。历史消息 ID 继续保留用于存档对账；已随归档保留期清理的消息不再参与数据库去重。
+
 消息上报同时支持数组和 CQ 字符串格式，不要求提供 NapCat 的 `message_seq`、`real_id` 等扩展字段。原有 NapCat 配置可继续使用，业务命令不变。SnowLuma 的表情回应 `sub_type: add/remove` 会转换成现有业务处理需要的添加/移除标志。
 
 SnowLuma 配置建议：在 `wsServers` 中启用服务，选择 `role: Universal`，`messageFormat: array`，并打开 `reportSelfMessage: true`。本项目的 `ws_url` 对应服务地址，`ws_token` 对应 `accessToken`。客服直接在 QQ 回复后自动结束会话，依赖协议端上报 `message_sent`，且事件必须能识别私聊对象；纯标准协议未提供这项扩展时，请使用群内 `.say` / `.bye` / `.close` 处理会话。
@@ -258,6 +262,12 @@ pip install -e .
 
 ```bash
 uv run python main.py
+```
+
+回归测试不读取本地配置，也不连接真实 QQ：
+
+```bash
+uv run --locked --default-index https://pypi.org/simple python -m unittest discover -s tests -v
 ```
 
 或：

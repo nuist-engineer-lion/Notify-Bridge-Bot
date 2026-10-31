@@ -21,10 +21,10 @@ async def handle_friend_request(event: FriendRequestEvent) -> bool:
         log.info("好友申请重复事件已忽略: flag=%s, user_id=%s", flag, uid)
         return True
 
-    cfg.processed_friend_requests[flag] = now
-
     try:
         await cfg.client.call_api("set_friend_add_request", flag=flag, approve=True)
+        # 审批成功即标记，失败可重试；后续欢迎语或通知失败不重复审批。
+        cfg.processed_friend_requests[flag] = time.time()
         cfg.friend_approve_time[uid] = time.time()
 
         cfg.friend_count += 1
@@ -79,8 +79,6 @@ async def handle_friend_request(event: FriendRequestEvent) -> bool:
         except Exception as notify_err:
             log.error("好友申请群通知发送失败: user_id=%s, err=%s", uid, notify_err, exc_info=True)
         log.info("已自动通过好友申请: user_id=%s, comment=%s", uid, comment)
-        cfg.processed_friend_requests[flag] = time.time()
     except Exception as e:
         log.error("自动通过好友申请失败: user_id=%s, err=%s", uid, e, exc_info=True)
-        cfg.processed_friend_requests[flag] = time.time()
     return True

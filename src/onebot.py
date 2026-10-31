@@ -5,7 +5,9 @@
 """
 
 import asyncio
+import json
 import logging
+import sqlite3
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any, Literal
@@ -28,7 +30,6 @@ from pydantic import Field
 from .messages import message_segments
 
 log = logging.getLogger("Notify-Bridge-Bot")
-_STOP = object()
 
 # 协议字段核对基线（2026-10-31）：
 # SnowLuma/SnowLuma v2.2.1 @8ffd314260e9e2b6967eeca494d87aa5be046c34，已实测；
@@ -114,6 +115,55 @@ def _forward_nodes(messages: Any) -> list[dict[str, Any]]:
     return result
 
 
+class _EventBuffer:
+    """内存队列满时临时落盘，避免堵塞同一连接上的 API 响应。"""
+
+    def __init__(self, maxsize: int = 1024):
+        self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=maxsize)
+        self._overflow: sqlite3.Connection | None = None
+        self._closed = False
+
+    def put_nowait(self, data: dict[str, Any]) -> None:
+        if self._closed:
+            raise asyncio.QueueShutDown
+        # 有溢出数据时继续落盘，防止新事件越过旧事件。
+        if self._overflow is None and not self._queue.full():
+            self._queue.put_nowait(data)
+            return
+        if self._overflow is None:
+            # 空文件名创建自动清理的临时数据库；只用作本次运行的缓冲。
+            self._overflow = sqlite3.connect("", isolation_level=None)
+            self._overflow.execute("PRAGMA cache_size=-1024")
+            self._overflow.execute("CREATE TABLE events (id INTEGER PRIMARY KEY, data TEXT NOT NULL)")
+            log.warning("OneBot 事件积压超过内存队列容量，开始使用临时磁盘缓冲")
+        self._overflow.execute(
+            "INSERT INTO events (data) VALUES (?)",
+            (json.dumps(data, ensure_ascii=False, separators=(",", ":")),),
+        )
+
+    async def get(self) -> dict[str, Any]:
+        if not self._queue.empty():
+            return self._queue.get_nowait()
+        if self._overflow is not None:
+            row = self._overflow.execute("SELECT id, data FROM events ORDER BY id LIMIT 1").fetchone()
+            if row is not None:
+                self._overflow.execute("DELETE FROM events WHERE id = ?", (row[0],))
+                return json.loads(row[1])
+            self._overflow.close()
+            self._overflow = None
+        return await self._queue.get()
+
+    def shutdown(self) -> None:
+        self._closed = True
+        self._queue.shutdown()
+
+    def close(self) -> None:
+        self.shutdown()
+        if self._overflow is not None:
+            self._overflow.close()
+            self._overflow = None
+
+
 class _BridgeAdapter(Adapter):
     """复用官方连接、重连、鉴权、echo 和 API 实现，事件交给现有业务队列。"""
 
@@ -179,14 +229,22 @@ class OneBotClient:
         self._bot = None
         self._worker: asyncio.Task | None = None
         self._stop = asyncio.Event()
-        self._queue: asyncio.Queue = asyncio.Queue()
+        self._queue = _EventBuffer()
 
     @property
     def is_running(self) -> bool:
         return self._bot is not None
 
     def _receive(self, raw: dict[str, Any]) -> None:
+        # 心跳仅维持连接；保留 lifecycle，让业务入口及时执行启动初始化。
+        if raw.get("post_type") == "meta_event" and raw.get("meta_event_type") != "lifecycle":
+            return
+        self._queue.put_nowait(raw)
+
+    @staticmethod
+    def _parse_event(raw: dict[str, Any]):
         data = normalize_event(raw)
+        # 官方 json_to_event 是类方法；调用基类，避免重新进入桥接入口。
         if data["post_type"] in ("message", "message_sent"):
             model = {
                 "private": PrivateMessageEvent,
@@ -197,8 +255,7 @@ class OneBotClient:
             event = GroupMsgEmojiLikeEvent.model_validate(data)
         else:
             event = Adapter.json_to_event(data)
-        if event is not None:
-            self._queue.put_nowait(event)
+        return event
 
     async def _run(self) -> None:
         try:
@@ -212,7 +269,7 @@ class OneBotClient:
                 await self._stop.wait()
         finally:
             self._bot = None
-            self._queue.put_nowait(_STOP)
+            self._queue.shutdown()
 
     def __aiter__(self):
         return self.events()
@@ -221,15 +278,23 @@ class OneBotClient:
         if self._worker is not None:
             raise RuntimeError("OneBot 事件循环已启动")
         self._stop.clear()
-        self._queue = asyncio.Queue()
+        self._queue.close()
+        self._queue = _EventBuffer()
         worker = self._worker = asyncio.create_task(self._run(), name="onebot-adapter")
         try:
             while True:
-                event = await self._queue.get()
-                if event is _STOP:
+                try:
+                    raw = await self._queue.get()
+                except asyncio.QueueShutDown:
                     await worker
                     break
-                yield event
+                try:
+                    event = self._parse_event(raw)
+                except (TypeError, ValueError, KeyError):
+                    log.warning("忽略无法解析的 OneBot 事件", exc_info=True)
+                    continue
+                if event is not None:
+                    yield event
         finally:
             await self.close()
 
@@ -241,6 +306,7 @@ class OneBotClient:
                 await worker
             finally:
                 self._worker = None
+                self._queue.close()
 
     async def call_api(self, action: str, **params: Any) -> Any:
         """直接使用官方 API 调用与异常语义，扩展接口同样按 action 调用。"""
