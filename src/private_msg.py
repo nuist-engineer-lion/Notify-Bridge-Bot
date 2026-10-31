@@ -9,6 +9,7 @@ from . import config as cfg
 from .config import log
 from .state import save_state
 from .message_sender import close_session
+from .customer_profiles import cache as customer_profiles
 from . import history, storage
 
 
@@ -57,6 +58,9 @@ async def handle_private_msg(event: PrivateMessageEvent) -> bool:
                  uid, cfg.PROCESSED_FRIEND_REQUESTS_EXPIRE)
         return True
 
+    nickname = getattr(getattr(event, "sender", None), "nickname", "") or ""
+    customer_profiles.observe(uid, nickname, observed_at=float(event.time))
+
     if uid not in cfg.unreplied_customers:
         msg_text = extract_message_text(event.message)
         cfg.unreplied_customers[uid] = {
@@ -78,7 +82,6 @@ async def handle_private_msg(event: PrivateMessageEvent) -> bool:
                  uid, event.message_id, len(cfg.unreplied_customers[uid]["msg_ids"]))
 
     # 实时落库：无会话周期则自动建立（周期起点 = pending_since）
-    nickname = getattr(getattr(event, "sender", None), "nickname", "") or ""
     await history.record_customer_message(uid, int(event.message_id), float(event.time), event.message, nickname)
 
     save_state()

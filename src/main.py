@@ -24,6 +24,7 @@ from .notice_pr import handle_notice_group_msg, flush_pending_acks
 from .shell_console import shell_console_loop
 from . import storage
 from . import history
+from .customer_profiles import cache as customer_profiles
 
 # 后台任务句柄，优雅关停时统一取消
 _background_tasks: list[asyncio.Task] = []
@@ -122,6 +123,8 @@ async def graceful_shutdown(reason: str = "signal") -> None:
                 continue
             if exc is not None:
                 log.debug("后台任务结束时异常: %s", exc)
+
+    await customer_profiles.close()
 
     try:
         await _close_onebot_client()

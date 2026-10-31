@@ -7,6 +7,7 @@ from nonebot.adapters.onebot.v11 import MessageSegment
 
 from . import config as cfg
 from . import ai
+from .customer_profiles import cache as customer_profiles
 from .config import (
     log,
     STARTED_AT,
@@ -275,35 +276,6 @@ async def build_forward_history_nodes(
     return nodes
 
 
-async def get_customer_profiles(user_ids: list[int]) -> dict[int, tuple[str, str]]:
-    """批量读取客户昵称和好友备注；资料获取失败不影响转发。"""
-    friends = {}
-    try:
-        friends = {
-            int(info["user_id"]): info
-            for info in await client.call_api("get_friend_list")
-        }
-    except Exception as e:
-        log.warning("获取好友资料失败，将尝试获取客户昵称: %s", e)
-
-    profiles = {}
-    for user_id in user_ids:
-        info = friends.get(user_id, {})
-        nickname = info.get("nickname") or ""
-        remark = info.get("remark") or "（无）"
-        if not nickname:
-            try:
-                stranger = await client.call_api("get_stranger_info", user_id=str(user_id))
-                nickname = stranger.get("nickname") or ""
-            except Exception as e:
-                log.warning("获取客户 %d 昵称失败: %s", user_id, e)
-        profiles[user_id] = (
-            str(nickname or "未知昵称"),
-            str(remark if user_id in friends else "（未获取到）"),
-        )
-    return profiles
-
-
 def format_customer_profile(user_id: int, nickname: str, remark: str) -> str:
     return f"QQ号：{user_id}\n昵称：{nickname}\n备注：{remark}"
 
@@ -321,7 +293,7 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
 
     log.info("开始构造合并转发 -> 群 %d, 共 %d 名客户", group_id, len(customer_list))
 
-    profiles = await get_customer_profiles([qq for qq, _ in customer_list])
+    customer_profiles.prefetch(qq for qq, _ in customer_list)
     outer_nodes: list[MessageSegment] = [
         MessageSegment.node_custom(
             nickname="客服系统提示",
@@ -356,6 +328,9 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         log.warning("AI建议生成失败，本次提醒不含建议: %s", e)
         suggestions = {}
 
+    profiles = customer_profiles.get_profiles(
+        [qq for qq, _ in forwarded_customers], messages=messages_by_id.values(),
+    )
     suggestion_count = 0
     for qq, _ in forwarded_customers:
         nickname, remark = profiles[qq]
@@ -416,12 +391,14 @@ async def send_forward_from_message_ids(
     """根据消息ID列表发送合并转发到群"""
     if not message_ids:
         return None
-    profiles = await get_customer_profiles([user_id])
-    nickname, remark = profiles[user_id]
+    customer_profiles.prefetch([user_id])
     history_nodes = await build_forward_history_nodes(
         message_ids,
         {str(m["message_id"]): m for m in messages or [] if "message_id" in m},
     )
+    nickname, remark = customer_profiles.get_profiles(
+        [user_id], messages=messages or [],
+    )[user_id]
     outer_nodes: list[MessageSegment] = [
         MessageSegment.node_custom(
             nickname="客服系统提示",
