@@ -2,6 +2,9 @@
 # ws_token 对应服务端 accessToken；SnowLuma 请开启 reportSelfMessage 以监听客服直接回复
 ws_url: "ws://127.0.0.1:3001"
 ws_token: "your_ws_token"
+# 接收任意 WS 消息的空闲超时（秒，默认 90，必须大于 0；修改后需重启）
+# NapCat heartInterval=30000（毫秒）时建议保持 90，避免 30 秒边界竞争导致重连
+ws_receive_timeout: 90
 
 # 内部客服通知群号
 internal_group_id: 123456789

@@ -6,6 +6,8 @@
 
 import asyncio
 import logging
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from typing import Any, Literal
 
 from nonebot.adapters import Adapter as BaseAdapter
@@ -18,7 +20,9 @@ from nonebot.adapters.onebot.v11.event import (
     PrivateMessageEvent as BasePrivateMessageEvent,
 )
 from nonebot.config import Config, Env
+from nonebot.drivers import Request, WebSocket
 from nonebot.drivers.aiohttp import Driver
+from nonebot.internal.driver import Timeout
 from pydantic import Field
 
 from .messages import message_segments
@@ -125,6 +129,16 @@ class _BridgeAdapter(Adapter):
         self.tasks = set()
         self._setup()
 
+    @asynccontextmanager
+    async def websocket(self, setup: Request) -> AsyncGenerator[WebSocket, None]:
+        # 官方正向 WS 固定传入 30 秒，aiohttp 同时将其用作接收超时。
+        # NapCat 的 30 秒心跳需要留出调度/网络余量；仅调整读取，保留有限关闭超时。
+        setup.timeout = Timeout(
+            total=30.0, connect=30.0, read=self.owner.ws_receive_timeout, close=30.0,
+        )
+        async with super().websocket(setup) as ws:
+            yield ws
+
     def json_to_event(self, json_data: Any):
         if not isinstance(json_data, dict) or "post_type" not in json_data:
             return super().json_to_event(json_data)
@@ -157,9 +171,10 @@ class _BridgeAdapter(Adapter):
 class OneBotClient:
     """将官方适配器嵌入现有异步入口，按顺序分发原始消息事件。"""
 
-    def __init__(self, ws_url: str, token: str = ""):
+    def __init__(self, ws_url: str, token: str = "", *, ws_receive_timeout: float = 90.0):
         self.ws_url = ws_url
         self.token = token
+        self.ws_receive_timeout = ws_receive_timeout
         self.self_id = 0
         self._bot = None
         self._worker: asyncio.Task | None = None

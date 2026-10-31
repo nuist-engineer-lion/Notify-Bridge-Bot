@@ -191,6 +191,7 @@ bot 启动后会在同一进程读取终端 stdin。控制台内 `quit` / `exit`
 | 配置项 | 说明 |
 |--------|------|
 | `ws_url` / `ws_token` | OneBot v11 正向 WebSocket 地址与访问令牌 |
+| `ws_receive_timeout` | WS 接收空闲超时，单位秒，默认 `90`，须为大于 0 的有限值；修改后需重启 |
 | `internal_group_id` | 接收提醒、执行命令、查看状态的内部群号 |
 | `whitelist` | 不参与待回复监控的 QQ 号 |
 | `milestones` | 超时催办节点，单位为分钟 |
@@ -220,6 +221,8 @@ bot 启动后会在同一进程读取终端 stdin。控制台内 `quit` / `exit`
 ## OneBot v11 接入与扩展功能
 
 机器人主动连接 `ws_url`，需要服务端提供同时支持事件上报和 API 调用的正向 WS 接口（通常称为 `Universal`）；本项目不监听反向 WS 连接。服务端应在连接建立时发送 OneBot v11 的 `meta_event.lifecycle.connect` 事件。`ws_token` 会作为 `Authorization: Bearer ...` 发送。
+
+NapCat 的 `heartInterval: 30000` 表示每 30 秒上报一次心跳。客户端接收超时默认使用 90 秒，给心跳延迟留出余量；旧配置未填写 `ws_receive_timeout` 时也使用此默认值。若服务端心跳间隔更长，请相应增大该值并重启。连续超过该时长未收到任何 WS 消息仍会触发官方重连流程；消息发送等 API 调用的超时独立计算。
 
 消息上报同时支持数组和 CQ 字符串格式，不要求提供 NapCat 的 `message_seq`、`real_id` 等扩展字段。原有 NapCat 配置可继续使用，业务命令不变。SnowLuma 的表情回应 `sub_type: add/remove` 会转换成现有业务处理需要的添加/移除标志。
 

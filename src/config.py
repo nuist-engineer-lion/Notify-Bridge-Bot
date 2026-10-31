@@ -27,7 +27,7 @@ log = logging.getLogger("Notify-Bridge-Bot")
 # ================= 加载配置 =================
 CONFIG_PATH = "config.yaml"
 RELOAD_STATUS_PATH = "archives/reload-status.json"
-RESTART_REQUIRED_KEYS = {"ws_url", "ws_token", "archive_dir", "state_file"}
+RESTART_REQUIRED_KEYS = {"ws_url", "ws_token", "ws_receive_timeout", "archive_dir", "state_file"}
 GIT_LOG_LIMIT = 8
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -198,6 +198,10 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     say_input_timeout = float(applied_config.get("say_input_timeout_seconds", 30))
     if not math.isfinite(say_input_timeout) or say_input_timeout <= 0:
         raise ValueError("say_input_timeout_seconds 必须为大于 0 的有限秒数")
+    ws_receive_timeout = float(applied_config.get("ws_receive_timeout", 90))
+    if not math.isfinite(ws_receive_timeout) or ws_receive_timeout <= 0:
+        raise ValueError("ws_receive_timeout 必须为大于 0 的有限秒数")
+    applied_config["ws_receive_timeout"] = ws_receive_timeout
     restart_only_changes: list[str] = []
 
     if not initial and config:
@@ -343,7 +347,9 @@ mute_until: float = 0.0
 
 _apply_config(load_config(CONFIG_PATH), initial=True)
 
-client: OneBotClient = OneBotClient(WS_URL, WS_TOKEN)
+client: OneBotClient = OneBotClient(
+    WS_URL, WS_TOKEN, ws_receive_timeout=config["ws_receive_timeout"],
+)
 _config_mtime = _get_config_mtime(CONFIG_PATH)
 _failed_config_mtime: float | None = None
 
