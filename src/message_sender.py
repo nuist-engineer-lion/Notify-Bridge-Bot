@@ -124,7 +124,11 @@ async def build_forward_history_nodes(
     message_ids: list[int],
     messages_by_id: dict[str, dict] | None = None,
 ) -> list[MessageSegment]:
-    """引用消息展开为快照，避免跨会话转发后 Reply 失去上下文。"""
+    """保留原生引用，并补全跨会话转发所需的引用预览。"""
+    # 原生引用兼容基线（2026-10-31，仅源码核对，QQ 显示效果待实测）：
+    # SnowLuma/SnowLuma v2.2.1 @8ffd314260e9e2b6967eeca494d87aa5be046c34；
+    # NapNeko/NapCatQQ main @98d781d19815d1625b24d717ce280ecf0a4f6d0c。
+    # 下方 SnowLuma 路径相对 packages/onebot/src/，NapCat 路径相对 packages/napcat-onebot/。
     cache: dict[str, dict | None] = dict(messages_by_id or {})
 
     def text(value: str) -> dict:
@@ -150,9 +154,38 @@ async def build_forward_history_nodes(
                 cache[message_id] = None
         return cache[message_id]
 
-    async def expand(
-        content: list[dict], path: frozenset[str],
-        current_id: str, native_ids: dict[str, None],
+    def quote_preview(content) -> str:
+        parts = []
+        for segment in _forward_segments(content):
+            kind, data = segment["type"], segment["data"]
+            if kind == "text":
+                parts.append(str(data.get("text") or ""))
+            elif kind == "at":
+                qq = data.get("qq")
+                parts.append("@全体成员" if qq == "all" else f"@{qq or '未知用户'}")
+            else:
+                # 兼容 SnowLuma 2.2.1：reply-preview.ts 将引用媒体转为文字摘要，
+                # 拒绝嵌套 reply/node；此处统一成 text，避免再次上传媒体或解析失败。
+                label = message_label(kind)
+                name = data.get("name")
+                if kind in ("file", "onlinefile") and isinstance(name, str) and name:
+                    label += f"：{name}"
+                parts.append(f"[{label}]")
+        return "".join(parts)
+
+    def quote_integer(value, *, minimum: int, maximum: int) -> str | None:
+        # 兼容 SnowLuma 2.2.1 message-parser.ts::parseForwardReply/replyInteger：
+        # qq 必须为正安全整数，time 必须为 uint32 秒；省略不合法的可选元数据。
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            return None
+        try:
+            number = int(value)
+        except ValueError:
+            return None
+        return str(number) if minimum <= number <= maximum else None
+
+    async def prepare_content(
+        content: list[dict], current_id: str, native_ids: dict[str, None],
     ) -> list[dict]:
         result = []
         for segment in content:
@@ -183,29 +216,37 @@ async def build_forward_history_nodes(
                 native_ids[current_id] = None
                 result.append(text(f"\n【{label}，见下方原消息 {current_id}】\n"))
                 continue
-            reply_id = data.get("id")
-            if reply_id is None:
-                result.append(text("【引用消息：缺少消息 ID，无法获取原文】\n"))
-                continue
-            key = str(reply_id)
-            if key in path or len(path) >= 4:
-                result.append(text(f"【引用消息 {key}：已省略更深层引用】\n"))
-                continue
-            quoted = await load(key)
-            if quoted is None:
-                result.append(text(f"【引用消息 {key}：原消息无法获取】\n"))
-                continue
-            sender = sender_info(quoted)
-            uid = sender.get("user_id")
-            name = sender.get("card") or sender.get("nickname") or str(uid or "未知发送者")
-            label = f"{name}（{uid}）" if uid is not None else name
-            result.append(text(f"【引用 {label}】\n"))
-            quoted_content = segments(quoted)
-            result.extend(
-                await expand(quoted_content, path | {key}, key, native_ids)
-                if quoted_content else [text("（原消息内容不可用）")]
+            key = str(data["id"]) if data.get("id") is not None else None
+            preview = quote_preview(data.get("message"))
+            quoted = cache.get(key) if key is not None else None
+            if not preview and key is not None:
+                quoted = await load(key)
+            if not preview and quoted is not None:
+                preview = quote_preview(segments(quoted))
+            if not preview:
+                preview = "（原消息内容不可用）"
+
+            # 兼容 SnowLuma 2.2.1 message-parser.ts::parseForwardReply：
+            # message 优先于 id，qq/time 用于构造原生引用预览。
+            # 兼容 NapCat @98d781d api/msg.ts 的 reply 转换器：
+            # id 可定位原会话；seq 优先在目标会话查询，因此这里保留 id、移除 seq。
+            reply_data = {"message": [text(preview)]}
+            if key is not None:
+                reply_data["id"] = key
+            quoted = quoted or {}
+            qq = quote_integer(
+                data.get("qq", sender_info(quoted).get("user_id")),
+                minimum=1, maximum=2**53 - 1,
             )
-            result.append(text("\n【回复】\n"))
+            timestamp = quote_integer(
+                data.get("time", quoted.get("time")),
+                minimum=0, maximum=2**32 - 1,
+            )
+            if qq is not None:
+                reply_data["qq"] = qq
+            if timestamp is not None:
+                reply_data["time"] = timestamp
+            result.append({"type": "reply", "data": reply_data})
         return result
 
     nodes: list[MessageSegment] = []
@@ -219,12 +260,14 @@ async def build_forward_history_nodes(
         sender = sender_info(message)
         nickname = sender.get("card") or sender.get("nickname") or sender.get("user_id") or "未知发送者"
         native_ids: dict[str, None] = {}
-        expanded = await expand(content, frozenset({key}), key, native_ids)
-        # 用原发送者和时间重建引用说明，特殊内容通过相邻原消息节点保留。
+        prepared = await prepare_content(content, key, native_ids)
+        # 兼容 SnowLuma 2.2.1 modules/message-actions.ts::parseForwardNodes：
+        # node.id 路径未提供引用 ID 解析回调，故含引用时重建节点并显式携带 message。
+        # 保留原发送者、时间和原生引用；正文特殊内容通过相邻原消息节点保留。
         nodes.append(MessageSegment.node_custom(
             nickname=str(nickname),
             user_id=str(sender.get("user_id") or client.self_id),
-            content=expanded,
+            content=prepared,
         ))
         if message.get("time") is not None:
             nodes[-1].data["time"] = message["time"]
