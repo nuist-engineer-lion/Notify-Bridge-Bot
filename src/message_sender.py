@@ -282,7 +282,8 @@ def format_customer_profile(user_id: int, nickname: str, remark: str) -> str:
 
 async def send_nested_forward(group_id: int, customer_list: list[tuple[int, CustomerData]], summary_text: str, max_age_seconds: int | None = None) -> int | None:
     """
-    构造嵌套合并转发并发送，每个客户的消息通过 get_recent_message_ids 获取最近指定时间内的消息
+    按客户连续展示资料、AI 建议和聊天记录，三类节点均使用该客户身份。
+    summary_text 保留调用兼容，摘要只在转发外的提醒中展示。
     """
     if max_age_seconds is None:
         max_age_seconds = cfg.RECENT_MESSAGE_MAX_AGE
@@ -294,13 +295,7 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
     log.info("开始构造合并转发 -> 群 %d, 共 %d 名客户", group_id, len(customer_list))
 
     customer_profiles.prefetch(qq for qq, _ in customer_list)
-    outer_nodes: list[MessageSegment] = [
-        MessageSegment.node_custom(
-            nickname="客服系统提示",
-            user_id=str(client.self_id),
-            content=message_segments([MessageSegment.text(summary_text)]),
-        ),
-    ]
+    outer_nodes: list[MessageSegment] = []
     forwarded_customers = []
     customer_message_ids: dict[int, list[int]] = {}
     messages_by_id: dict[str, dict] = {}
@@ -336,8 +331,8 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         nickname, remark = profiles[qq]
         outer_nodes.append(
             MessageSegment.node_custom(
-                nickname="客户信息",
-                user_id=str(client.self_id),
+                nickname=nickname,
+                user_id=str(qq),
                 content=message_segments([
                     MessageSegment.text(format_customer_profile(qq, nickname, remark)),
                 ]),
@@ -347,8 +342,8 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         if suggestion:
             outer_nodes.append(
                 MessageSegment.node_custom(
-                    nickname="AI建议",
-                    user_id=str(client.self_id),
+                    nickname=nickname,
+                    user_id=str(qq),
                     content=message_segments([
                         MessageSegment.text(f"🤖 AI建议回复（客户 {qq}）：\n{suggestion}"),
                     ]),
@@ -401,8 +396,8 @@ async def send_forward_from_message_ids(
     )[user_id]
     outer_nodes: list[MessageSegment] = [
         MessageSegment.node_custom(
-            nickname="客服系统提示",
-            user_id=str(client.self_id),
+            nickname=nickname,
+            user_id=str(user_id),
             content=message_segments([
                 MessageSegment.text(f"{title}\n\n{format_customer_profile(user_id, nickname, remark)}"),
             ]),
