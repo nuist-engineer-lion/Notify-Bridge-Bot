@@ -19,7 +19,8 @@ from typing import Any
 import aiohttp
 
 from . import config as cfg
-from .config import log, client
+from .config import log
+from .messages import message_segments
 
 _SYSTEM_PROMPT = (
     "你是一家维修客服的助手。请根据以下客服与客户的最近对话，以客服身份草拟下一条发给客户的回复。"
@@ -27,9 +28,7 @@ _SYSTEM_PROMPT = (
     "如果客户诉求还不明确，先回应已知信息并礼貌追问。"
 )
 
-_PER_MESSAGE_MAX_CHARS = 200
 _DEFAULT_TIMEOUT = 12.0
-_DEFAULT_MAX_CONTEXT = 20
 _DEFAULT_MAX_SUGGESTION_CHARS = 300
 _DEFAULT_TEMPERATURE = 0.7
 _DEFAULT_MAX_IMAGES = 3
@@ -85,7 +84,9 @@ def _extract_image_urls(data: dict) -> list[str]:
     return urls
 
 
-def extract_content_from_segments(segments, *, allow_images: bool) -> tuple[str, list[str]]:
+def extract_content_from_segments(
+    segments, *, allow_images: bool, include_replies: bool = True,
+) -> tuple[str, list[str]]:
     """从 OB11 消息段提取文本与图片 URL。
 
     返回 (文本（含 [图片] 等占位）, image_url 列表)。
@@ -93,9 +94,7 @@ def extract_content_from_segments(segments, *, allow_images: bool) -> tuple[str,
     """
     parts: list[str] = []
     image_urls: list[str] = []
-    for seg in segments or []:
-        if not isinstance(seg, dict):
-            continue
+    for seg in message_segments(segments, tolerant=True):
         seg_type = str(seg.get("type", ""))
         data = seg.get("data") or {}
         if seg_type == "text":
@@ -108,9 +107,18 @@ def extract_content_from_segments(segments, *, allow_images: bool) -> tuple[str,
                         image_urls.append(u)
         elif seg_type == "face":
             parts.append("[表情]")
+        elif seg_type == "reply":
+            # 转发构造已补全引用预览；只展开一层，避免循环或嵌套引用。
+            if include_replies:
+                preview, _ = extract_content_from_segments(
+                    data.get("message"), allow_images=False, include_replies=False,
+                )
+                parts.append(f"【引用：{preview or '（原消息内容不可用）'}】")
+            else:
+                parts.append("[引用消息]")
         elif seg_type:
             parts.append(f"[{seg_type}]")
-    return "".join(parts).strip()[:_PER_MESSAGE_MAX_CHARS], image_urls
+    return "".join(parts).strip(), image_urls
 
 
 def extract_text_from_segments(segments) -> str:
@@ -119,27 +127,20 @@ def extract_text_from_segments(segments) -> str:
     return text
 
 
-async def build_transcript(uid: int, limit: int, *, allow_images: bool = False) -> list[dict[str, Any]]:
-    """拉取该客户最近的双方消息，转为 [{role, text, images}] 序列。"""
-    resp = await client.call_api(
-        "get_friend_msg_history",
-        user_id=str(uid),
-        count=limit,
-        parse_mult_msg=True,
-    )
-    messages = resp.get("messages", []) or []
-    messages.sort(key=lambda m: m.get("time", 0))
+def build_transcript(
+    uid: int, messages: list[dict], *, allow_images: bool = False,
+) -> list[dict[str, Any]]:
+    """使用本次实际转发的消息快照，不另拉历史、不截断条数或正文。"""
     transcript: list[dict[str, Any]] = []
-    for msg in messages[-limit:]:
-        text, images = extract_content_from_segments(msg.get("message", []), allow_images=allow_images)
-        if not text and not images:
-            continue
+    for msg in messages:
+        content = msg.get("message")
+        if content is None:
+            content = msg.get("raw_message", [])
+        text, images = extract_content_from_segments(content, allow_images=allow_images)
         sender = (msg.get("sender", {}) or {}).get("user_id")
         role = "customer" if sender is not None and int(sender) == uid else "staff"
         # 仅有图片时用占位文本，保证对话行可读
-        line = text or ("[图片]" if images else "")
-        if not line:
-            continue
+        line = text or ("[图片]" if images else "（空消息）")
         transcript.append({"role": role, "text": line, "images": images})
     return transcript
 
@@ -300,10 +301,10 @@ async def _call_llm(
         return None
 
 
-async def generate_reply_suggestion(uid: int) -> str | None:
+async def generate_reply_suggestion(uid: int, messages: list[dict]) -> str | None:
     """为单个客户生成建议回复；未启用/无对话/失败/超时均返回 None。
 
-    总超时按 timeout_seconds 计：拉历史 + 视觉请求 + 纯文本回退共享同一时间预算，
+    总超时按 timeout_seconds 计：图片处理 + 视觉请求 + 纯文本回退共享同一时间预算，
     视觉超时/失败不会吞掉纯文本重试机会。
     """
     s = _settings()
@@ -321,10 +322,7 @@ async def generate_reply_suggestion(uid: int) -> str | None:
         return max(0.05, deadline - time.monotonic())
 
     try:
-        transcript = await asyncio.wait_for(
-            build_transcript(uid, int(s.get("max_context_messages", _DEFAULT_MAX_CONTEXT)), allow_images=use_vision),
-            timeout=_remaining(),
-        )
+        transcript = build_transcript(uid, messages, allow_images=use_vision)
         prompt = _build_prompt(transcript)
         if prompt is None:
             log.info("AI建议: 客户 %d 窗口内无可读对话，跳过", uid)
@@ -380,9 +378,9 @@ async def generate_reply_suggestion(uid: int) -> str | None:
     return suggestion[:max_chars]
 
 
-async def suggest_for_customers(customer_list: list[tuple[int, dict]]) -> dict[int, str]:
-    """为一批客户并发生成建议回复，返回 {uid: 建议}；失败/未启用的客户不在结果中。"""
-    total = len(customer_list)
+async def suggest_for_customers(messages_by_customer: dict[int, list[dict]]) -> dict[int, str]:
+    """使用各客户本次转发的消息快照并发生成建议，返回 {uid: 建议}。"""
+    total = len(messages_by_customer)
     if total == 0:
         return {}
     if not is_enabled():
@@ -397,11 +395,11 @@ async def suggest_for_customers(customer_list: list[tuple[int, dict]]) -> dict[i
         _max_images() if vision_enabled() else 0,
     )
     results = await asyncio.gather(
-        *(generate_reply_suggestion(qq) for qq, _ in customer_list),
+        *(generate_reply_suggestion(qq, messages) for qq, messages in messages_by_customer.items()),
         return_exceptions=True,
     )
     suggestions: dict[int, str] = {}
-    for (qq, _), result in zip(customer_list, results):
+    for qq, result in zip(messages_by_customer, results):
         if isinstance(result, BaseException):
             log.warning("AI建议: 客户 %d 生成异常: %s", qq, result)
             continue

@@ -124,8 +124,10 @@ def _forward_segments(content) -> list[dict]:
 async def build_forward_history_nodes(
     message_ids: list[int],
     messages_by_id: dict[str, dict] | None = None,
+    *,
+    context_messages: list[dict] | None = None,
 ) -> list[MessageSegment]:
-    """保留原生引用，并补全跨会话转发所需的引用预览。"""
+    """保留原生引用；可同时收集包含相同引用预览的 AI 上下文消息快照。"""
     # 原生引用兼容基线（2026-10-31，仅源码核对，QQ 显示效果待实测）：
     # SnowLuma/SnowLuma v2.2.1 @8ffd314260e9e2b6967eeca494d87aa5be046c34；
     # NapNeko/NapCatQQ main @98d781d19815d1625b24d717ce280ecf0a4f6d0c。
@@ -257,11 +259,25 @@ async def build_forward_history_nodes(
         content = segments(message) if message is not None else []
         if not any(segment.get("type") == "reply" for segment in content):
             nodes.append(MessageSegment.node(key))
+            if context_messages is not None:
+                context_messages.append({
+                    **(message or {}), "message_id": message_id, "message": content,
+                })
             continue
         sender = sender_info(message)
         nickname = sender.get("card") or sender.get("nickname") or sender.get("user_id") or "未知发送者"
         native_ids: dict[str, None] = {}
         prepared = await prepare_content(content, key, native_ids)
+        if context_messages is not None:
+            # AI 保留原正文中的媒体段，引用则与群内节点使用同一份补全预览。
+            replies = iter(segment for segment in prepared if segment["type"] == "reply")
+            context_messages.append({
+                **message,
+                "message": [
+                    next(replies) if segment["type"] == "reply" else segment
+                    for segment in content
+                ],
+            })
         # 兼容 SnowLuma 2.2.1 modules/message-actions.ts::parseForwardNodes：
         # node.id 路径未提供引用 ID 解析回调，故含引用时重建节点并显式携带 message。
         # 保留原发送者、时间和原生引用；正文特殊内容通过相邻原消息节点保留。
@@ -316,9 +332,18 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         log.warning("所有客户均无%d秒内消息，取消发送合并转发", max_age_seconds)
         return None
 
+    customer_history_nodes: dict[int, list[MessageSegment]] = {}
+    context_by_customer: dict[int, list[dict]] = {}
+    for qq, _ in forwarded_customers:
+        context_by_customer[qq] = []
+        customer_history_nodes[qq] = await build_forward_history_nodes(
+            customer_message_ids[qq], messages_by_id,
+            context_messages=context_by_customer[qq],
+        )
+
     # AI 建议在合并转发第一层独立成条；失败不影响客户资料和历史消息。
     try:
-        suggestions = await ai.suggest_for_customers(forwarded_customers)
+        suggestions = await ai.suggest_for_customers(context_by_customer)
     except Exception as e:
         log.warning("AI建议生成失败，本次提醒不含建议: %s", e)
         suggestions = {}
@@ -354,9 +379,7 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
             MessageSegment.node_custom(
                 nickname=nickname,
                 user_id=str(qq),
-                content=message_segments(
-                    await build_forward_history_nodes(customer_message_ids[qq], messages_by_id)
-                ),
+                content=message_segments(customer_history_nodes[qq]),
             )
         )
     log.info(
