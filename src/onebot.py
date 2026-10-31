@@ -316,3 +316,20 @@ class OneBotClient:
         if action == "send_group_forward_msg":
             params["messages"] = _forward_nodes(params.get("messages", []))
         return await bot.call_api(action, **params)
+
+    async def get_friend_count(self) -> int:
+        """启动和夜间统计专用；只把数量返回业务层，不缓存或传播名单。
+
+        已核对 SnowLuma 2.2.1 @8ffd314 的 actions 定义和 NapCat @98d781d
+        的 action/router.ts：未提供独立数量接口。get_friends_with_category
+        同样读取/返回全量名单，因此直接使用标准 get_friend_list 计数。
+        此方法是本地封装，不会尝试调用不存在的同名 OneBot action。
+        """
+        bot = self._bot
+        if bot is None:
+            raise RuntimeError("OneBot 客户端未连接")
+        async with asyncio.timeout(30.0):
+            friends = await bot.call_api("get_friend_list", _timeout=30.0)
+        if not isinstance(friends, list):
+            raise ValueError("好友列表返回格式错误，无法统计好友数量")
+        return len(friends)

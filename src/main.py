@@ -173,8 +173,7 @@ async def _bot_event_loop() -> None:
                         if _shutdown_requested:
                             break
                         try:
-                            friend_list = await cfg.client.call_api("get_friend_list", _timeout=30.0)
-                            cfg.friend_count = len(friend_list)
+                            cfg.friend_count = await cfg.client.get_friend_count()
                             log.info("好友数量已初始化: %d", cfg.friend_count)
                             break
                         except Exception as e:

@@ -175,8 +175,7 @@ async def monitor_loop():
 
             # 夜间模式结束后刷新好友人数
             try:
-                friend_list = await cfg.client.call_api("get_friend_list", _timeout=30.0)
-                cfg.friend_count = len(friend_list)
+                cfg.friend_count = await cfg.client.get_friend_count()
                 log.info("夜间汇总后刷新好友人数: %d", cfg.friend_count)
             except Exception as e:
                 log.warning("夜间汇总后刷新好友人数失败: %s", e)
