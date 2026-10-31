@@ -12,6 +12,7 @@ from typing import Any
 import yaml
 
 from nonebot.adapters.onebot.v11 import MessageSegment
+from nonebot.log import default_filter, logger as nonebot_logger, logger_id as nonebot_logger_id
 
 from .models import CustomerData, ForwardMonitorData, DelayedNotification, RecallableSendData
 from .onebot import OneBotClient
@@ -23,6 +24,28 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("Notify-Bridge-Bot")
+
+
+def _forward_nonebot_log(message) -> None:
+    """将 NoneBot 日志交给项目 logging，统一格式和异常输出。"""
+    record = message.record
+    exception = record["exception"]
+    log.log(
+        record["level"].no,
+        record["message"],
+        exc_info=(exception.type, exception.value, exception.traceback) if exception else None,
+    )
+
+
+nonebot_logger.remove(nonebot_logger_id)
+nonebot_logger.add(
+    _forward_nonebot_log,
+    level=0,
+    filter=default_filter,
+    format="{message}",
+    backtrace=False,
+    diagnose=False,
+)
 
 # ================= 加载配置 =================
 CONFIG_PATH = "config.yaml"
