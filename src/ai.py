@@ -121,7 +121,8 @@ def extract_text_from_segments(segments) -> str:
 
 async def build_transcript(uid: int, limit: int, *, allow_images: bool = False) -> list[dict[str, Any]]:
     """拉取该客户最近的双方消息，转为 [{role, text, images}] 序列。"""
-    resp = await client.get_friend_msg_history(
+    resp = await client.call_api(
+        "get_friend_msg_history",
         user_id=str(uid),
         count=limit,
         parse_mult_msg=True,

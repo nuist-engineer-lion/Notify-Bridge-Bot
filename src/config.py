@@ -11,10 +11,11 @@ from typing import Any
 
 import yaml
 
-from napcat import NapCatClient
-from napcat.types import Text, Image, Face, At, Poke
+from nonebot.adapters.onebot.v11 import MessageSegment
+from nonebot.log import default_filter, logger as nonebot_logger, logger_id as nonebot_logger_id
 
 from .models import CustomerData, ForwardMonitorData, DelayedNotification, RecallableSendData
+from .onebot import OneBotClient
 
 # ================= 日志配置 =================
 logging.basicConfig(
@@ -24,10 +25,32 @@ logging.basicConfig(
 )
 log = logging.getLogger("Notify-Bridge-Bot")
 
+
+def _forward_nonebot_log(message) -> None:
+    """将 NoneBot 日志交给项目 logging，统一格式和异常输出。"""
+    record = message.record
+    exception = record["exception"]
+    log.log(
+        record["level"].no,
+        record["message"],
+        exc_info=(exception.type, exception.value, exception.traceback) if exception else None,
+    )
+
+
+nonebot_logger.remove(nonebot_logger_id)
+nonebot_logger.add(
+    _forward_nonebot_log,
+    level=0,
+    filter=default_filter,
+    format="{message}",
+    backtrace=False,
+    diagnose=False,
+)
+
 # ================= 加载配置 =================
 CONFIG_PATH = "config.yaml"
 RELOAD_STATUS_PATH = "archives/reload-status.json"
-RESTART_REQUIRED_KEYS = {"ws_url", "ws_token", "archive_dir", "state_file"}
+RESTART_REQUIRED_KEYS = {"ws_url", "ws_token", "ws_receive_timeout", "archive_dir", "state_file"}
 GIT_LOG_LIMIT = 8
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -122,32 +145,20 @@ WHITELIST: list[int] = []
 MILESTONES: list[int] = []
 MONITORED_FORWARD_LIMIT = 0
 
-# ================= 结构化消息类型映射 =================
-SEGMENT_TYPE_MAP = {
-    "text": Text,
-    "image": Image,
-    "face": Face,
-    "at": At,
-    "poke": Poke,
-}
-
 
 def parse_message_config(raw):
-    """将配置中的消息值转换为 napcat SDK 可接受的格式。
+    """将配置中的消息值转换为 OneBot 消息格式。
 
     支持两种格式：
     - 字符串：直接返回字符串（去除末尾多余换行）
-    - 列表：每个元素为 {"type": "text", "data": {...}}，返回 napcat 消息段对象列表
+    - 列表：每个元素为 {"type": "text", "data": {...}}，返回消息段对象列表
     """
     if isinstance(raw, str):
         return raw.rstrip("\n")
     if isinstance(raw, list):
         segments = []
         for item in raw:
-            seg_type = item["type"]
-            seg_data = item.get("data", {})
-            cls = SEGMENT_TYPE_MAP[seg_type.lower()]
-            segments.append(cls(**seg_data))
+            segments.append(MessageSegment(item["type"].lower(), dict(item.get("data", {}))))
         return segments
     return raw
 
@@ -210,6 +221,10 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     say_input_timeout = float(applied_config.get("say_input_timeout_seconds", 30))
     if not math.isfinite(say_input_timeout) or say_input_timeout <= 0:
         raise ValueError("say_input_timeout_seconds 必须为大于 0 的有限秒数")
+    ws_receive_timeout = float(applied_config.get("ws_receive_timeout", 90))
+    if not math.isfinite(ws_receive_timeout) or ws_receive_timeout <= 0:
+        raise ValueError("ws_receive_timeout 必须为大于 0 的有限秒数")
+    applied_config["ws_receive_timeout"] = ws_receive_timeout
     restart_only_changes: list[str] = []
 
     if not initial and config:
@@ -355,7 +370,9 @@ mute_until: float = 0.0
 
 _apply_config(load_config(CONFIG_PATH), initial=True)
 
-client: NapCatClient = NapCatClient(WS_URL, WS_TOKEN)
+client: OneBotClient = OneBotClient(
+    WS_URL, WS_TOKEN, ws_receive_timeout=config["ws_receive_timeout"],
+)
 _config_mtime = _get_config_mtime(CONFIG_PATH)
 _failed_config_mtime: float | None = None
 

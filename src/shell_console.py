@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 
-from napcat import Text
+from nonebot.adapters.onebot.v11 import MessageSegment
 
 from . import config as cfg
 from .config import log
@@ -153,7 +153,7 @@ def install_console_log_handler() -> None:
             attached_non_propagating.append(name)
 
     # 确保关键 logger 会冒泡到 root（不各自挂 handler）
-    for name in ("Notify-Bridge-Bot", "napcat", "napcat.client", "napcat.connection"):
+    for name in ("Notify-Bridge-Bot",):
         lg = logging.getLogger(name)
         _remove_console_handlers(lg)
         lg.propagate = True
@@ -183,21 +183,21 @@ def uninstall_console_log_handler() -> None:
 
 
 HELP_TEXT = """\
-可用控制台命令（与 bot 同生命周期；命令回执仅本地）：
+可用控制台命令（执行结果显示在本地）：
   help                 显示本帮助
   status               查看运行状态
   list                 列出待回复客户
   mute [分钟]          临时静音；不带参数为不限时，直到 unmute
   unmute               解除静音并汇总延后提醒（与群内 .unmute 一致）
-  reload               重载明文 config.yaml
-  reload remote        git pull → 解密应用配置 → 重载配置
-  reboot               保存状态并重启机器人进程
+  reload               重新加载本地配置
+  reload remote        获取并应用远程更新
+  reboot               保存状态并重启机器人
   say <qq|all> <文本>  私聊发送；all=当前待回复队列
   say <文本…>          队列仅 1 人时自动匹配该客户
   bye <qq|all>         发送结束语并关闭会话；无参且队列仅 1 人时自动匹配
   close <qq|all>       关闭会话（不发结束语）；无参自动匹配同上
   more                 终端不支持；请在通知群用 .more
-  quit / exit / stop   优雅停止 bot（保存状态并退出；与 Ctrl+C 相同）
+  quit / exit / stop   保存状态并退出（与 Ctrl+C 相同）
 """
 
 
@@ -271,7 +271,7 @@ def _shell_debounce_allowed(key: tuple, op: str) -> bool:
     debounce_sec = cfg.DEBOUNCE_SECONDS.get(op, 5)
     now = time.time()
     if now - _shell_debounce.get(key, 0) < debounce_sec:
-        _print(f"操作过于频繁，请稍后再试（防抖 {debounce_sec} 秒）")
+        _print(f"操作过于频繁，请 {debounce_sec} 秒后重试。")
         return False
     return True
 
@@ -299,7 +299,7 @@ async def _shell_say(args: list[str]) -> None:
     if not cfg.client.is_running:
         _print("客户端未运行，无法发送私聊消息。")
         return
-    segments = [Text(text=text)]
+    segments = [MessageSegment.text(text)]
 
     if is_all:
         targets = list(cfg.unreplied_customers.keys())
@@ -540,7 +540,8 @@ async def handle_shell_command(raw: str) -> bool:
             from . import main as app_main
             app_main.request_shutdown("console-quit")
         except Exception as e:
-            _print(f"触发关停失败：{e}")
+            log.error("触发关停失败: %s", e, exc_info=True)
+            _print("停止失败，请使用 Ctrl+C 重试。")
         return False
 
     _print(f"未知命令：{op}，输入 help 查看可用命令。")

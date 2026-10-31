@@ -175,13 +175,9 @@ async def monitor_loop():
 
             # 夜间模式结束后刷新好友人数
             try:
-                friend_list = await cfg.client.send(
-                    {"action": "get_friend_list", "params": {}},
-                    timeout=30.0,
-                )
-                if friend_list.get("status") == "ok" and friend_list.get("retcode") == 0:
-                    cfg.friend_count = len(friend_list.get("data", []))
-                    log.info("夜间汇总后刷新好友人数: %d", cfg.friend_count)
+                friend_list = await cfg.client.call_api("get_friend_list", _timeout=30.0)
+                cfg.friend_count = len(friend_list)
+                log.info("夜间汇总后刷新好友人数: %d", cfg.friend_count)
             except Exception as e:
                 log.warning("夜间汇总后刷新好友人数失败: %s", e)
 

@@ -1,6 +1,6 @@
 # Notify-Bridge-Bot
 
-一个基于 [`napcat-sdk`](https://github.com/faithleysath/napcat-sdk) 的 QQ 私聊客服催回复机器人。
+一个通过 OneBot v11 正向 WebSocket 接入的 QQ 私聊客服催回复机器人。连接、重连、消息类型、标准事件与 API 通信使用 NoneBot2 官方 OneBot 适配器。
 
 主要功能：客户发来私聊消息后，如果客服迟迟没有回复，机器人就把消息整理后推送到内部群里提醒；如果超时更久，再按里程碑继续催办；客服处理完成后，再自动结束监控并存档会话。
 
@@ -166,7 +166,7 @@ bot 启动后会在同一进程读取终端 stdin。控制台内 `quit` / `exit`
 停止 bot 也可使用终端 `Ctrl+C`（或向进程发送 `SIGTERM`）。触发后会执行**优雅关停**：
 
 1. 停止接收新事件，取消后台任务（巡检 / 控制台 / 通知 ack 冲刷）
-2. 关闭 NapCat WebSocket 连接
+2. 关闭 OneBot WebSocket 连接
 3. 最后一次将运行状态写入 `state_file`
 4. 进程退出
 
@@ -190,7 +190,8 @@ bot 启动后会在同一进程读取终端 stdin。控制台内 `quit` / `exit`
 
 | 配置项 | 说明 |
 |--------|------|
-| `ws_url` / `ws_token` | NapCat WebSocket 地址与令牌 |
+| `ws_url` / `ws_token` | OneBot v11 正向 WebSocket 地址与访问令牌 |
+| `ws_receive_timeout` | WS 接收空闲超时，单位秒，默认 `90`，须为大于 0 的有限值；修改后需重启 |
 | `internal_group_id` | 接收提醒、执行命令、查看状态的内部群号 |
 | `whitelist` | 不参与待回复监控的 QQ 号 |
 | `milestones` | 超时催办节点，单位为分钟 |
@@ -214,8 +215,34 @@ bot 启动后会在同一进程读取终端 stdin。控制台内 `quit` / `exit`
 ## 运行要求
 
 - Python `3.14+`
-- 可用的 NapCat / OneBot WebSocket 服务
+- 可用的 OneBot v11 正向 WebSocket 服务（如 NapCat、SnowLuma）
 - 一个用于接收提醒和执行命令的内部 QQ 群
+
+## OneBot v11 接入与扩展功能
+
+机器人主动连接 `ws_url`，需要服务端提供同时支持事件上报和 API 调用的正向 WS 接口（通常称为 `Universal`）；本项目不监听反向 WS 连接。服务端应在连接建立时发送 OneBot v11 的 `meta_event.lifecycle.connect` 事件。`ws_token` 会作为 `Authorization: Bearer ...` 发送。
+
+NapCat 的 `heartInterval: 30000` 表示每 30 秒上报一次心跳。客户端接收超时默认使用 90 秒，给心跳延迟留出余量；旧配置未填写 `ws_receive_timeout` 时也使用此默认值。若服务端心跳间隔更长，请相应增大该值并重启。连续超过该时长未收到任何 WS 消息仍会触发官方重连流程；消息发送等 API 调用的超时独立计算。
+
+事件按接收顺序处理，内存队列最多保留 1024 条原始事件；超出部分使用临时 SQLite 磁盘缓冲，避免业务处理较慢时持续占用内存，也让同一 WebSocket 上的 API 响应继续被接收。心跳不进入业务队列。临时缓冲仅用于当前运行，关闭客户端时清理，不提供崩溃后的事件重放保证。
+
+私聊消息在更新待回复状态前，先检查当前会话的消息 ID 和会话库中的消息唯一索引，避免重复上报重置提醒、重复记录消息，或让已关闭的会话重新入队。历史消息 ID 继续保留用于存档对账；已随归档保留期清理的消息不再参与数据库去重。
+
+消息上报同时支持数组和 CQ 字符串格式，不要求提供 NapCat 的 `message_seq`、`real_id` 等扩展字段。原有 NapCat 配置可继续使用，业务命令不变。SnowLuma 的表情回应 `sub_type: add/remove` 会转换成现有业务处理需要的添加/移除标志。
+
+SnowLuma 配置建议：在 `wsServers` 中启用服务，选择 `role: Universal`，`messageFormat: array`，并打开 `reportSelfMessage: true`。本项目的 `ws_url` 对应服务地址，`ws_token` 对应 `accessToken`。客服直接在 QQ 回复后自动结束会话，依赖协议端上报 `message_sent`，且事件必须能识别私聊对象；纯标准协议未提供这项扩展时，请使用群内 `.say` / `.bye` / `.close` 处理会话。
+
+以下功能需要服务端提供对应的扩展 API，NapCat 和已联调的 SnowLuma 2.2.1 均提供这些接口。仅实现 OneBot v11 标准接口的服务端无法提供全部功能。接口不支持、权限错误、参数错误和网络故障均按原来的失败路径处理，不替换为本地历史、普通文本转发或静默跳过。
+
+| 扩展 API | 用途 |
+|----------|------|
+| `get_friend_msg_history` | 从服务端拉取双方历史，用于提醒、`.more`、AI 建议和会话对账 |
+| `send_group_forward_msg` | 保留现有嵌套合并转发 |
+| `set_msg_emoji_like` | 自动贴上或移除操作表情；表情点击操作还依赖协议端提供对应事件 |
+
+实机联调中，SnowLuma 曾在合并转发已送达后返回“未确认发送回执”。机器人保留该错误且不自动重发，避免产生重复消息；遇到这种情况请先检查群内消息。
+
+首次使用新服务端前，请确认机器人能收取私聊消息、向内部群发送提醒，以及通过 `.say <QQ> ...` 回复。真实服务端的媒体、历史消息和表情功能取决于具体实现。
 
 ## 安装
 
@@ -237,6 +264,12 @@ pip install -e .
 uv run python main.py
 ```
 
+回归测试不读取本地配置，也不连接真实 QQ：
+
+```bash
+uv run --locked --default-index https://pypi.org/simple python -m unittest discover -s tests -v
+```
+
 或：
 
 ```bash
@@ -250,8 +283,9 @@ python main.py
 - 客户首次发消息后不会立刻提醒，只有当“距离最后一条客户消息已满 1 分钟”时，才会推送到内部群
 - 如果客户在等待期间继续发消息，会重置计时并清空已上报的里程碑
 - 提醒和 `.more` 的合并转发均展示客户 QQ 号、昵称和好友备注；无好友备注时显示“（无）”，资料获取失败时显示占位信息
-- 提醒和 `.more` 中的引用回复会展开为可读快照，保留引用原文、发送者及图片等消息段；引用目标不在本次历史内时尝试单独获取，无法获取时显示占位提示。连续引用最多展开三层，循环引用会截断。
-- 引用或回复中的语音、视频、文件、卡片、嵌套转发及未知扩展消息会在快照中标注，并通过下方独立的原消息节点保留；图片优先使用可发送的地址，无可用地址时同样保留原消息节点。支持历史消息的数组、单段和 CQ 字符串格式。
+- 提醒和 `.more` 中的引用回复使用 QQ 原生引用样式，并补全引用原文、发送者及时间；优先使用消息自带的引用内容，否则从历史缓存或 `get_msg` 获取，无法获取时在引用框显示占位提示。引用预览不保证能跳转到原消息。
+- 引用框保留文字和 @，图片、语音、视频、文件、卡片等显示类型摘要，连续或循环引用显示 `[引用消息]`，不递归展开。回复正文中的特殊消息仍通过下方独立的原消息节点保留；正文图片优先使用可发送的地址，无可用地址时同样保留原消息节点。支持历史消息的数组、单段和 CQ 字符串格式。
+- 原生引用的针对性兼容对象（2026-10-31 源码核对）：SnowLuma 2.2.1（`8ffd314`）使用 `reply.data.message`、`qq`、`time` 构造引用预览，并要求引用内容不能嵌套 `reply`/`node`；NapCat（`98d781d`）使用 `reply.data.id` 定位原会话，因此保留 `id`，不附带会优先在目标会话查询的 `seq`。这些引用处理已通过本地模拟测试，两端的 QQ 实际显示效果仍待实测。
 - 开启 `ai_suggestion` 后，提醒合并转发的第一层按“客户信息 → AI 建议 → 聊天记录”的顺序展示每位客户的内容；AI 建议为独立消息节点，并标明客户 QQ 号，供客服参考后用 `.say` 发送；生成失败或超时会自动省略，不影响提醒本身
 - `vision_enabled: true` 时，消息中的图片会先由 bot 下载并转为 `data:image/...;base64,...`，再以 OpenAI 兼容 `image_url` 送入模型（优先客户侧，最多 `max_images_per_suggestion` 张）；下载失败的图片会跳过，请求失败或无可用图时自动回退 `[图片]` 占位/纯文本重试
 - 日志会记录每次批量生成的 `成功/总数`（含 0/N）以及合并转发中独立 AI 建议节点的条数，便于排查夜间汇总后无建议等问题
@@ -339,12 +373,6 @@ uv run python scripts/import_jsonl.py             # 导入
 
 `archive_retention_days`（默认 `0` = 永久保留）设置保留天数后，巡检任务每小时清理超期的已完结会话。
 
-## AI 开发指引
-
-如果你使用 Claude Code、Codex 或其他编码代理来修改这个项目，建议先阅读 `napcat-sdk` 的专用说明：
-
-- [`use-napcat-sdk/SKILL.md`](https://raw.githubusercontent.com/faithleysath/napcat-sdk/refs/heads/main/skills/use-napcat-sdk/SKILL.md)
-
 ## 已知限制
 
 - 可操作消息的监听依赖 `monitored_forward_limit` 和 `max_listen_age`；超出窗口后再引用旧消息，机器人可能返回“操作已过期”。
@@ -385,7 +413,7 @@ uv run python scripts/import_jsonl.py             # 导入
 各模块职责：
 
 - `src/main.py`：程序入口逻辑、事件分发、启动通知、重连、优雅关停（信号→取消任务→关连接→落盘状态）
-- `src/config.py`：配置加载、全局状态初始化、NapCat 客户端实例
+- `src/config.py`：配置加载、全局状态初始化、OneBot 客户端实例
 - `src/private_msg.py`：处理客户私聊消息、客服私聊回复、私聊戳一戳
 - `src/new_user.py`：好友申请自动通过、欢迎消息发送、好友数提醒
 - `src/group_msg.py`：群命令、群表情快捷操作、群戳一戳状态面板

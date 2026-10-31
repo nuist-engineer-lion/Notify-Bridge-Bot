@@ -1,8 +1,8 @@
 import time
 import asyncio
 
-from napcat import FriendRequestEvent
-from napcat.exceptions import NapCatAPIError
+from nonebot.adapters.onebot.v11.event import FriendRequestEvent
+from nonebot.adapters.onebot.v11.exception import ActionFailed
 
 from . import config as cfg
 from .config import log
@@ -11,7 +11,7 @@ from .config import log
 async def handle_friend_request(event: FriendRequestEvent) -> bool:
     """自动通过好友申请并通知内部群"""
     uid = event.user_id
-    comment = event.comment
+    comment = event.comment or ""
     flag = event.flag
 
     log.info("收到好友申请：" + str(uid) + " " + comment)
@@ -21,10 +21,10 @@ async def handle_friend_request(event: FriendRequestEvent) -> bool:
         log.info("好友申请重复事件已忽略: flag=%s, user_id=%s", flag, uid)
         return True
 
-    cfg.processed_friend_requests[flag] = now
-
     try:
-        await event.approve()
+        await cfg.client.call_api("set_friend_add_request", flag=flag, approve=True)
+        # 审批成功即标记，失败可重试；后续欢迎语或通知失败不重复审批。
+        cfg.processed_friend_requests[flag] = time.time()
         cfg.friend_approve_time[uid] = time.time()
 
         cfg.friend_count += 1
@@ -34,22 +34,23 @@ async def handle_friend_request(event: FriendRequestEvent) -> bool:
 
         for attempt in range(cfg.FRIEND_WELCOME_RETRIES):
             try:
-                await cfg.client.send_private_msg(
+                await cfg.client.call_api(
+                    "send_private_msg",
                     user_id=str(uid),
                     message=cfg.WELCOME_MESSAGE,
                 )
                 break
-            except NapCatAPIError as e:
+            except ActionFailed as e:
                 if attempt < cfg.FRIEND_WELCOME_RETRIES - 1:
                     log.warning(
                         "欢迎消息发送失败，重试 %d/%d: user_id=%s, retcode=%s, friend_count=%s",
-                        attempt + 1, cfg.FRIEND_WELCOME_RETRIES, uid, e.retcode, friend_count,
+                        attempt + 1, cfg.FRIEND_WELCOME_RETRIES, uid, e.info.get("retcode"), friend_count,
                     )
                     await asyncio.sleep(cfg.FRIEND_WELCOME_RETRY_INTERVAL)
                 else:
                     log.error(
                         "欢迎消息全部重试失败: user_id=%s, retcode=%s, friend_count=%s, err=%s",
-                        uid, e.retcode, friend_count, e, exc_info=True,
+                        uid, e.info.get("retcode"), friend_count, e, exc_info=True,
                     )
             except Exception as welcome_err:
                 log.error("欢迎消息发送失败: user_id=%s, err=%s", uid, welcome_err, exc_info=True)
@@ -70,15 +71,14 @@ async def handle_friend_request(event: FriendRequestEvent) -> bool:
                 friend_count, cfg.FRIEND_COUNT_LIMIT, uid,
             )
         try:
-            await cfg.client.send_group_msg(
+            await cfg.client.call_api(
+                "send_group_msg",
                 group_id=str(cfg.INTERNAL_GROUP_ID),
                 message=notify_text,
             )
         except Exception as notify_err:
             log.error("好友申请群通知发送失败: user_id=%s, err=%s", uid, notify_err, exc_info=True)
         log.info("已自动通过好友申请: user_id=%s, comment=%s", uid, comment)
-        cfg.processed_friend_requests[flag] = time.time()
     except Exception as e:
         log.error("自动通过好友申请失败: user_id=%s, err=%s", uid, e, exc_info=True)
-        cfg.processed_friend_requests[flag] = time.time()
     return True

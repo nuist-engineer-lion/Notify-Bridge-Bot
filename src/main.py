@@ -1,14 +1,16 @@
 import asyncio
 import signal
 
-from napcat import (
+from nonebot.adapters.onebot.v11.event import (
     FriendAddNoticeEvent,
     FriendRequestEvent,
+    PokeNotifyEvent,
+)
+
+from .onebot import (
     GroupMsgEmojiLikeEvent,
     PrivateMessageEvent,
-    FriendPokeEvent,
     GroupMessageEvent,
-    GroupPokeEvent,
 )
 
 from . import config as cfg
@@ -79,29 +81,10 @@ def is_reboot_requested() -> bool:
     return _reboot_requested
 
 
-async def _close_napcat_client() -> None:
-    """尽量优雅关闭 NapCat WebSocket；失败不抛出。"""
-    client = cfg.client
-    conn = getattr(client, "_conn", None)
-    if conn is not None:
-        close = getattr(conn, "close", None)
-        if close is not None:
-            try:
-                await close()
-                log.info("NapCat WebSocket 连接已关闭")
-                return
-            except Exception as e:
-                log.warning("connection.close() 失败: %s", e)
-
-    # 回退：按引用计数退出客户端上下文
-    try:
-        refs = int(getattr(client, "_context_refs", 0) or 0)
-        for _ in range(max(refs, 0)):
-            await client.__aexit__(None, None, None)
-        if refs > 0:
-            log.info("NapCat 客户端上下文已退出")
-    except Exception as e:
-        log.warning("client.__aexit__ 失败: %s", e)
+async def _close_onebot_client() -> None:
+    """通过客户端公开接口停止适配器及其 WebSocket 连接。"""
+    await cfg.client.close()
+    log.info("OneBot WebSocket 连接已关闭")
 
 
 async def graceful_shutdown(reason: str = "signal") -> None:
@@ -141,9 +124,9 @@ async def graceful_shutdown(reason: str = "signal") -> None:
                 log.debug("后台任务结束时异常: %s", exc)
 
     try:
-        await _close_napcat_client()
+        await _close_onebot_client()
     except Exception as e:
-        log.warning("关闭 NapCat 客户端时出错: %s", e)
+        log.warning("关闭 OneBot 客户端时出错: %s", e)
 
     try:
         save_state()
@@ -173,7 +156,8 @@ async def _bot_event_loop() -> None:
 
                 if not startup_notified:
                     try:
-                        await cfg.client.send_group_msg(
+                        await cfg.client.call_api(
+                            "send_group_msg",
                             group_id=str(cfg.INTERNAL_GROUP_ID),
                             message="🤖 客服机器人已启动，开始监听消息。",
                         )
@@ -186,14 +170,10 @@ async def _bot_event_loop() -> None:
                         if _shutdown_requested:
                             break
                         try:
-                            friend_list = await cfg.client.send(
-                                {"action": "get_friend_list", "params": {}},
-                                timeout=30.0,
-                            )
-                            if friend_list.get("status") == "ok" and friend_list.get("retcode") == 0:
-                                cfg.friend_count = len(friend_list.get("data", []))
-                                log.info("好友数量已初始化: %d", cfg.friend_count)
-                                break
+                            friend_list = await cfg.client.call_api("get_friend_list", _timeout=30.0)
+                            cfg.friend_count = len(friend_list)
+                            log.info("好友数量已初始化: %d", cfg.friend_count)
+                            break
                         except Exception as e:
                             log.warning("初始化好友数量失败 (尝试 %d/3): %s", attempt + 1, e)
                             if attempt < 2:
@@ -219,10 +199,10 @@ async def _bot_event_loop() -> None:
                     case PrivateMessageEvent(post_type="message"):
                         await handle_private_msg(event)
 
-                    case FriendPokeEvent():
+                    case PokeNotifyEvent(group_id=None):
                         await handle_friend_poke(event)
 
-                    case GroupPokeEvent():
+                    case PokeNotifyEvent():
                         await handle_group_poke(event)
 
                     case GroupMessageEvent():

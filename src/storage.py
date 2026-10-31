@@ -13,6 +13,8 @@ import asyncio
 import json
 import os
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from . import config as cfg
 from .config import log
@@ -59,12 +61,17 @@ CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_id, time
 """
 
 
-def _connect() -> sqlite3.Connection:
+@contextmanager
+def _connect() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(get_db_path(), timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 # ======================= 同步核心接口 =======================
@@ -137,6 +144,15 @@ def record_event_sync(
             (session_id, time, event_type, actor_uid, message_id, encoded),
         )
         return cur.rowcount > 0
+
+
+def has_message_sync(message_id: int) -> bool:
+    """复用消息唯一索引，识别重连、重启或会话关闭后重投的消息。"""
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT 1 FROM session_events WHERE message_id = ?",
+            (message_id,),
+        ).fetchone() is not None
 
 
 def get_session_message_ids_sync(session_id: int) -> set[int]:
@@ -217,6 +233,10 @@ async def record_event(
         record_event_sync, session_id, event_type,
         time=time, actor_uid=actor_uid, message_id=message_id, payload=payload,
     )
+
+
+async def has_message(message_id: int) -> bool:
+    return await asyncio.to_thread(has_message_sync, message_id)
 
 
 async def get_session_message_ids(session_id: int) -> set[int]:

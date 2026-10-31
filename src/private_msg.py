@@ -1,34 +1,42 @@
 import time
-from typing import Iterable, Union
+from collections.abc import Iterable
 
-from napcat import (
-    PrivateMessageEvent,
-    FriendPokeEvent,
-    Text,
-    Message,
-    UnknownMessageSegment,
-)
+from nonebot.adapters.onebot.v11 import MessageSegment
+from nonebot.adapters.onebot.v11.event import PokeNotifyEvent
 
+from .onebot import PrivateMessageEvent
 from . import config as cfg
 from .config import log
 from .state import save_state
 from .message_sender import close_session
-from . import history
+from . import history, storage
 
 
-def extract_message_text(segments: Iterable[Union[Message, UnknownMessageSegment]]) -> str:
+def extract_message_text(segments: Iterable[MessageSegment]) -> str:
     """
     从消息段可迭代对象中提取纯文本，用于日志记录。
     只提取 Text 段中的文本，忽略其他类型。
     """
     texts: list[str] = []
     for seg in segments:
-        if isinstance(seg, Text):
-            texts.append(seg.text)
+        if seg.type == "text":
+            texts.append(seg.data["text"])
     full = ''.join(texts).strip()
     if len(full) > 100:
         full = full[:100] + '…'
     return full or '<无文本内容>'
+
+
+async def _is_duplicate_message(uid: int, message_id: int) -> bool:
+    data = cfg.unreplied_customers.get(uid)
+    if data is not None and message_id in data["msg_ids"]:
+        return True
+    try:
+        return await storage.has_message(message_id)
+    except Exception:
+        # 与历史采集的降级策略一致：数据库不可用时仍接收客户的新消息。
+        log.warning("查询消息去重记录失败: message_id=%s", message_id, exc_info=True)
+        return False
 
 
 async def handle_private_msg(event: PrivateMessageEvent) -> bool:
@@ -37,6 +45,9 @@ async def handle_private_msg(event: PrivateMessageEvent) -> bool:
 
     if uid in cfg.WHITELIST:
         return False
+
+    if await _is_duplicate_message(uid, event.message_id):
+        return True
 
     now = time.time()
 
@@ -78,6 +89,8 @@ async def handle_sent_msg(event: PrivateMessageEvent) -> bool:
     """处理客服发出的私聊消息：若目标在队列中则结束会话"""
     tid = event.target_id
     if tid in cfg.unreplied_customers:
+        if await _is_duplicate_message(tid, event.message_id):
+            return True
         cfg.unreplied_customers[tid]["msg_ids"].append(event.message_id)
         # 先记录客服回复（周期内），再关闭会话
         await history.record_staff_reply(
@@ -90,9 +103,9 @@ async def handle_sent_msg(event: PrivateMessageEvent) -> bool:
     return False
 
 
-async def handle_friend_poke(event: FriendPokeEvent) -> bool:
+async def handle_friend_poke(event: PokeNotifyEvent) -> bool:
     """处理私聊戳一戳：自动发送结束语并从队列移除"""
-    sid = event.sender_id
+    sid = event.user_id
     if event.target_id == cfg.client.self_id and sid not in cfg.WHITELIST:
         await history.record_poke(sid, actor_uid=int(sid), direction="customer_to_bot")
         closed = await close_session(sid, send_closing=True, close_reason="customer_poke")

@@ -13,6 +13,7 @@ import time
 from . import storage
 from . import config as cfg
 from .config import log
+from .messages import message_segments
 
 
 def _failed_events_file() -> str:
@@ -24,15 +25,11 @@ RECONCILE_WINDOW_TOLERANCE = 2.0
 
 
 def serialize_segments(segments) -> list[dict]:
-    """将 napcat 消息段转为可 JSON 序列化的 OB11 结构。"""
+    """将消息段转为可 JSON 序列化的 OB11 结构。"""
     try:
-        return [dict(seg) for seg in segments]
-    except Exception:
-        try:
-            return [dict(seg) if not isinstance(seg, str) else {"type": "text", "data": {"text": seg}}
-                    for seg in segments]
-        except Exception:
-            return []
+        return message_segments(segments)
+    except (TypeError, ValueError):
+        return []
 
 
 def _text_as_segments(message) -> list[dict]:
@@ -201,7 +198,8 @@ async def reconcile_session_history(
     msgs: list[dict] | None = None
 
     try:
-        resp = await cfg.client.get_friend_msg_history(
+        resp = await cfg.client.call_api(
+            "get_friend_msg_history",
             user_id=str(uid),
             count=500,
             parse_mult_msg=True,
