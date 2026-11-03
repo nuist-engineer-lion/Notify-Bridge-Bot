@@ -1,7 +1,6 @@
-"""通知 PR：通知群白名单自动触发，以及客服内部群 .notice n 手动触发。
+"""通知 PR：客服内部群 .notice n 手动触发。
 
-notice_pr.groups 中的白名单成员消息自动创建 PR；auto_pr_senders 为空时不自动触发。
-客服 INTERNAL_GROUP_ID 内所有成员均可执行 .notice n，不受 auto_pr_senders 限制，
+客服 INTERNAL_GROUP_ID 内所有成员均可执行 .notice n，
 从通知群读取最近共 n 条消息合并为 notices/entries/YYYY-MM-DD-auto-<hash8>.md，通过 GitHub API
 创建分支、提交文件并开 PR；合并由人工在 GitHub 上审核完成，结果不回显到任何群。
 """
@@ -39,7 +38,7 @@ _NOTICE_USAGE = (
 )
 
 # 同一消息只处理一次（事件重复投递/并发保护）
-_processed_msg_ids: dict[tuple[str, int, int], float] = {}
+_processed_msg_ids: dict[tuple[int, int], float] = {}
 _PROCESSED_TTL = 3600
 _PROCESSED_MAX = 512
 
@@ -56,10 +55,10 @@ def _notice_cfg() -> dict[str, Any]:
     return ncfg if isinstance(ncfg, dict) else {}
 
 
-def _claim_notice_event(event: GroupMessageEvent, trigger: str) -> bool:
-    """按触发方式、群和消息去重，自动流程与手动流程相互独立。"""
+def _claim_notice_event(event: GroupMessageEvent) -> bool:
+    """按群和消息去重，避免同一条指令重复执行。"""
     now = time.time()
-    key = (trigger, event.group_id, event.message_id)
+    key = (event.group_id, event.message_id)
     previous = _processed_msg_ids.get(key)
     if previous is not None and now - previous < _PROCESSED_TTL:
         return False
@@ -299,15 +298,8 @@ async def _get_repo_token() -> str | None:
 
 
 def _build_pr_body(*, group_id: int, user_id: int, message_id: int, msg_time: float,
-                   hash8: str, md: str, source_messages: list[dict] | None = None,
-                   trigger: str = "command") -> str:
+                   hash8: str, md: str, source_messages: list[dict] | None = None) -> str:
     ts_str = datetime.fromtimestamp(msg_time, CST).strftime("%Y-%m-%d %H:%M:%S")
-    automatic = trigger == "auto"
-    origin = (
-        "由 Notify-Bridge-Bot 从通知群白名单成员的消息自动创建。"
-        if automatic else "由 Notify-Bridge-Bot 根据客服内部群 `.notice n` 指令自动创建。"
-    )
-    prefix = "" if automatic else "指令"
     sources = ""
     if source_messages:
         sources = (
@@ -324,20 +316,20 @@ def _build_pr_body(*, group_id: int, user_id: int, message_id: int, msg_time: fl
         sources += "\n"
     return (
         "## 自动通知 PR\n\n"
-        f"{origin}\n\n"
+        "由 Notify-Bridge-Bot 根据客服内部群 `.notice n` 指令自动创建。\n\n"
         "| 字段 | 值 |\n"
         "|---|---|\n"
-        f"| {prefix}来源群 | {group_id} |\n"
-        f"| {prefix}发送者 | {user_id} |\n"
-        f"| {prefix}消息 ID | {message_id} |\n"
-        f"| {prefix}时间 | {ts_str} |\n"
+        f"| 指令来源群 | {group_id} |\n"
+        f"| 指令发送者 | {user_id} |\n"
+        f"| 指令消息 ID | {message_id} |\n"
+        f"| 指令时间 | {ts_str} |\n"
         f"| 内容哈希 | `{hash8}` |\n\n"
         f"{sources}"
         "### 通知文件预览\n\n"
         "````markdown\n" + md + "\n````\n\n"
         "### 审核说明\n\n"
         "- 合并即发布：自动触发 Pages 部署，首页气泡与通知中心更新\n"
-        "- 驳回：直接关闭本 PR；重新发送消息或执行指令提交同一内容会创建新 PR\n"
+        "- 驳回：直接关闭本 PR；重新执行指令提交同一内容会创建新 PR\n"
         "- 可直接在本 PR 中编辑文件修正标题/摘要后再合并\n"
     )
 
@@ -345,8 +337,7 @@ def _build_pr_body(*, group_id: int, user_id: int, message_id: int, msg_time: fl
 async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
                             message_id: int, msg_time: float,
                             source_messages: list[dict] | None = None,
-                            assets: dict[str, bytes] | None = None,
-                            trigger: str = "command") -> None:
+                            assets: dict[str, bytes] | None = None) -> None:
     ncfg = _notice_cfg()
     gh = ncfg.get("github") or {}
     repo = gh.get("repo")
@@ -439,7 +430,6 @@ async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
                             group_id=group_id, user_id=user_id, message_id=message_id,
                             msg_time=msg_time, hash8=hash8, md=md,
                             source_messages=source_messages,
-                            trigger=trigger,
                         ),
                     },
                 )
@@ -453,13 +443,12 @@ async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
     except Exception as e:
         log.error("通知 PR 创建失败: group=%d user=%d msg=%s: %s",
                   group_id, user_id, message_id, e, exc_info=True)
-        feedback_group = cfg.INTERNAL_GROUP_ID if trigger == "auto" else group_id
-        if feedback_group:
-            await _notice_feedback(feedback_group, "通知文件或图片上传、PR 创建失败，未发布通知，请稍后重试。")
+        await _notice_feedback(group_id, "通知文件或图片上传、PR 创建失败，未发布通知，请稍后重试。")
         return
 
     log.info("通知 PR 已创建: #%s %s", pr_number, pr_url)
-    await _ack_pr_created(f"📬 已为通知群消息创建 PR #{pr_number}：{title}\n{pr_url}")
+    feedback = f"📬 已为通知群消息创建 PR #{pr_number}：{title}\n{pr_url}"
+    await _ack_pr_created(feedback, group_id=group_id)
 
 
 # ======================= ack 持久化重试队列 =======================
@@ -505,22 +494,19 @@ def _ensure_ack_retry_task() -> None:
         _ack_retry_task = asyncio.create_task(_ack_retry_loop())
 
 
-async def _ack_pr_created(text: str) -> None:
-    """开 PR 后 ack 到客服内部群；发送失败进入持久化队列，恢复连接/重启后重发。"""
-    ncfg = _notice_cfg()
-    if not ncfg.get("ack_to_internal", True) or not cfg.INTERNAL_GROUP_ID:
-        return
+async def _ack_pr_created(text: str, *, group_id: int) -> None:
+    """命令成功后始终回复发起群；发送失败持久化重试。"""
     try:
-        await cfg.client.call_api("send_group_msg", group_id=str(cfg.INTERNAL_GROUP_ID), message=text)
+        await cfg.client.call_api("send_group_msg", group_id=str(group_id), message=text)
         log.debug("通知 PR ack 已发送至内部群")
     except Exception as e:
         log.error("发送通知 PR ack 到内部群失败，加入重试队列: %s", e)
-        _ack_send_failed(text)
+        _ack_send_failed(text, group_id=group_id)
 
 
-def _ack_send_failed(text: str) -> None:
+def _ack_send_failed(text: str, *, group_id: int) -> None:
     acks = _load_ack_queue()
-    acks.append({"text": text, "queued_at": time.time(), "retries": 0})
+    acks.append({"text": text, "group_id": group_id, "queued_at": time.time(), "retries": 0})
     _save_ack_queue(acks)
     _ensure_ack_retry_task()
 
@@ -536,7 +522,7 @@ async def flush_pending_acks() -> None:
         try:
             await cfg.client.call_api(
                 "send_group_msg",
-                group_id=str(cfg.INTERNAL_GROUP_ID), message=ack["text"],
+                group_id=str(ack.get("group_id", cfg.INTERNAL_GROUP_ID)), message=ack["text"],
             )
             log.info("重发通知 PR ack 成功")
         except Exception as e:
@@ -559,7 +545,7 @@ async def _ack_retry_loop() -> None:
             try:
                 await cfg.client.call_api(
                     "send_group_msg",
-                    group_id=str(cfg.INTERNAL_GROUP_ID), message=ack["text"],
+                    group_id=str(ack.get("group_id", cfg.INTERNAL_GROUP_ID)), message=ack["text"],
                 )
                 log.info("重发通知 PR ack 成功")
             except Exception as e:
@@ -665,63 +651,6 @@ async def _create_notice_from_history(event: GroupMessageEvent, count: int, grou
     )
 
 
-async def _create_notice_from_message(event: GroupMessageEvent) -> None:
-    """通知群实时消息的自动 PR，复用手动指令的图片处理与提交流程。"""
-    source = {
-        "group_id": event.group_id,
-        "user_id": event.user_id,
-        "message_id": event.message_id,
-        "time": float(event.time),
-        "message": event.message,
-    }
-    try:
-        text, assets = await prepare_notice_content([source], _notice_cfg())
-    except Exception:
-        # 自动监听不向通知来源群回显，失败反馈只发客服内部群。
-        log.warning("通知群自动 PR 内容处理失败: group=%d user=%d msg=%s",
-                    event.group_id, event.user_id, event.message_id)
-        if cfg.INTERNAL_GROUP_ID:
-            await _notice_feedback(
-                cfg.INTERNAL_GROUP_ID,
-                f"通知群 {event.group_id} 的消息 {event.message_id} 自动创建 PR 失败："
-                "内容不支持或图片处理失败，未创建 PR。",
-            )
-        return
-    await _submit_notice_pr(
-        text=text, group_id=event.group_id, user_id=event.user_id,
-        message_id=event.message_id, msg_time=float(event.time),
-        source_messages=[source], assets=assets, trigger="auto",
-    )
-
-
-async def handle_notice_group_msg(event: GroupMessageEvent) -> bool:
-    """通知群：仅 auto_pr_senders 白名单成员的消息自动触发。"""
-    ncfg = _notice_cfg()
-    if not ncfg.get("enabled") or event.user_id == cfg.client.self_id:
-        return False
-    try:
-        groups = {int(g) for g in (ncfg.get("groups") or [])}
-    except (TypeError, ValueError):
-        log.error("notice_pr.groups 配置格式错误，需为群号列表")
-        return False
-    if event.group_id not in groups:
-        return False
-    # 当两个群配置重合时，客服指令只走手动流程，不生成「指令内容」通知。
-    command = "".join(seg.data["text"] for seg in event.message if seg.type == "text").strip()
-    if event.group_id == cfg.INTERNAL_GROUP_ID and re.match(r"\.notice(?:\s|$)", command):
-        return False
-    try:
-        senders = {int(s) for s in (ncfg.get("auto_pr_senders") or [])}
-    except (TypeError, ValueError):
-        log.error("notice_pr.auto_pr_senders 配置格式错误，需为 QQ 号列表")
-        return True
-    if event.user_id not in senders:
-        return True
-    if _claim_notice_event(event, "auto"):
-        asyncio.create_task(_create_notice_from_message(event))
-    return True
-
-
 async def handle_notice_command(event: GroupMessageEvent) -> bool:
     """处理客服内部群 .notice n：选择最近共 n 条通知群消息创建 PR。
 
@@ -733,7 +662,7 @@ async def handle_notice_command(event: GroupMessageEvent) -> bool:
     command = "".join(seg.data["text"] for seg in event.message if seg.type == "text").strip()
     if not re.match(r"\.notice(?:\s|$)", command):
         return False
-    if not _claim_notice_event(event, "command"):
+    if not _claim_notice_event(event):
         return True
 
     match = re.fullmatch(r"\.notice\s+([0-9]{1,3})", command)

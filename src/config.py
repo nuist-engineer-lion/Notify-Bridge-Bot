@@ -6,7 +6,9 @@ import math
 import os
 import subprocess
 import shutil
+import sys
 from collections import deque
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import yaml
@@ -462,7 +464,7 @@ def _command_feedback(stdout: str | bytes | None, stderr: str | bytes | None) ->
 
 
 def _apply_remote_config() -> tuple[bool, str]:
-    """Pull and decrypt in a worker thread, returning errors or commit hashes."""
+    """在线程中拉取、解密并同步依赖；所有步骤成功后才由调用方重载配置。"""
     if os.name == "nt":
         shell = shutil.which("pwsh") or shutil.which("powershell")
         if not shell:
@@ -474,14 +476,28 @@ def _apply_remote_config() -> tuple[bool, str]:
     else:
         apply_command = ["bash", os.path.join(REPO_ROOT, "scripts", "apply-encrypted-config")]
 
+    uv = shutil.which("uv")
+    if not uv:
+        # systemd 的 PATH 可能不含 uv 默认安装目录。
+        candidate = os.path.join(os.path.expanduser("~"), ".local", "bin", "uv.exe" if os.name == "nt" else "uv")
+        if os.path.isfile(candidate):
+            uv = candidate
+    if not uv:
+        return False, "❌ 远程更新失败：找不到 uv，请安装 uv 或配置服务的 PATH，后续步骤已停止"
+
     env = os.environ.copy()
     # Reload explicitly below; do not wait for the mtime watcher from the script.
     env["WAIT_RELOAD"] = "0"
     env["GIT_TERMINAL_PROMPT"] = "0"
+    if sys.prefix != sys.base_prefix:
+        # .reboot 沿用当前解释器，因此同步实际运行的虚拟环境，而非另一个 .venv。
+        env["UV_PROJECT_ENVIRONMENT"] = os.path.abspath(sys.prefix)
+        env["VIRTUAL_ENV"] = os.path.abspath(sys.prefix)
     old_head = get_current_git_head()
     for stage, command, timeout in (
         ("git pull", ["git", "pull", "--ff-only"], 120),
         ("apply-encrypted-config", apply_command, 60),
+        ("uv sync", [uv, "sync", "--python", sys.executable], 180),
     ):
         try:
             result = subprocess.run(
@@ -514,13 +530,17 @@ def _apply_remote_config() -> tuple[bool, str]:
     return True, f"Git: {(old_head or '未知')[:7]} → {(new_head or '未知')[:7]}"
 
 
-async def run_reload_cfg(*, remote: bool = False) -> tuple[bool, str]:
-    """群/控制台共用：可先拉取仓库并解密，再重载配置。"""
+async def run_reload_cfg(
+    *, remote: bool = False, on_started: Callable[[], Awaitable[None]] | None = None,
+) -> tuple[bool, str]:
+    """群/控制台共用：远程模式先拉取、解密、同步依赖，再重载配置。"""
     if _reload_lock.locked():
         return False, "❌ 配置更新正在执行，请稍后重试"
     async with _reload_lock:
         git_message = ""
         if remote:
+            if on_started is not None:
+                await on_started()
             ok, git_message = await asyncio.to_thread(_apply_remote_config)
             if not ok:
                 return False, git_message
@@ -535,7 +555,7 @@ def _reload_cfg_result(*, remote: bool) -> tuple[bool, str]:
     if not ok:
         return False, f"❌ 配置重载失败：{error}"
 
-    lines = ["🔄 已拉取远程仓库、解密并重载配置" if remote else "🔄 配置已重载"]
+    lines = ["🔄 已拉取远程仓库、解密、同步依赖并重载配置" if remote else "🔄 配置已重载"]
     if remote:
         lines.append("代码变更需重启进程后生效")
     if restart_only_changes:

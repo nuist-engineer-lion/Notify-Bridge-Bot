@@ -33,6 +33,17 @@ SESSION_OP_PREFIXES = ('.say', '.bye', '.close', '.more')
 _pending_say_tasks: dict[int, asyncio.Task] = {}
 
 
+async def _send_reload_feedback(gid: int, msg_id: int, text: str) -> None:
+    """引用回复失败时退回普通消息，最终失败交给原有事件循环处理。"""
+    try:
+        await cfg.client.call_api(
+            "send_group_msg", group_id=str(gid),
+            message=[MessageSegment.reply(str(msg_id)), MessageSegment.text(text)],
+        )
+    except Exception:
+        await cfg.client.call_api("send_group_msg", group_id=str(gid), message=text)
+
+
 def pop_pending_say(user_id: int) -> dict | None:
     """结束等待，并取消对应的超时任务。"""
     pending = cfg.pending_say.pop(user_id, None)
@@ -1081,12 +1092,22 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             )
             return True
 
-        _success, update_message = await cfg.run_reload_cfg(remote=(arg == "remote"))
-        await cfg.client.call_api(
-            "send_group_msg",
-            group_id=str(gid),
-            message=[MessageSegment.reply(str(msg_id)), MessageSegment.text(update_message)],
-        )
+        async def on_started() -> None:
+            try:
+                await _send_reload_feedback(
+                    gid, msg_id,
+                    "⏳ 已开始远程更新：拉取代码 → 解密配置 → 同步依赖 → 重载配置。"
+                    "\n完成或失败后会发送结果，请稍候。",
+                )
+            except Exception:
+                # 开始回执发送失败不取消已受理的更新，结束后仍尝试发送结果。
+                pass
+
+        if arg == "remote":
+            _success, update_message = await cfg.run_reload_cfg(remote=True, on_started=on_started)
+        else:
+            _success, update_message = await cfg.run_reload_cfg()
+        await _send_reload_feedback(gid, msg_id, update_message)
         return True
 
     session_op = split_session_op(cmd_text)

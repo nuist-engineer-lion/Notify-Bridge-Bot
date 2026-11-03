@@ -20,7 +20,7 @@ from .monitor import monitor_loop
 from .private_msg import handle_private_msg, handle_sent_msg, handle_friend_poke
 from .new_user import handle_friend_request
 from .group_msg import handle_group_emoji, handle_group_poke, handle_group_command
-from .notice_pr import handle_notice_group_msg, flush_pending_acks
+from .notice_pr import flush_pending_acks
 from .shell_console import shell_console_loop
 from . import storage
 from . import history
@@ -208,8 +208,6 @@ async def _bot_event_loop() -> None:
                         await handle_group_poke(event)
 
                     case GroupMessageEvent():
-                        # 通知群白名单消息自动创建 PR；客服群另行处理 .notice n。
-                        await handle_notice_group_msg(event)
                         await handle_group_command(event)
 
                     case _:
