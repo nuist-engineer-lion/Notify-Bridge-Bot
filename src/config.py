@@ -174,9 +174,9 @@ FRIEND_COUNT_LIMIT = 3000
 REPLY_DURATION_MAXLEN = 0
 AVAILABILITY: dict[int, dict[str, list[tuple[str, str]]]] = {}
 MAX_LISTEN_AGE = 86400   # 24小时
-DEFAULT_EMOJI_MAPPING = {"close": 128, "more": 127, "bye": 100, "say": 123, "cancel": 32, "recall": 89, "say_timeout": 25}
+DEFAULT_EMOJI_MAPPING = {"close": 128, "more": 127, "bye": 100, "say": 123, "say_replied": 428, "cancel": 32, "recall": 89, "say_timeout": 25}
 EMOJI_MAPPING = dict(DEFAULT_EMOJI_MAPPING)
-EMOJI_TO_CMD = {v: k for k, v in EMOJI_MAPPING.items() if k != "say_timeout"}
+EMOJI_TO_CMD = {v: "say" if k == "say_replied" else k for k, v in EMOJI_MAPPING.items() if k != "say_timeout"}
 RECALL_WINDOW_SECONDS = 60  # .say 发送成功后允许通过表情撤回的时间窗口（秒）
 SAY_INPUT_TIMEOUT_SECONDS = 30.0
 # 过期撤回记录额外保留时长：窗口结束后仍可识别延迟点击并回复超时提示
@@ -259,7 +259,9 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     EMOJI_MAPPING.setdefault("recall", DEFAULT_EMOJI_MAPPING["recall"])
     # 超时表情仅标记等待结束；旧配置缺少该项时使用“困”。
     EMOJI_MAPPING.setdefault("say_timeout", DEFAULT_EMOJI_MAPPING["say_timeout"])
-    EMOJI_TO_CMD = {v: k for k, v in EMOJI_MAPPING.items() if k != "say_timeout"}
+    # 已回复消息使用“收到”替换 say，点击后仍进入 say 流程。
+    EMOJI_MAPPING.setdefault("say_replied", DEFAULT_EMOJI_MAPPING["say_replied"])
+    EMOJI_TO_CMD = {v: "say" if k == "say_replied" else k for k, v in EMOJI_MAPPING.items() if k != "say_timeout"}
     RECALL_WINDOW_SECONDS = int(config.get("recall_window_seconds", 60))
     SAY_INPUT_TIMEOUT_SECONDS = say_input_timeout
 

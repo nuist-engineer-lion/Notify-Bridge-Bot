@@ -111,6 +111,7 @@ emoji_mapping:
   more: 127
   bye: 100
   say: 123
+  say_replied: 428  # 收到：会话结束后替换 say 表情，点击功能与 say 一致
   cancel: 32
   recall: 89
   say_timeout: 25  # 困：say 等待内容超时，仅用于状态提示

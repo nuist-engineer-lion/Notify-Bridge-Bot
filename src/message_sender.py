@@ -468,8 +468,8 @@ async def remove_emoji_from_message(message_id: int, emoji_ids: list[int]) -> No
             log.error("移除表情失败: message_id=%s, emoji_id=%s, err=%s", message_id, emoji_id, e)
 
 
-async def remove_completed_say_emoji(customer_id: int) -> None:
-    """清理所有包含该客户的监听消息上的 say 表情。"""
+async def mark_completed_say_emoji(customer_id: int) -> None:
+    """将所有包含该客户的监听消息上的 say 表情替换为已回复表情。"""
     say_emoji_id = cfg.EMOJI_MAPPING.get("say")
     if say_emoji_id is None:
         return
@@ -480,11 +480,12 @@ async def remove_completed_say_emoji(customer_id: int) -> None:
     ]
     for message_id in message_ids:
         await remove_emoji_from_message(message_id, [say_emoji_id])
+        await add_emoji_to_message(message_id, [cfg.EMOJI_MAPPING["say_replied"]])
 
 
 def action_emoji_ids() -> list[int]:
-    """可操作消息默认贴上的表情（不含仅用于提示消息的表情）。"""
-    return [eid for cmd, eid in cfg.EMOJI_MAPPING.items() if cmd not in ("cancel", "recall", "say_timeout")]
+    """可操作消息默认贴上的表情（不含提示和已回复状态的表情）。"""
+    return [eid for cmd, eid in cfg.EMOJI_MAPPING.items() if cmd not in ("cancel", "recall", "say_timeout", "say_replied")]
 
 
 def build_say_feedback(
@@ -632,7 +633,7 @@ async def close_session(user_id: int, send_closing: bool = False, close_reason: 
             log.error("关闭会话周期失败: session=%s, err=%s", session_id, e, exc_info=True)
 
     save_state()
-    await remove_completed_say_emoji(user_id)
+    await mark_completed_say_emoji(user_id)
     return True
 
 
