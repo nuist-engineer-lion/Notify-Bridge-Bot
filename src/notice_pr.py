@@ -1,8 +1,8 @@
-"""通知 PR：监控通知群白名单成员的消息，自动转换为主页仓库的通知 PR。
+"""通知 PR：通知群白名单自动触发，以及客服内部群 .notice n 手动触发。
 
-通知群与客服群（INTERNAL_GROUP_ID）相互独立：本模块只处理 notice_pr.groups
-中配置的群，且仅当发送者在 notice_pr.auto_pr_senders 白名单内时触发。
-每条消息生成 notices/entries/YYYY-MM-DD-auto-<hash8>.md，通过 GitHub API
+notice_pr.groups 中的白名单成员消息自动创建 PR；auto_pr_senders 为空时不自动触发。
+客服 INTERNAL_GROUP_ID 内所有成员均可执行 .notice n，不受 auto_pr_senders 限制，
+从通知群读取最近共 n 条消息合并为 notices/entries/YYYY-MM-DD-auto-<hash8>.md，通过 GitHub API
 创建分支、提交文件并开 PR；合并由人工在 GitHub 上审核完成，结果不回显到任何群。
 """
 
@@ -11,6 +11,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -22,6 +23,7 @@ from .onebot import GroupMessageEvent
 
 from . import config as cfg
 from .config import log
+from .notice_images import prepare_notice_content
 
 GITHUB_API = "https://api.github.com"
 # 国内业务按东八区取通知日期
@@ -30,9 +32,14 @@ _RETRYABLE_STATUS = {500, 502, 503, 504}
 _AT_ALL_TEXT = "@全体成员"
 # 日期+后缀标题过长时退回「mm月dd日通知」
 _AT_ALL_TITLE_MAX = 20
+_NOTICE_MAX_COUNT = 100
+_NOTICE_USAGE = (
+    f"用法：.notice n（n 为 1–{_NOTICE_MAX_COUNT} 的整数）。"
+    "将通知群截至指令时间的最近共 n 条消息合并为一份通知 PR，指令本身不计入。"
+)
 
 # 同一消息只处理一次（事件重复投递/并发保护）
-_processed_msg_ids: dict[int, float] = {}
+_processed_msg_ids: dict[tuple[str, int, int], float] = {}
 _PROCESSED_TTL = 3600
 _PROCESSED_MAX = 512
 
@@ -49,29 +56,24 @@ def _notice_cfg() -> dict[str, Any]:
     return ncfg if isinstance(ncfg, dict) else {}
 
 
+def _claim_notice_event(event: GroupMessageEvent, trigger: str) -> bool:
+    """按触发方式、群和消息去重，自动流程与手动流程相互独立。"""
+    now = time.time()
+    key = (trigger, event.group_id, event.message_id)
+    previous = _processed_msg_ids.get(key)
+    if previous is not None and now - previous < _PROCESSED_TTL:
+        return False
+    _processed_msg_ids[key] = now
+    if len(_processed_msg_ids) > _PROCESSED_MAX:
+        for mid, ts in list(_processed_msg_ids.items()):
+            if now - ts >= _PROCESSED_TTL:
+                _processed_msg_ids.pop(mid, None)
+        while len(_processed_msg_ids) > _PROCESSED_MAX:
+            _processed_msg_ids.pop(next(iter(_processed_msg_ids)))
+    return True
+
+
 # ======================= 消息过滤与内容提取 =======================
-
-def _is_at_all(seg) -> bool:
-    return seg.type == "at" and str(seg.data.get("qq")).strip().lower() in {"all", "全体成员"}
-
-
-def extract_notice_text(message: list) -> str | None:
-    """提取纯文本内容；除 @全体成员 外含其他非 Text 段（图片/@/引用/表情等）时返回 None。
-
-    QQ 图片 URL 是临时的，无法长期托管在站点上，V1 只支持纯文本通知。
-    @全体成员 可能是特殊 At 段，统一转成文本前缀，便于首行标题规则处理。
-    """
-    parts: list[str] = []
-    for seg in message:
-        if seg.type == "text":
-            parts.append(seg.data["text"])
-        elif _is_at_all(seg):
-            parts.append(_AT_ALL_TEXT)
-        else:
-            return None
-    # Text 段自带换行；At(all) 与后续 Text 需直接拼接，才能识别「@全体成员 今日通知」同行标题
-    return "".join(parts).strip()
-
 
 def _yaml_quote(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -107,12 +109,13 @@ def build_notice_markdown(text: str, max_title_chars: int, msg_time: float) -> t
         raise ValueError("消息文本为空")
 
     msg_dt = datetime.fromtimestamp(msg_time, CST)
-    title = _title_from_first_line(nonempty[0], msg_dt)
+    starts_with_image = nonempty[0].startswith("![通知图片](/assets/notices/")
+    title = _title_from_first_line(_AT_ALL_TEXT if starts_with_image else nonempty[0], msg_dt)
     if len(title) > max_title_chars:
         title = title[: max_title_chars - 1] + "…"
 
     first_idx = stripped.index(nonempty[0])
-    body = "\n".join(stripped[first_idx + 1:]).strip()
+    body = "\n".join(stripped[first_idx if starts_with_image else first_idx + 1:]).strip()
 
     date_str = msg_dt.date().isoformat()
     hash8 = hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
@@ -190,6 +193,43 @@ async def _delete_branch(session: aiohttp.ClientSession, repo: str, token: str, 
         log.warning("清理分支 %s 异常: %s", branch, e)
 
 
+async def _commit_notice_with_images(
+    session: aiohttp.ClientSession, repo: str, token: str, *, base_sha: str,
+    branch: str, path: str, md: str, assets: dict[str, bytes], commit_msg: str,
+) -> None:
+    """正文与全部图片构成一个提交；失败时分支仍指向原始基准提交。"""
+    status, base = await _gh_request(session, "GET", f"/repos/{repo}/git/commits/{base_sha}", token)
+    if status != 200:
+        raise RuntimeError(f"读取基准提交失败: HTTP {status}")
+    tree = [{"path": path, "mode": "100644", "type": "blob", "content": md}]
+    for asset_path, content in assets.items():
+        status, blob = await _gh_request(
+            session, "POST", f"/repos/{repo}/git/blobs", token,
+            json_body={"content": base64.b64encode(content).decode("ascii"), "encoding": "base64"},
+        )
+        if status != 201:
+            raise RuntimeError(f"上传通知图片 {asset_path} 失败: HTTP {status}")
+        tree.append({"path": asset_path, "mode": "100644", "type": "blob", "sha": blob["sha"]})
+    status, created_tree = await _gh_request(
+        session, "POST", f"/repos/{repo}/git/trees", token,
+        json_body={"base_tree": base["tree"]["sha"], "tree": tree},
+    )
+    if status != 201:
+        raise RuntimeError(f"创建通知文件树失败: HTTP {status}")
+    status, commit = await _gh_request(
+        session, "POST", f"/repos/{repo}/git/commits", token,
+        json_body={"message": commit_msg, "tree": created_tree["sha"], "parents": [base_sha]},
+    )
+    if status != 201:
+        raise RuntimeError(f"创建通知提交失败: HTTP {status}")
+    status, _ = await _gh_request(
+        session, "PATCH", f"/repos/{repo}/git/refs/heads/{branch}", token,
+        json_body={"sha": commit["sha"], "force": False},
+    )
+    if status != 200:
+        raise RuntimeError(f"更新通知分支失败: HTTP {status}")
+
+
 # ======================= 凭据解析（GitHub App 优先，PAT 回退） =======================
 
 _token_lock = asyncio.Lock()
@@ -259,29 +299,54 @@ async def _get_repo_token() -> str | None:
 
 
 def _build_pr_body(*, group_id: int, user_id: int, message_id: int, msg_time: float,
-                   hash8: str, md: str) -> str:
+                   hash8: str, md: str, source_messages: list[dict] | None = None,
+                   trigger: str = "command") -> str:
     ts_str = datetime.fromtimestamp(msg_time, CST).strftime("%Y-%m-%d %H:%M:%S")
+    automatic = trigger == "auto"
+    origin = (
+        "由 Notify-Bridge-Bot 从通知群白名单成员的消息自动创建。"
+        if automatic else "由 Notify-Bridge-Bot 根据客服内部群 `.notice n` 指令自动创建。"
+    )
+    prefix = "" if automatic else "指令"
+    sources = ""
+    if source_messages:
+        sources = (
+            f"### 来源消息（共 {len(source_messages)} 条，按时间顺序）\n\n"
+            "| 来源群 | 消息 ID | 发送者 | 消息时间 |\n"
+            "|---|---|---|---|\n"
+        )
+        for message in source_messages:
+            source_time = datetime.fromtimestamp(float(message["time"]), CST).strftime("%Y-%m-%d %H:%M:%S")
+            sources += (
+                f"| {message['group_id']} | {message['message_id']} "
+                f"| {message['user_id']} | {source_time} |\n"
+            )
+        sources += "\n"
     return (
         "## 自动通知 PR\n\n"
-        "由 Notify-Bridge-Bot 从通知群消息自动创建。\n\n"
+        f"{origin}\n\n"
         "| 字段 | 值 |\n"
         "|---|---|\n"
-        f"| 来源群 | {group_id} |\n"
-        f"| 发送者 | {user_id} |\n"
-        f"| 消息 ID | {message_id} |\n"
-        f"| 消息时间 | {ts_str} |\n"
+        f"| {prefix}来源群 | {group_id} |\n"
+        f"| {prefix}发送者 | {user_id} |\n"
+        f"| {prefix}消息 ID | {message_id} |\n"
+        f"| {prefix}时间 | {ts_str} |\n"
         f"| 内容哈希 | `{hash8}` |\n\n"
+        f"{sources}"
         "### 通知文件预览\n\n"
         "````markdown\n" + md + "\n````\n\n"
         "### 审核说明\n\n"
         "- 合并即发布：自动触发 Pages 部署，首页气泡与通知中心更新\n"
-        "- 驳回：直接关闭本 PR；同一内容再次发送会创建新 PR\n"
+        "- 驳回：直接关闭本 PR；重新发送消息或执行指令提交同一内容会创建新 PR\n"
         "- 可直接在本 PR 中编辑文件修正标题/摘要后再合并\n"
     )
 
 
 async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
-                            message_id: int, msg_time: float) -> None:
+                            message_id: int, msg_time: float,
+                            source_messages: list[dict] | None = None,
+                            assets: dict[str, bytes] | None = None,
+                            trigger: str = "command") -> None:
     ncfg = _notice_cfg()
     gh = ncfg.get("github") or {}
     repo = gh.get("repo")
@@ -289,7 +354,8 @@ async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
     max_title = int(ncfg.get("max_title_chars", 30) or 30)
 
     try:
-        md, title, date_str, hash8 = build_notice_markdown(text, max_title, msg_time)
+        notice_time = float(source_messages[0]["time"]) if source_messages else msg_time
+        md, title, date_str, hash8 = build_notice_markdown(text, max_title, notice_time)
     except ValueError:
         return
 
@@ -299,7 +365,8 @@ async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
     commit_msg = f"notice(bot): 通知群消息自动提交 {filename}"
 
     if ncfg.get("dry_run"):
-        log.info("[notice_pr] dry_run：将提交 %s（分支 %s）\n%s", path, branch, md)
+        log.info("[notice_pr] dry_run：将提交 %s（分支 %s，WebP 图片 %d 张）\n%s",
+                 path, branch, len(assets or {}), md)
         return
     if not repo:
         log.error("notice_pr.github.repo 未配置，无法开 PR")
@@ -348,13 +415,19 @@ async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
             # 分支由本次创建：提交文件或开 PR 任一步失败都删除分支，
             # 重试会从头走确定性流程，不遗留孤儿分支
             try:
-                content_b64 = base64.b64encode(md.encode("utf-8")).decode("ascii")
-                status, resp = await _gh_request(
-                    session, "PUT", f"/repos/{repo}/contents/{path}", token,
-                    json_body={"message": commit_msg, "content": content_b64, "branch": branch_name},
-                )
-                if status != 201:
-                    raise RuntimeError(f"提交通知文件 {path} 失败: HTTP {status}: {resp}")
+                if assets:
+                    await _commit_notice_with_images(
+                        session, repo, token, base_sha=base_sha, branch=branch_name,
+                        path=path, md=md, assets=assets, commit_msg=commit_msg,
+                    )
+                else:
+                    content_b64 = base64.b64encode(md.encode("utf-8")).decode("ascii")
+                    status, resp = await _gh_request(
+                        session, "PUT", f"/repos/{repo}/contents/{path}", token,
+                        json_body={"message": commit_msg, "content": content_b64, "branch": branch_name},
+                    )
+                    if status != 201:
+                        raise RuntimeError(f"提交通知文件 {path} 失败: HTTP {status}: {resp}")
 
                 status, resp = await _gh_request(
                     session, "POST", f"/repos/{repo}/pulls", token,
@@ -365,6 +438,8 @@ async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
                         "body": _build_pr_body(
                             group_id=group_id, user_id=user_id, message_id=message_id,
                             msg_time=msg_time, hash8=hash8, md=md,
+                            source_messages=source_messages,
+                            trigger=trigger,
                         ),
                     },
                 )
@@ -378,6 +453,9 @@ async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
     except Exception as e:
         log.error("通知 PR 创建失败: group=%d user=%d msg=%s: %s",
                   group_id, user_id, message_id, e, exc_info=True)
+        feedback_group = cfg.INTERNAL_GROUP_ID if trigger == "auto" else group_id
+        if feedback_group:
+            await _notice_feedback(feedback_group, "通知文件或图片上传、PR 创建失败，未发布通知，请稍后重试。")
         return
 
     log.info("通知 PR 已创建: #%s %s", pr_number, pr_url)
@@ -499,47 +577,185 @@ async def _ack_retry_loop() -> None:
 
 # ======================= 事件入口 =======================
 
+async def _notice_feedback(group_id: int, text: str) -> None:
+    try:
+        await cfg.client.call_api("send_group_msg", group_id=str(group_id), message=text)
+    except Exception:
+        log.exception("发送通知指令反馈失败: group=%d", group_id)
+
+
+def _history_sort_key(message: dict) -> tuple[float, int]:
+    # 同一秒内消息可有多条，不能按哈希 message_id 排序。
+    return float(message["time"]), int(message.get("message_seq") or 0)
+
+
+async def _get_notice_messages(group_id: int, count: int, event: GroupMessageEvent) -> list[dict]:
+    """向前翻页，读取指定群截至指令时间的最近消息，不用客服群消息 ID 锚定通知群。"""
+    collected: dict[str, dict] = {}
+    seen: set[str] = set()
+    cursor = None
+    while True:
+        # SnowLuma 以 message_id 为锚点，NapCat 以 message_seq 接收真实 message_id。
+        # 锚点包含在返回结果中，多取一条以保证下一页能向前推进。
+        params = {}
+        if cursor is not None:
+            params = {"message_id": cursor, "message_seq": str(cursor)}
+        resp = await cfg.client.call_api(
+            "get_group_msg_history",
+            group_id=str(group_id),
+            count=count + 1,
+            reverse_order=True,
+            reverseOrder=True,
+            **params,
+        )
+        messages = resp["messages"]
+        if not isinstance(messages, list) or not all(isinstance(m, dict) for m in messages):
+            raise ValueError("群历史消息返回格式错误")
+        messages = sorted(messages, key=_history_sort_key)
+        new_ids = set()
+        for message in messages:
+            mid = str(message["message_id"])
+            if int(message.get("group_id", group_id)) != group_id:
+                raise ValueError("群历史包含其他群的消息，未创建 PR")
+            new_ids.add(mid)
+            if float(message["time"]) > float(event.time):
+                continue
+            if group_id == event.group_id and mid == str(event.message_id):
+                continue
+            collected[mid] = {**message, "group_id": group_id}
+        if len(collected) >= count or not new_ids.difference(seen):
+            return sorted(collected.values(), key=_history_sort_key)[-count:]
+        seen.update(new_ids)
+        cursor = messages[0]["message_id"]
+
+
+async def _create_notice_from_history(event: GroupMessageEvent, count: int, groups: set[int]) -> None:
+    try:
+        batches = await asyncio.gather(*(
+            _get_notice_messages(group_id, count, event) for group_id in sorted(groups)
+        ))
+        messages = sorted(
+            (message for batch in batches for message in batch),
+            key=_history_sort_key,
+        )[-count:]
+        if len(messages) < count:
+            raise ValueError(f"通知群截至指令时间只获取到 {len(messages)} 条消息，不足 {count} 条，未创建 PR")
+        text, assets = await prepare_notice_content(messages, _notice_cfg())
+        sources = []
+        for message in messages:
+            sources.append({
+                "group_id": message["group_id"],
+                "message_id": message["message_id"],
+                "user_id": message["user_id"],
+                "time": message["time"],
+            })
+    except ValueError as e:
+        log.warning("通知消息选取失败: group=%d msg=%s: %s", event.group_id, event.message_id, e)
+        await _notice_feedback(event.group_id, str(e))
+        return
+    except Exception:
+        log.exception("获取通知群历史失败: group=%d msg=%s", event.group_id, event.message_id)
+        await _notice_feedback(event.group_id, "获取群历史消息失败，未创建 PR，请稍后重试。")
+        return
+
+    await _submit_notice_pr(
+        text=text, group_id=event.group_id, user_id=event.user_id,
+        message_id=event.message_id, msg_time=float(event.time),
+        source_messages=sources, assets=assets,
+    )
+
+
+async def _create_notice_from_message(event: GroupMessageEvent) -> None:
+    """通知群实时消息的自动 PR，复用手动指令的图片处理与提交流程。"""
+    source = {
+        "group_id": event.group_id,
+        "user_id": event.user_id,
+        "message_id": event.message_id,
+        "time": float(event.time),
+        "message": event.message,
+    }
+    try:
+        text, assets = await prepare_notice_content([source], _notice_cfg())
+    except Exception:
+        # 自动监听不向通知来源群回显，失败反馈只发客服内部群。
+        log.warning("通知群自动 PR 内容处理失败: group=%d user=%d msg=%s",
+                    event.group_id, event.user_id, event.message_id)
+        if cfg.INTERNAL_GROUP_ID:
+            await _notice_feedback(
+                cfg.INTERNAL_GROUP_ID,
+                f"通知群 {event.group_id} 的消息 {event.message_id} 自动创建 PR 失败："
+                "内容不支持或图片处理失败，未创建 PR。",
+            )
+        return
+    await _submit_notice_pr(
+        text=text, group_id=event.group_id, user_id=event.user_id,
+        message_id=event.message_id, msg_time=float(event.time),
+        source_messages=[source], assets=assets, trigger="auto",
+    )
+
+
 async def handle_notice_group_msg(event: GroupMessageEvent) -> bool:
-    """处理通知群消息：白名单成员的纯文本消息自动转为主页仓库通知 PR。
-
-    返回 True 表示事件属于通知群且已被本模块处理（或有意忽略）。
-    """
+    """通知群：仅 auto_pr_senders 白名单成员的消息自动触发。"""
     ncfg = _notice_cfg()
-    if not ncfg.get("enabled"):
+    if not ncfg.get("enabled") or event.user_id == cfg.client.self_id:
         return False
-
     try:
         groups = {int(g) for g in (ncfg.get("groups") or [])}
-        senders = {int(s) for s in (ncfg.get("auto_pr_senders") or [])}
     except (TypeError, ValueError):
-        log.error("notice_pr.groups / auto_pr_senders 配置格式错误，需为 QQ 号列表")
+        log.error("notice_pr.groups 配置格式错误，需为群号列表")
         return False
-
     if event.group_id not in groups:
         return False
+    # 当两个群配置重合时，客服指令只走手动流程，不生成「指令内容」通知。
+    command = "".join(seg.data["text"] for seg in event.message if seg.type == "text").strip()
+    if event.group_id == cfg.INTERNAL_GROUP_ID and re.match(r"\.notice(?:\s|$)", command):
+        return False
+    try:
+        senders = {int(s) for s in (ncfg.get("auto_pr_senders") or [])}
+    except (TypeError, ValueError):
+        log.error("notice_pr.auto_pr_senders 配置格式错误，需为 QQ 号列表")
+        return True
     if event.user_id not in senders:
         return True
+    if _claim_notice_event(event, "auto"):
+        asyncio.create_task(_create_notice_from_message(event))
+    return True
 
-    now = time.time()
-    if event.message_id in _processed_msg_ids:
+
+async def handle_notice_command(event: GroupMessageEvent) -> bool:
+    """处理客服内部群 .notice n：选择最近共 n 条通知群消息创建 PR。
+
+    返回 True 表示通知指令已被处理。
+    """
+    if event.group_id != cfg.INTERNAL_GROUP_ID:
+        return False
+
+    command = "".join(seg.data["text"] for seg in event.message if seg.type == "text").strip()
+    if not re.match(r"\.notice(?:\s|$)", command):
+        return False
+    if not _claim_notice_event(event, "command"):
         return True
-    _processed_msg_ids[event.message_id] = now
-    if len(_processed_msg_ids) > _PROCESSED_MAX:
-        cutoff = now - _PROCESSED_TTL
-        for mid, ts in list(_processed_msg_ids.items()):
-            if ts < cutoff:
-                _processed_msg_ids.pop(mid, None)
 
-    text = extract_notice_text(event.message)
-    if not text:
-        log.info("通知群消息为空或含非文本段，跳过自动开 PR: group=%d, user=%d, msg=%s",
-                 event.group_id, event.user_id, event.message_id)
+    match = re.fullmatch(r"\.notice\s+([0-9]{1,3})", command)
+    if (not match or any(seg.type != "text" for seg in event.message)
+            or not 1 <= int(match[1]) <= _NOTICE_MAX_COUNT):
+        await _notice_feedback(event.group_id, _NOTICE_USAGE)
         return True
 
-    msg_time = float(getattr(event, "time", 0) or now)
-    # GitHub API 调用较慢，放后台任务避免阻塞事件循环
-    asyncio.create_task(_submit_notice_pr(
-        text=text, group_id=event.group_id, user_id=event.user_id,
-        message_id=event.message_id, msg_time=msg_time,
-    ))
+    ncfg = _notice_cfg()
+    if not ncfg.get("enabled"):
+        await _notice_feedback(event.group_id, "通知 PR 功能未启用，请先配置 notice_pr.enabled。")
+        return True
+    try:
+        groups = {int(g) for g in (ncfg.get("groups") or [])}
+    except (TypeError, ValueError):
+        log.error("notice_pr.groups 配置格式错误，需为群号列表")
+        await _notice_feedback(event.group_id, "notice_pr.groups 配置格式错误，需为群号列表，未创建 PR。")
+        return True
+    if not groups:
+        await _notice_feedback(event.group_id, "请先配置 notice_pr.groups 通知来源群，未创建 PR。")
+        return True
+
+    # 历史和 GitHub API 调用放在后台，按指令时间固定通知内容的截止时间。
+    asyncio.create_task(_create_notice_from_history(event, int(match[1]), groups))
     return True

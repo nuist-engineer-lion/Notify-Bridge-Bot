@@ -208,8 +208,7 @@ async def _bot_event_loop() -> None:
                         await handle_group_poke(event)
 
                     case GroupMessageEvent():
-                        # 通知群消息先走通知 PR 流程（仅 notice_pr.groups 命中时生效），
-                        # 再进入客服群命令处理，两者互不影响
+                        # 通知群白名单消息自动创建 PR；客服群另行处理 .notice n。
                         await handle_notice_group_msg(event)
                         await handle_group_command(event)
 

@@ -23,6 +23,7 @@ from .message_sender import (
     register_recallable_send,
 )
 from . import history
+from .notice_pr import handle_notice_command
 
 # 运维类命令（无需引用机器人消息）
 OPS_COMMAND_PREFIXES = ('.say', '.bye', '.more', '.help', '.close', '.list', '.reload', '.update', '.reboot', '.mute', '.unmute', '.status')
@@ -801,6 +802,10 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
     if gid != cfg.INTERNAL_GROUP_ID or event.user_id == cfg.client.self_id:
         return False
 
+    # 通知指令独立于客户会话，必须先处理，避免被 .say 等待输入当成回复内容。
+    if await handle_notice_command(event):
+        return True
+
     # 解析引用和命令
     reply_id = None
     cmd_parts: list[str] = []
@@ -883,6 +888,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             "• .more / .more <QQ> – 获取历史合并转发；**不支持 .more all**；无参且队列仅 1 人时自动匹配\n"
             "• .list – 列出所有未回复客户及其等待时间\n"
             "• .status – 查看运行状态面板\n"
+            "• .notice n – 将通知群最近共 n 条消息合并创建一个通知 PR（n 为 1–100）\n"
             "• .mute [分钟] – 临时静音（不带参数不限时；如 .mute 30 为 30 分钟）\n"
             "• .unmute – 解除静音，并汇总发出延后提醒\n"
             "• .reload – 重新加载本地配置\n"

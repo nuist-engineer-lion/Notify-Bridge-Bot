@@ -149,13 +149,16 @@ ai_suggestion:
   max_suggestion_chars: 300 # 建议文本截断长度
 
 # ================= 通知 PR：通知群消息自动转主页通知 =================
-# 监控独立的通知群（与上面的 internal_group_id 客服群无关），白名单成员发送的
-# 纯文本消息将自动在主页仓库生成 notices/entries/*.md 并创建 PR，等待 GitHub 上人工审核合并。
+# 通知群：下方 auto_pr_senders 白名单成员发消息，自动为该条消息创建一个 PR。
+# 任意成员在 internal_group_id 客服群发送 .notice n，从下方 groups 通知群读取
+# 截至指令时间最近共 n 条消息，合并为 notices/entries/*.md 并创建一个 PR，等待人工审核合并。
+# n 为 1–100 的整数，不含指令本身；客服群指令不受白名单限制，支持文本、图片及 @全体成员。
 notice_pr:
   enabled: false
-  # 要监控的通知群号列表
+  # 通知来源群号列表；多个群时按时间合计选取最近共 n 条消息
   groups: []
-  # 这些 QQ 号发送的消息才会自动开 PR（独立于免监控 whitelist）
+  # 通知群自动创建 PR 的发送者白名单，独立于私聊免监控 whitelist；
+  # [] 表示不自动触发，不影响客服群任何成员使用 .notice n，也不筛选指令选取的消息
   auto_pr_senders: []
   github:
     repo: "nuist-engineer-lion/nuist-engineer-lion-homepage"
@@ -178,5 +181,9 @@ notice_pr:
   ack_to_internal: true
   # 通知标题最大长度（超出截断并加省略号）
   max_title_chars: 30
-  # true 时只打印将生成的通知文件内容，不调用 GitHub
+  # 下载通知图片，转换为 WebP 后与 Markdown 一起提交；动图取首帧
+  images:
+    quality: 82 # WebP 压缩质量（1–100）
+    max_width: 1920 # 最大宽度（像素），等比缩小，不放大原图
+  # true 时仍下载/转换图片，在日志预览正文和图片数量，不调用 GitHub
   dry_run: false
