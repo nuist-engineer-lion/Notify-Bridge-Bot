@@ -315,8 +315,8 @@ def _build_pr_body(*, group_id: int, user_id: int, message_id: int, msg_time: fl
             )
         sources += "\n"
     return (
-        "## 自动通知 PR\n\n"
-        "由 Notify-Bridge-Bot 根据客服内部群 `.notice n` 指令自动创建。\n\n"
+        "## 自动通知 \n\n"
+        "由 Notify-Bridge-Bot 创建。\n\n"
         "| 字段 | 值 |\n"
         "|---|---|\n"
         f"| 指令来源群 | {group_id} |\n"
@@ -327,10 +327,6 @@ def _build_pr_body(*, group_id: int, user_id: int, message_id: int, msg_time: fl
         f"{sources}"
         "### 通知文件预览\n\n"
         "````markdown\n" + md + "\n````\n\n"
-        "### 审核说明\n\n"
-        "- 合并即发布：自动触发 Pages 部署，首页气泡与通知中心更新\n"
-        "- 驳回：直接关闭本 PR；重新执行指令提交同一内容会创建新 PR\n"
-        "- 可直接在本 PR 中编辑文件修正标题/摘要后再合并\n"
     )
 
 
