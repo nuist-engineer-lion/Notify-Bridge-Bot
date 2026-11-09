@@ -491,7 +491,15 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
     gid = event.group_id
     mid = event.message_id
 
-    if gid != cfg.INTERNAL_GROUP_ID or event.user_id == cfg.client.self_id:
+    if gid != cfg.INTERNAL_GROUP_ID:
+        return False
+
+    log.info(
+        "内部群贴表情: group=%d, user=%d, message_id=%d, action=%s, likes=%s",
+        gid, event.user_id, mid, "add" if event.is_add else "remove", event.likes,
+    )
+
+    if event.user_id == cfg.client.self_id:
         return False
 
     if not event.is_add or not event.likes:
