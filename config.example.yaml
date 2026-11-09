@@ -59,6 +59,9 @@ debounce_seconds:
 # 好友申请去重缓存时间（秒）
 processed_friend_requests_expire: 5
 
+# 新好友通过申请后是否通知客服内部群（默认 true，支持热重载）
+friend_notification_enabled: true
+
 # 好友通过后发送欢迎消息的延迟（秒），等待好友关系生效（默认 3）
 friend_welcome_delay: 5
 

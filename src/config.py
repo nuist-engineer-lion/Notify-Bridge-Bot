@@ -169,6 +169,7 @@ CLOSING_MESSAGE = ""
 WELCOME_MESSAGE = ""
 DEBOUNCE_SECONDS: dict[str, int] = {}
 PROCESSED_FRIEND_REQUESTS_EXPIRE = 0
+FRIEND_NOTIFICATION_ENABLED = True
 FRIEND_WELCOME_DELAY = 3
 FRIEND_WELCOME_RETRIES = 3
 FRIEND_WELCOME_RETRY_INTERVAL = 3
@@ -211,6 +212,7 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     global WS_URL, WS_TOKEN, INTERNAL_GROUP_ID, WHITELIST, MILESTONES
     global MONITORED_FORWARD_LIMIT, CLOSING_MESSAGE, WELCOME_MESSAGE
     global DEBOUNCE_SECONDS, PROCESSED_FRIEND_REQUESTS_EXPIRE
+    global FRIEND_NOTIFICATION_ENABLED
     global FRIEND_WELCOME_DELAY, FRIEND_WELCOME_RETRIES, FRIEND_WELCOME_RETRY_INTERVAL
     global FRIEND_COUNT_LIMIT, REPLY_DURATION_MAXLEN, AVAILABILITY, MAX_LISTEN_AGE
     global EMOJI_MAPPING, EMOJI_TO_CMD, RECALL_WINDOW_SECONDS, NIGHT_MODE, NIGHT_START, NIGHT_END
@@ -220,6 +222,9 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     global SAY_INPUT_TIMEOUT_SECONDS
 
     applied_config = dict(new_config)
+    friend_notification_enabled = applied_config.get("friend_notification_enabled", True)
+    if not isinstance(friend_notification_enabled, bool):
+        raise ValueError("friend_notification_enabled 必须为布尔值 true 或 false")
     say_input_timeout = float(applied_config.get("say_input_timeout_seconds", 30))
     if not math.isfinite(say_input_timeout) or say_input_timeout <= 0:
         raise ValueError("say_input_timeout_seconds 必须为大于 0 的有限秒数")
@@ -249,6 +254,7 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     WELCOME_MESSAGE = parse_message_config(config["welcome_message"])
     DEBOUNCE_SECONDS = dict(config["debounce_seconds"])
     PROCESSED_FRIEND_REQUESTS_EXPIRE = config["processed_friend_requests_expire"]
+    FRIEND_NOTIFICATION_ENABLED = friend_notification_enabled
     FRIEND_WELCOME_DELAY = config.get("friend_welcome_delay", 3)
     FRIEND_WELCOME_RETRIES = config.get("friend_welcome_retries", 3)
     FRIEND_WELCOME_RETRY_INTERVAL = config.get("friend_welcome_retry_interval", 3)

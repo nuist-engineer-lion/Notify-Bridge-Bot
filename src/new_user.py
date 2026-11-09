@@ -9,7 +9,7 @@ from .config import log
 
 
 async def handle_friend_request(event: FriendRequestEvent) -> bool:
-    """自动通过好友申请并通知内部群"""
+    """自动通过好友申请，按配置通知内部群。"""
     uid = event.user_id
     comment = event.comment or ""
     flag = event.flag
@@ -70,14 +70,15 @@ async def handle_friend_request(event: FriendRequestEvent) -> bool:
                 "好友数量已达上限: friend_count=%s, limit=%s, user_id=%s",
                 friend_count, cfg.FRIEND_COUNT_LIMIT, uid,
             )
-        try:
-            await cfg.client.call_api(
-                "send_group_msg",
-                group_id=str(cfg.INTERNAL_GROUP_ID),
-                message=notify_text,
-            )
-        except Exception as notify_err:
-            log.error("好友申请群通知发送失败: user_id=%s, err=%s", uid, notify_err, exc_info=True)
+        if cfg.FRIEND_NOTIFICATION_ENABLED:
+            try:
+                await cfg.client.call_api(
+                    "send_group_msg",
+                    group_id=str(cfg.INTERNAL_GROUP_ID),
+                    message=notify_text,
+                )
+            except Exception as notify_err:
+                log.error("好友申请群通知发送失败: user_id=%s, err=%s", uid, notify_err, exc_info=True)
         log.info("已自动通过好友申请: user_id=%s, comment=%s", uid, comment)
     except Exception as e:
         log.error("自动通过好友申请失败: user_id=%s, err=%s", uid, e, exc_info=True)

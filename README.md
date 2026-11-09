@@ -6,7 +6,7 @@
 
 ## 功能概览
 
-- 自动通过好友申请，并在内部群发送通过通知
+- 自动通过好友申请，可通过 `friend_notification_enabled` 开关控制内部群通过通知（默认开启）
 - 好友通过后延迟发送欢迎消息，支持纯文本或结构化消息段
 - 监听非白名单用户的私聊消息
 - 对新消息做 1 分钟防抖，避免客户连续补充消息时频繁提醒
@@ -219,6 +219,7 @@ bot 启动后会在同一进程读取终端 stdin。控制台内 `quit` / `exit`
 | `monitored_forward_limit` | 同时保留多少条可引用的机器人消息映射 |
 | `debounce_seconds` | 各群命令的防抖窗口 |
 | `processed_friend_requests_expire` | 好友申请去重窗口；也用于刚通过好友时的消息忽略窗口 |
+| `friend_notification_enabled` | 是否发送新好友通过申请的内部群通知，默认 `true`；设为 `false` 关闭，支持 `.reload` 热重载。自动审批、私聊欢迎语、好友计数及上限日志告警仍正常执行 |
 | `friend_welcome_delay` | 通过好友后延迟多久再发送欢迎消息 |
 | `friend_welcome_retries` / `friend_welcome_retry_interval` | 欢迎消息失败重试策略 |
 | `friend_count_limit` | 好友数量告警阈值 |
