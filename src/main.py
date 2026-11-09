@@ -1,4 +1,5 @@
 import asyncio
+import os
 import signal
 
 from nonebot.adapters.onebot.v11.event import (
@@ -31,6 +32,8 @@ _background_tasks: list[asyncio.Task] = []
 _shutdown_requested = False
 _shutdown_finished = False
 _reboot_requested = False
+_reboot_silent = False
+REBOOT_SILENT_ENV = "NOTIFY_BRIDGE_BOT_REBOOT_SILENT"
 # 入口 run_app 注入的 stop event：request_shutdown 时一并 set，用于打断 WS 等待
 _external_stop: asyncio.Event | None = None
 
@@ -68,18 +71,23 @@ def reboot_block_reason() -> str | None:
     return None
 
 
-def request_reboot(reason: str = "manual") -> bool:
+def request_reboot(reason: str = "manual", *, silent: bool = False) -> bool:
     """请求保存状态并停止；入口在关停完成后重新执行进程。"""
-    global _reboot_requested
+    global _reboot_requested, _reboot_silent
     if reboot_block_reason():
         return False
     _reboot_requested = True
+    _reboot_silent = silent
     request_shutdown(f"reboot:{reason}")
     return True
 
 
 def is_reboot_requested() -> bool:
     return _reboot_requested
+
+
+def is_reboot_silent() -> bool:
+    return _reboot_silent
 
 
 async def _close_onebot_client() -> None:
@@ -149,6 +157,7 @@ def _register_background_task(coro, name: str) -> asyncio.Task:
 async def _bot_event_loop() -> None:
     """WebSocket 事件循环：连接、分发、断开重连，直到请求关停。"""
     startup_notified = False
+    suppress_startup_notice = os.environ.pop(REBOOT_SILENT_ENV, "") == "1"
     while not _shutdown_requested:
         log.info("正在连接 WebSocket...")
         try:
@@ -159,13 +168,17 @@ async def _bot_event_loop() -> None:
 
                 if not startup_notified:
                     try:
-                        await cfg.client.call_api(
-                            "send_group_msg",
-                            group_id=str(cfg.INTERNAL_GROUP_ID),
-                            message="🤖 客服机器人已启动，开始监听消息。",
-                        )
+                        if not suppress_startup_notice:
+                            await cfg.client.call_api(
+                                "send_group_msg",
+                                group_id=str(cfg.INTERNAL_GROUP_ID),
+                                message="🤖 客服机器人已启动，开始监听消息。",
+                            )
                         startup_notified = True
-                        log.info("启动通知已发送至群 %d", cfg.INTERNAL_GROUP_ID)
+                        if suppress_startup_notice:
+                            log.info("本次为静默重启，已跳过启动群通知")
+                        else:
+                            log.info("启动通知已发送至群 %d", cfg.INTERNAL_GROUP_ID)
                     except Exception as e:
                         log.error("发送启动通知失败: %s", e, exc_info=True)
 

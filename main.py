@@ -98,6 +98,10 @@ def main() -> None:
 
     if app.is_reboot_requested():
         log.info("正在重新启动机器人进程...")
+        if app.is_reboot_silent():
+            os.environ[app.REBOOT_SILENT_ENV] = "1"
+        else:
+            os.environ.pop(app.REBOOT_SILENT_ENV, None)
         # 保留解释器参数（含 -m / -X 等）、入口和启动参数。
         os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
 

@@ -912,7 +912,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             "• .unmute – 解除静音，并汇总发出延后提醒\n"
             "• .reload – 重新加载本地配置\n"
             "• .reload remote – 获取并应用远程更新\n"
-            "• .reboot – 保存状态并重启机器人\n"
+            "• .reboot [slient] – 保存状态并重启；slient 跳过重启后的启动群通知\n"
             "• .help – 显示此帮助信息\n"
             "\n"
             "使用方法：优先回复机器人消息；或 .命令 <客户QQ|all>；无参且待回复仅 1 人时自动匹配该客户。\n"
@@ -1069,8 +1069,10 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
 
     elif cmd_text.startswith(".reboot"):
         from . import main as app_main
-        if cmd_text != ".reboot":
-            message = "❌ 用法：.reboot"
+        reboot_parts = cmd_text.split()
+        valid_reboot = reboot_parts in ([".reboot"], [".reboot", "slient"])
+        if not valid_reboot:
+            message = "❌ 用法：.reboot [slient]"
         else:
             message = app_main.reboot_block_reason() or "🔄 正在重启机器人…"
         await cfg.client.call_api(
@@ -1078,8 +1080,10 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             group_id=str(gid),
             message=[MessageSegment.reply(str(msg_id)), MessageSegment.text(message)],
         )
-        if cmd_text == ".reboot" and not message.startswith("❌"):
-            app_main.request_reboot(f"group:{gid}:user:{event.user_id}")
+        if valid_reboot and not message.startswith("❌"):
+            app_main.request_reboot(
+                f"group:{gid}:user:{event.user_id}", silent=reboot_parts[1:] == ["slient"],
+            )
         return True
 
     elif cmd_text.startswith((".reload", ".update")):

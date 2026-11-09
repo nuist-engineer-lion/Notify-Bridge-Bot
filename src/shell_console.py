@@ -191,7 +191,7 @@ HELP_TEXT = """\
   unmute               解除静音并汇总延后提醒（与群内 .unmute 一致）
   reload               重新加载本地配置
   reload remote        获取并应用远程更新
-  reboot               保存状态并重启机器人
+  reboot [slient]      保存状态并重启；slient 跳过重启后的启动群通知
   say <qq|all> <文本>  私聊发送；all=当前待回复队列
   say <文本…>          队列仅 1 人时自动匹配该客户
   bye <qq|all>         发送结束语并关闭会话；无参且队列仅 1 人时自动匹配
@@ -522,8 +522,8 @@ async def handle_shell_command(raw: str) -> bool:
         return True
 
     if op in ("reboot", ".reboot"):
-        if args:
-            _print("用法：reboot")
+        if args not in ([], ["slient"]):
+            _print("用法：reboot [slient]")
             return True
         from . import main as app_main
         error = app_main.reboot_block_reason()
@@ -531,7 +531,7 @@ async def handle_shell_command(raw: str) -> bool:
             _print(error)
             return True
         _print("🔄 正在重启机器人…")
-        return not app_main.request_reboot("console")
+        return not app_main.request_reboot("console", silent=args == ["slient"])
 
     if op in ("quit", "exit", "stop"):
         # 控制台与 bot 运行绑定：退出控制台 = 优雅停止整个 bot
