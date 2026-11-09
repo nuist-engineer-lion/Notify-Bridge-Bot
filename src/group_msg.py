@@ -1108,8 +1108,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             try:
                 await _send_reload_feedback(
                     gid, msg_id,
-                    "⏳ 已开始远程更新：拉取代码 → 解密配置 → 同步依赖 → 重载配置。"
-                    "\n完成或失败后会发送结果，请稍候。",
+                    "⏳ 已开始远程更新，请稍候。",
                 )
             except Exception:
                 # 开始回执发送失败不取消已受理的更新，结束后仍尝试发送结果。
