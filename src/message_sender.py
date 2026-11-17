@@ -71,7 +71,17 @@ async def get_recent_message_ids(
 
 # ======================= 合并转发监听管理 =======================
 
+def prune_expired_command_times(now: float) -> int:
+    """按最长防抖窗口清理过期记录，避免消息 ID 与客户 QQ 同号时误删有效记录。"""
+    retention = max([5, *cfg.DEBOUNCE_SECONDS.values()])
+    keys_to_remove = [key for key, ts in last_command_time.items() if now - ts >= retention]
+    for key in keys_to_remove:
+        del last_command_time[key]
+    return len(keys_to_remove)
+
+
 def track_forward_message(message_id: int, customer_ids: list[int], group_id: int) -> None:
+    now = time.time()
     if message_id in cfg.monitored_forwards:
         try:
             monitored_forward_order.remove(message_id)
@@ -82,19 +92,21 @@ def track_forward_message(message_id: int, customer_ids: list[int], group_id: in
     cfg.monitored_forwards[message_id] = {
         "customer_ids": customer_ids,
         "group_id": group_id,
-        "created_at": time.time(),
+        "created_at": now,
     }
 
     while len(monitored_forward_order) > cfg.MONITORED_FORWARD_LIMIT:
         expired_id = monitored_forward_order.popleft()
         cfg.monitored_forwards.pop(expired_id, None)
 
+    prune_expired_command_times(now)
+
     log.debug("监听合并转发已更新: message_id=%s, 当前监听数=%d", message_id, len(monitored_forward_order))
     save_state()
 
 
 def pop_tracked_forward(message_id: int) -> dict | None:
-    """移除监听的合并转发，并清理其防抖记录"""
+    """移除监听的合并转发，并清理已过期的防抖记录。"""
     data = cfg.monitored_forwards.pop(message_id, None)
     if data is None:
         return None
@@ -104,9 +116,7 @@ def pop_tracked_forward(message_id: int) -> dict | None:
     except ValueError:
         pass
 
-    keys_to_remove = [key for key in last_command_time if key[0] == message_id]
-    for key in keys_to_remove:
-        del last_command_time[key]
+    prune_expired_command_times(time.time())
 
     save_state()
     return data

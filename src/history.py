@@ -7,6 +7,7 @@ SQLite（storage.py），写入失败时落盘 JSONL 兜底；会话关闭后按
 
 import asyncio
 import json
+import math
 import os
 import time
 
@@ -75,6 +76,26 @@ async def _safe_record(
             "message_id": message_id, "payload": payload,
         })
         return False
+
+
+async def _safe_record_batch(session_id: int, events: list[storage.SessionEvent]) -> int:
+    """批量补录历史；批次失败时逐条重试，继续保留原有的 JSONL 兜底。"""
+    if not events:
+        return 0
+    try:
+        return await storage.record_events(session_id, events)
+    except Exception as e:
+        log.warning("会话 %d 批量写入失败，转为逐条重试: %s", session_id, e, exc_info=True)
+
+    inserted = 0
+    for event in events:
+        if await _safe_record(
+            session_id, event["event_type"], time_=event["time"],
+            actor_uid=event.get("actor_uid"), message_id=event.get("message_id"),
+            **event.get("payload", {}),
+        ):
+            inserted += 1
+    return inserted
 
 
 # ======================= 会话生命周期 =======================
@@ -210,31 +231,43 @@ async def reconcile_session_history(
                   session_id, uid, e, exc_info=True)
 
     if msgs is not None:
-        msgs.sort(key=lambda m: m.get("time", 0))
         self_id = int(cfg.client.self_id)
+        events: list[storage.SessionEvent] = []
         for msg in msgs:
-            t = float(msg.get("time", 0) or 0)
-            if t < window_start - RECONCILE_WINDOW_TOLERANCE or t > window_end + RECONCILE_WINDOW_TOLERANCE:
+            try:
+                if not isinstance(msg, dict):
+                    raise ValueError("历史消息不是对象")
+                t = float(msg.get("time", 0) or 0)
+                if not math.isfinite(t):
+                    raise ValueError("历史消息时间不是有限数值")
+                if t < window_start - RECONCILE_WINDOW_TOLERANCE or t > window_end + RECONCILE_WINDOW_TOLERANCE:
+                    continue
+                mid = msg.get("message_id")
+                mid = int(mid) if mid is not None else None
+                sender = msg.get("sender") or {}
+                if not isinstance(sender, dict):
+                    raise ValueError("历史消息发送者不是对象")
+                sender_uid = sender.get("user_id")
+                sender_uid = int(sender_uid) if sender_uid is not None else None
+            except (TypeError, ValueError, OverflowError) as e:
+                log.warning("会话 %d 跳过无法解析的历史消息: %s", session_id, e)
                 continue
             pulled += 1
-            mid = msg.get("message_id")
             if mid is not None:
-                pulled_ids.add(int(mid))
-            sender = msg.get("sender", {}) or {}
-            sender_uid = sender.get("user_id")
-            is_staff = sender_uid is not None and int(sender_uid) == self_id
-            ok = await _safe_record(
-                session_id,
-                "staff_reply" if is_staff else "customer_message",
-                time_=t,
-                actor_uid=int(sender_uid) if sender_uid is not None else None,
-                message_id=int(mid) if mid is not None else None,
-                n=sender.get("nickname", ""),
-                msg=msg.get("message", []),
-                source="history_reconcile",
-            )
-            if ok:
-                inserted += 1
+                pulled_ids.add(mid)
+            is_staff = sender_uid == self_id
+            events.append({
+                "event_type": "staff_reply" if is_staff else "customer_message",
+                "time": t,
+                "actor_uid": sender_uid,
+                "message_id": mid,
+                "payload": {
+                    "n": sender.get("nickname", ""), "msg": msg.get("message", []),
+                    "source": "history_reconcile",
+                },
+            })
+        events.sort(key=lambda event: event["time"])
+        inserted = await _safe_record_batch(session_id, events)
 
     # 交叉核对：实时已见、但既不在拉取结果也不在库中的消息
     missing: list[int] = []

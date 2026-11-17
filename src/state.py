@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 import time
 from typing import cast
 
@@ -20,19 +21,34 @@ from .models import (
 )
 
 
+def _serialize_customer(data: CustomerData) -> StateCustomerData:
+    return {
+        "last_active": data["last_active"],
+        "msg_ids": data["msg_ids"],
+        "is_newly_reported": data["is_newly_reported"],
+        "reported_milestones": list(data["reported_milestones"]),
+        "pending_since": data["pending_since"],
+        "session_id": data.get("session_id"),
+    }
+
+
+def _restore_customer(data: StateCustomerData) -> CustomerData:
+    return {
+        "last_active": data["last_active"],
+        "msg_ids": data["msg_ids"],
+        "is_newly_reported": data["is_newly_reported"],
+        "reported_milestones": set(data["reported_milestones"]),
+        "pending_since": data["pending_since"],
+        "session_id": data.get("session_id"),
+    }
+
+
 def save_state() -> None:
-    """将当前内存状态保存到本地文件，以便重启后恢复"""
+    """通过同目录临时文件原子替换状态，写入失败时保留上一次完整快照。"""
     # 转换 set 为 list 以便 JSON 序列化
-    serializable_customers: dict[str, StateCustomerData] = {}
-    for qq, data in unreplied_customers.items():
-        serializable_customers[str(qq)] = {
-            "last_active": data["last_active"],
-            "msg_ids": data["msg_ids"],
-            "is_newly_reported": data["is_newly_reported"],
-            "reported_milestones": list(data["reported_milestones"]),
-            "pending_since": data["pending_since"],
-            "session_id": data.get("session_id"),
-        }
+    serializable_customers = {
+        str(qq): _serialize_customer(data) for qq, data in unreplied_customers.items()
+    }
 
     # 转换 monitored_forwards 的键为字符串
     serializable_forwards: dict[str, StateForwardData] = {
@@ -51,20 +67,9 @@ def save_state() -> None:
     # 转换 delayed_notifications 中的 CustomerData 为 StateCustomerData
     serializable_delayed: list[StateDelayedNotification] = []
     for notif in delayed_notifications:
-        customers_state: list[tuple[int, StateCustomerData]] = []
-        for qq, cust in notif["customers"]:
-            cust_state: StateCustomerData = {
-                "last_active": cust["last_active"],
-                "msg_ids": cust["msg_ids"],
-                "is_newly_reported": cust["is_newly_reported"],
-                "reported_milestones": list(cust["reported_milestones"]),
-                "pending_since": cust["pending_since"],
-                "session_id": cust.get("session_id"),
-            }
-            customers_state.append((qq, cust_state))
         serializable_delayed.append({
             "type": notif["type"],
-            "customers": customers_state,
+            "customers": [(qq, _serialize_customer(cust)) for qq, cust in notif["customers"]],
             "milestone": notif["milestone"],
             "timestamp": notif["timestamp"],
         })
@@ -79,13 +84,30 @@ def save_state() -> None:
         "mute_until": cfg.mute_until,
     }
 
+    temp_path: str | None = None
     try:
-        os.makedirs(os.path.dirname(cfg.STATE_FILE) or ".", exist_ok=True)
-        with open(cfg.STATE_FILE, "w", encoding="utf-8") as f:
+        path = os.path.abspath(cfg.STATE_FILE)
+        directory = os.path.dirname(path)
+        os.makedirs(directory, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=directory,
+            prefix=f".{os.path.basename(path)}.", suffix=".tmp", delete=False,
+        ) as f:
+            temp_path = f.name
             json.dump(state, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
         log.debug("状态已保存至 %s", cfg.STATE_FILE)
     except Exception as e:
         log.error("状态保存失败: %s", e, exc_info=True)
+    finally:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except OSError as e:
+                log.warning("清理状态临时文件失败: %s", e)
 
 
 def load_state() -> None:
@@ -106,14 +128,7 @@ def load_state() -> None:
     # 恢复 unreplied_customers（旧版状态文件无 session_id 字段，恢复后由 history.recover_sessions 补建）
     for qq_str, cust_state in state.get("unreplied_customers", {}).items():
         qq = int(qq_str)
-        unreplied_customers[qq] = {
-            "last_active": cust_state["last_active"],
-            "msg_ids": cust_state["msg_ids"],
-            "is_newly_reported": cust_state["is_newly_reported"],
-            "reported_milestones": set(cust_state["reported_milestones"]),
-            "pending_since": cust_state["pending_since"],
-            "session_id": cust_state.get("session_id"),
-        }
+        unreplied_customers[qq] = _restore_customer(cust_state)
 
     # 恢复 monitored_forwards
     cfg.monitored_forwards.clear()
@@ -146,20 +161,9 @@ def load_state() -> None:
     # 恢复 delayed_notifications
     delayed_notifications.clear()
     for notif_state in state.get("delayed_notifications", []):
-        customers: list[tuple[int, CustomerData]] = []
-        for qq, cust_state in notif_state["customers"]:
-            cust: CustomerData = {
-                "last_active": cust_state["last_active"],
-                "msg_ids": cust_state["msg_ids"],
-                "is_newly_reported": cust_state["is_newly_reported"],
-                "reported_milestones": set(cust_state["reported_milestones"]),
-                "pending_since": cust_state["pending_since"],
-                "session_id": cust_state.get("session_id"),
-            }
-            customers.append((qq, cust))
         delayed_notifications.append({
             "type": notif_state["type"],
-            "customers": customers,
+            "customers": [(qq, _restore_customer(cust)) for qq, cust in notif_state["customers"]],
             "milestone": notif_state["milestone"],
             "timestamp": notif_state["timestamp"],
         })

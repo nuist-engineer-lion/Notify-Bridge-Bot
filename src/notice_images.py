@@ -82,6 +82,39 @@ def _compress_webp(raw: bytes, *, quality: int, max_width: int) -> bytes:
         raise ValueError("图片损坏、格式不支持或像素过大，无法转换为 WebP") from exc
 
 
+def _validate_messages(messages: list[dict]) -> list[list[dict]]:
+    """先检查整批内容，避免在末尾才发现数量超限或不支持的消息段。"""
+    normalized = []
+    image_count = 0
+    for index, message in enumerate(messages, 1):
+        segments = message_segments(message["message"])
+        has_content = False
+        for segment in segments:
+            kind, data = segment["type"], segment["data"]
+            if kind == "text":
+                if not isinstance(data.get("text"), str):
+                    raise ValueError(f"选中的第 {index} 条消息文本无效，未创建 PR")
+                has_content = has_content or bool(data["text"].strip())
+            elif kind == "at" and str(data.get("qq")).strip().lower() in {"all", "全体成员"}:
+                has_content = True
+            elif kind == "image":
+                image_count += 1
+                if image_count > _MAX_IMAGES:
+                    raise ValueError("单份通知最多支持 50 张图片")
+                if not _image_source(data) and not data.get("file"):
+                    raise ValueError(f"第 {index} 条消息的图片下载或 WebP 转换失败，未创建 PR")
+                has_content = True
+            else:
+                raise ValueError(
+                    f"选中的第 {index} 条消息含引用、表情等不支持的内容，未创建 PR；"
+                    "目前支持文本、图片及 @全体成员"
+                )
+        if not has_content:
+            raise ValueError(f"选中的第 {index} 条消息为空，未创建 PR")
+        normalized.append(segments)
+    return normalized
+
+
 async def prepare_notice_content(
     messages: list[dict], settings: dict[str, Any],
 ) -> tuple[str, dict[str, bytes]]:
@@ -92,34 +125,34 @@ async def prepare_notice_content(
     if not 1 <= quality <= 100 or not 1 <= max_width <= 16383:
         raise ValueError("notice_pr.images 配置无效：quality 需为 1–100，max_width 需为 1–16383")
 
+    normalized = _validate_messages(messages)
     assets: dict[str, bytes] = {}
     cache: dict[str, str] = {}
+    resolved_files: dict[str, str] = {}
     total_bytes = 0
-    image_count = 0
     texts = []
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-        for index, message in enumerate(messages, 1):
+        for index, segments in enumerate(normalized, 1):
             parts = []
-            for segment in message_segments(message["message"]):
+            for segment in segments:
                 kind, data = segment["type"], segment["data"]
                 if kind == "text":
                     parts.append(data["text"])
-                elif kind == "at" and str(data.get("qq")).strip().lower() in {"all", "全体成员"}:
+                elif kind == "at":
                     parts.append("@全体成员")
-                elif kind == "image":
-                    image_count += 1
-                    if image_count > _MAX_IMAGES:
-                        raise ValueError("单份通知最多支持 50 张图片")
+                else:  # 图片；其他类型已在整批预检时拒绝。
                     try:
                         source = _image_source(data)
                         # 某些协议端历史只提供图片 file 标识，通过 get_image 换取地址。
                         if not source:
-                            if not data.get("file"):
-                                raise ValueError("缺少图片地址和文件标识")
-                            info = await cfg.client.call_api("get_image", file=str(data["file"]))
-                            source = _image_source(info)
-                        if not source:
-                            raise ValueError("协议端未返回可下载的图片地址")
+                            file_id = str(data["file"])
+                            source = resolved_files.get(file_id)
+                            if source is None:
+                                info = await cfg.client.call_api("get_image", file=file_id)
+                                source = _image_source(info)
+                                if not source:
+                                    raise ValueError("协议端未返回可下载的图片地址")
+                                resolved_files[file_id] = source
                         if source not in cache:
                             raw = await _download_image(session, source)
                             webp = await asyncio.to_thread(
@@ -138,13 +171,6 @@ async def prepare_notice_content(
                     except Exception as exc:
                         # 不将含临时鉴权参数的 QQ 图片 URL 放入反馈或日志。
                         raise ValueError(f"第 {index} 条消息的图片下载或 WebP 转换失败，未创建 PR") from exc
-                else:
-                    raise ValueError(
-                        f"选中的第 {index} 条消息含引用、表情等不支持的内容，未创建 PR；"
-                        "目前支持文本、图片及 @全体成员"
-                    )
             text = "".join(parts).strip()
-            if not text:
-                raise ValueError(f"选中的第 {index} 条消息为空，未创建 PR")
             texts.append(text)
     return "\n\n".join(texts), assets
