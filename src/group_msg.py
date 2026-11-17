@@ -1,5 +1,7 @@
 import time
 import asyncio
+import random
+from dataclasses import dataclass
 
 from nonebot.adapters.onebot.v11 import MessageSegment
 from nonebot.adapters.onebot.v11.event import PokeNotifyEvent
@@ -31,6 +33,131 @@ OPS_COMMAND_PREFIXES = ('.say', '.bye', '.more', '.help', '.close', '.list', '.r
 SESSION_OP_PREFIXES = ('.say', '.bye', '.close', '.more')
 
 _pending_say_tasks: dict[int, asyncio.Task] = {}
+BYE_CONFIRM_TIMEOUT_SECONDS = 30
+BYE_CONFIRM_EMOJI_POOL = (14, 21, 25, 32, 66, 74, 76, 89, 96, 100, 123, 124, 127, 128)
+
+
+@dataclass
+class ByeConfirmation:
+    group_id: int
+    operator_uid: int
+    customer_sessions: dict[int, tuple[int | None, float] | None]
+    confirm_emoji_id: int
+    emoji_ids: tuple[int, ...]
+    expires_at: float
+
+
+_pending_bye: dict[int, ByeConfirmation] = {}
+_pending_bye_tasks: dict[int, asyncio.Task] = {}
+
+
+def pop_pending_bye(mid: int) -> ByeConfirmation | None:
+    pending = _pending_bye.pop(mid, None)
+    task = _pending_bye_tasks.pop(mid, None)
+    if task is not None and task is not asyncio.current_task():
+        task.cancel()
+    return pending
+
+
+def _customer_session(customer_id: int) -> tuple[int | None, float] | None:
+    data = cfg.unreplied_customers.get(customer_id)
+    return (data.get("session_id"), data["pending_since"]) if data is not None else None
+
+
+async def request_bye_confirmation(gid: int, mid: int, user_id: int, targets: list[int]) -> None:
+    """首次点击只发确认提示，每位操作者仅保留最新的一次请求。"""
+    now = asyncio.get_running_loop().time()
+    for prompt_id, pending in list(_pending_bye.items()):
+        if pending.expires_at <= now or pending.operator_uid == user_id:
+            pop_pending_bye(prompt_id)
+            await remove_emoji_from_message(prompt_id, list(pending.emoji_ids))
+    emoji_ids = tuple(random.sample(BYE_CONFIRM_EMOJI_POOL, 5))
+    pending = ByeConfirmation(
+        group_id=gid,
+        operator_uid=user_id,
+        customer_sessions={cust: _customer_session(cust) for cust in targets},
+        confirm_emoji_id=random.choice(emoji_ids),
+        emoji_ids=emoji_ids,
+        expires_at=now + BYE_CONFIRM_TIMEOUT_SECONDS,
+    )
+    shown = "、".join(str(cust) for cust in list(pending.customer_sessions)[:10])
+    if len(pending.customer_sessions) > 10:
+        shown += "……"
+    resp = await cfg.client.call_api(
+        "send_group_msg", group_id=str(gid),
+        message=[
+            MessageSegment.reply(str(mid)),
+            MessageSegment.at(user_id),
+            MessageSegment.text(
+                " 完成人机验证后将发送结束语，超时将取消发送。\n"
+                f"待关闭会话的客户（{len(pending.customer_sessions)} 人）：{shown}\n"
+                f"请在 {BYE_CONFIRM_TIMEOUT_SECONDS} 秒内点击本消息下方的 "
+            ),
+            MessageSegment.face(pending.confirm_emoji_id),
+            MessageSegment.text(" 表情完成验证，点错任意一个表情将立即取消发送。仅发起人可操作。"),
+        ],
+    )
+    prompt_id = resp.get("message_id") if resp else None
+    if prompt_id is None:
+        log.warning("结束语确认消息未返回消息 ID，未执行操作: group=%s, user=%s", gid, user_id)
+        return
+    pending.expires_at = asyncio.get_running_loop().time() + BYE_CONFIRM_TIMEOUT_SECONDS
+    prompt_id = int(prompt_id)
+    _pending_bye[prompt_id] = pending
+
+    async def expire_confirmation() -> None:
+        await asyncio.sleep(BYE_CONFIRM_TIMEOUT_SECONDS)
+        if _pending_bye.get(prompt_id) is pending:
+            try:
+                await handle_bye_confirmation_click(gid, prompt_id, user_id, [pending.confirm_emoji_id])
+            except Exception:
+                log.exception("清理结束语验证表情失败: message_id=%s", prompt_id)
+
+    _pending_bye_tasks[prompt_id] = asyncio.create_task(expire_confirmation())
+    await add_emoji_to_message(prompt_id, list(pending.emoji_ids))
+
+
+async def handle_bye_confirmation_click(gid: int, mid: int, user_id: int, emoji_ids: list[int]) -> bool:
+    pending = _pending_bye.get(mid)
+    if pending is None:
+        return False
+    if gid != pending.group_id or user_id != pending.operator_uid:
+        return True
+    if not emoji_ids:
+        return True
+
+    # 先消费请求再等待网络，重复点击、重复事件均不会再次发送结束语。
+    pop_pending_bye(mid)
+    if (
+        asyncio.get_running_loop().time() >= pending.expires_at
+        or any(eid != pending.confirm_emoji_id for eid in emoji_ids)
+    ):
+        await remove_emoji_from_message(mid, list(pending.emoji_ids))
+        return True
+    else:
+        ok = 0
+        failed: list[int] = []
+        for cust, session in pending.customer_sessions.items():
+            if _customer_session(cust) != session:
+                result = f"❌ 客户 {cust} 的会话已变化，请重新发起确认。"
+            else:
+                result = await handle_bye_command(gid, mid, cust, operator_uid=user_id, via="emoji")
+            if result.startswith("❌"):
+                failed.append(cust)
+            else:
+                ok += 1
+        if len(pending.customer_sessions) == 1:
+            await send_and_track_feedback(gid, mid, result, cust)
+            return True
+        feedback = format_batch_result("发送结束语并关闭会话", ok, failed)
+        if failed:
+            feedback += "\n失败或会话已变化的客户未关闭，请核对后重新操作。"
+
+    await cfg.client.call_api(
+        "send_group_msg", group_id=str(gid),
+        message=[MessageSegment.reply(str(mid)), MessageSegment.text(feedback)],
+    )
+    return True
 
 
 async def _send_reload_feedback(gid: int, msg_id: int, text: str) -> None:
@@ -504,6 +631,13 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
 
     if not event.is_add or not event.likes:
         return True
+    if mid in _pending_bye:
+        try:
+            emoji_ids = [int(like.get("emoji_id")) for like in event.likes]
+        except (TypeError, ValueError):
+            return True
+        await handle_bye_confirmation_click(gid, mid, event.user_id, emoji_ids)
+        return True
     first = event.likes[0]
     try:
         # SnowLuma convertGroupMsgEmojiLike 与 NapCat OB11MsgEmojiLikeEvent 均用 emoji_id；
@@ -601,28 +735,23 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
                         group_id=str(gid),
                         message=[MessageSegment.reply(str(prompt_msg_id)), MessageSegment.text(hint)],
                     )
-        elif cmd in ("close", "bye"):
-            op_name = cmd
-            label = "close" if cmd == "close" else "bye"
+        elif cmd == "bye":
+            await request_bye_confirmation(gid, mid, event.user_id, targets)
+        elif cmd == "close":
             if len(targets) == 1:
-                if cmd == "close":
-                    feedback = await handle_close_command(
-                        gid, mid, targets[0], operator_uid=event.user_id, via="emoji",
-                    )
-                else:
-                    feedback = await handle_bye_command(
-                        gid, mid, targets[0], operator_uid=event.user_id, via="emoji",
-                    )
+                feedback = await handle_close_command(
+                    gid, mid, targets[0], operator_uid=event.user_id, via="emoji",
+                )
                 await send_and_track_feedback(gid, mid, feedback, targets[0])
             else:
                 ok, failed = await apply_session_op_to_customers(
-                    op_name, targets,
+                    "close", targets,
                     gid=gid,
                     operator_uid=event.user_id,
                     via="emoji",
                     reply_id=mid,
                 )
-                summary = format_batch_result(f"emoji {label} all", ok, failed)
+                summary = format_batch_result("emoji close all", ok, failed)
                 await cfg.client.call_api(
                     "send_group_msg",
                     group_id=str(gid),
