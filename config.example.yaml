@@ -123,6 +123,11 @@ emoji_mapping:
 # 超时取消等待，移除提示消息上的 cancel 表情，换成 say_timeout 表情，不发送新消息
 say_input_timeout_seconds: 120
 
+# 结束语人机验证（支持热重载，新验证生效）；超时须为大于 0 的有限秒数
+bye_confirm_timeout_seconds: 30
+# 至少 5 个互不重复的正整数 QQ 表情 ID，每次随机抽取 5 个并选出一个作为验证目标
+bye_confirm_emoji_pool: [9, 12, 66, 74, 75, 99, 111, 272, 277, 287, 314, 318, 319, 324, 339, 351, 354, 424, 427]
+
 # .say 发送成功后允许通过点击撤回表情撤回消息的时间窗口（秒）
 recall_window_seconds: 119
 

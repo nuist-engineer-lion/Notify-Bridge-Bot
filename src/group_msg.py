@@ -33,8 +33,6 @@ OPS_COMMAND_PREFIXES = ('.say', '.bye', '.more', '.help', '.close', '.list', '.r
 SESSION_OP_PREFIXES = ('.say', '.bye', '.close', '.more')
 
 _pending_say_tasks: dict[int, asyncio.Task] = {}
-BYE_CONFIRM_TIMEOUT_SECONDS = 30
-BYE_CONFIRM_EMOJI_POOL = (14, 21, 25, 32, 66, 74, 76, 89, 96, 100, 123, 124, 127, 128)
 
 
 @dataclass
@@ -66,19 +64,21 @@ def _customer_session(customer_id: int) -> tuple[int | None, float] | None:
 
 async def request_bye_confirmation(gid: int, mid: int, user_id: int, targets: list[int]) -> None:
     """首次点击只发确认提示，每位操作者仅保留最新的一次请求。"""
+    timeout = cfg.BYE_CONFIRM_TIMEOUT_SECONDS
+    emoji_pool = cfg.BYE_CONFIRM_EMOJI_POOL
     now = asyncio.get_running_loop().time()
     for prompt_id, pending in list(_pending_bye.items()):
         if pending.expires_at <= now or pending.operator_uid == user_id:
             pop_pending_bye(prompt_id)
             await remove_emoji_from_message(prompt_id, list(pending.emoji_ids))
-    emoji_ids = tuple(random.sample(BYE_CONFIRM_EMOJI_POOL, 5))
+    emoji_ids = tuple(random.sample(emoji_pool, 5))
     pending = ByeConfirmation(
         group_id=gid,
         operator_uid=user_id,
         customer_sessions={cust: _customer_session(cust) for cust in targets},
         confirm_emoji_id=random.choice(emoji_ids),
         emoji_ids=emoji_ids,
-        expires_at=now + BYE_CONFIRM_TIMEOUT_SECONDS,
+        expires_at=now + timeout,
     )
     shown = "、".join(str(cust) for cust in list(pending.customer_sessions)[:10])
     if len(pending.customer_sessions) > 10:
@@ -86,27 +86,25 @@ async def request_bye_confirmation(gid: int, mid: int, user_id: int, targets: li
     resp = await cfg.client.call_api(
         "send_group_msg", group_id=str(gid),
         message=[
-            MessageSegment.reply(str(mid)),
             MessageSegment.at(user_id),
             MessageSegment.text(
-                " 完成人机验证后将发送结束语，超时将取消发送。\n"
-                f"待关闭会话的客户（{len(pending.customer_sessions)} 人）：{shown}\n"
-                f"请在 {BYE_CONFIRM_TIMEOUT_SECONDS} 秒内点击本消息下方的 "
+                f" 完成人机验证后将向 {shown} 发送结束语\n"
+                f"请在 {timeout:g} 秒内点击本消息下方的 "
             ),
             MessageSegment.face(pending.confirm_emoji_id),
-            MessageSegment.text(" 表情完成验证，点错任意一个表情将立即取消发送。仅发起人可操作。"),
+            MessageSegment.text(" 表情完成验证，超时将取消发送。"),
         ],
     )
     prompt_id = resp.get("message_id") if resp else None
     if prompt_id is None:
         log.warning("结束语确认消息未返回消息 ID，未执行操作: group=%s, user=%s", gid, user_id)
         return
-    pending.expires_at = asyncio.get_running_loop().time() + BYE_CONFIRM_TIMEOUT_SECONDS
+    pending.expires_at = asyncio.get_running_loop().time() + timeout
     prompt_id = int(prompt_id)
     _pending_bye[prompt_id] = pending
 
     async def expire_confirmation() -> None:
-        await asyncio.sleep(BYE_CONFIRM_TIMEOUT_SECONDS)
+        await asyncio.sleep(timeout)
         if _pending_bye.get(prompt_id) is pending:
             try:
                 await handle_bye_confirmation_click(gid, prompt_id, user_id, [pending.confirm_emoji_id])

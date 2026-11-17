@@ -182,6 +182,9 @@ EMOJI_MAPPING = dict(DEFAULT_EMOJI_MAPPING)
 EMOJI_TO_CMD = {v: "say" if k == "say_replied" else k for k, v in EMOJI_MAPPING.items() if k != "say_timeout"}
 RECALL_WINDOW_SECONDS = 60  # .say 发送成功后允许通过表情撤回的时间窗口（秒）
 SAY_INPUT_TIMEOUT_SECONDS = 30.0
+BYE_CONFIRM_TIMEOUT_SECONDS = 30.0
+DEFAULT_BYE_CONFIRM_EMOJI_POOL = (351, 314, 99, 9, 319, 318, 324, 339, 287, 272, 424, 66)
+BYE_CONFIRM_EMOJI_POOL = DEFAULT_BYE_CONFIRM_EMOJI_POOL
 # 过期撤回记录额外保留时长：窗口结束后仍可识别延迟点击并回复超时提示
 RECALL_CLEANUP_GRACE_SECONDS = 300
 
@@ -220,6 +223,7 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     global ARCHIVE_RETENTION_DAYS
     global AI_SUGGESTION, NOTICE_PR, reply_durations
     global SAY_INPUT_TIMEOUT_SECONDS
+    global BYE_CONFIRM_TIMEOUT_SECONDS, BYE_CONFIRM_EMOJI_POOL
 
     applied_config = dict(new_config)
     friend_notification_enabled = applied_config.get("friend_notification_enabled", True)
@@ -228,6 +232,18 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     say_input_timeout = float(applied_config.get("say_input_timeout_seconds", 30))
     if not math.isfinite(say_input_timeout) or say_input_timeout <= 0:
         raise ValueError("say_input_timeout_seconds 必须为大于 0 的有限秒数")
+    bye_confirm_timeout = float(applied_config.get("bye_confirm_timeout_seconds", 30))
+    if not math.isfinite(bye_confirm_timeout) or bye_confirm_timeout <= 0:
+        raise ValueError("bye_confirm_timeout_seconds 必须为大于 0 的有限秒数")
+    bye_confirm_pool = applied_config.get("bye_confirm_emoji_pool", DEFAULT_BYE_CONFIRM_EMOJI_POOL)
+    if (
+        not isinstance(bye_confirm_pool, (list, tuple))
+        or any(type(eid) is not int or eid <= 0 for eid in bye_confirm_pool)
+        or len(bye_confirm_pool) < 5
+        or len(set(bye_confirm_pool)) != len(bye_confirm_pool)
+    ):
+        raise ValueError("bye_confirm_emoji_pool 必须包含至少 5 个互不重复的正整数表情 ID")
+    bye_confirm_pool = tuple(bye_confirm_pool)
     ws_receive_timeout = float(applied_config.get("ws_receive_timeout", 90))
     if not math.isfinite(ws_receive_timeout) or ws_receive_timeout <= 0:
         raise ValueError("ws_receive_timeout 必须为大于 0 的有限秒数")
@@ -272,6 +288,8 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     EMOJI_TO_CMD = {v: "say" if k == "say_replied" else k for k, v in EMOJI_MAPPING.items() if k != "say_timeout"}
     RECALL_WINDOW_SECONDS = int(config.get("recall_window_seconds", 60))
     SAY_INPUT_TIMEOUT_SECONDS = say_input_timeout
+    BYE_CONFIRM_TIMEOUT_SECONDS = bye_confirm_timeout
+    BYE_CONFIRM_EMOJI_POOL = bye_confirm_pool
 
     # ================= 夜间模式配置 =================
     NIGHT_MODE = dict(config.get("night_mode", {}))
