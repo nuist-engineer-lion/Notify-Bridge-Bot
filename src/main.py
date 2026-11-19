@@ -16,7 +16,7 @@ from .onebot import (
 from . import config as cfg
 from .config import log
 from .state import load_state, save_state
-from .monitor import monitor_loop
+from .monitor import monitor_loop, send_startup_headcount_report
 from .private_msg import handle_private_msg, handle_sent_msg, handle_friend_poke
 from .new_user import handle_friend_request
 from .group_msg import handle_group_emoji, handle_group_poke, handle_group_command
@@ -157,6 +157,7 @@ async def _bot_event_loop() -> None:
     """WebSocket 事件循环：连接、分发、断开重连，直到请求关停。"""
     startup_notified = False
     suppress_startup_notice = os.environ.pop(REBOOT_SILENT_ENV, "") == "1"
+    startup_report_scheduled = suppress_startup_notice
     while not _shutdown_requested:
         log.info("正在连接 WebSocket...")
         try:
@@ -164,6 +165,10 @@ async def _bot_event_loop() -> None:
                 if _shutdown_requested:
                     log.info("事件循环收到关停请求，停止处理新事件")
                     break
+
+                if not startup_report_scheduled:
+                    startup_report_scheduled = True
+                    _register_background_task(send_startup_headcount_report(), "startup-headcount-report")
 
                 if not startup_notified:
                     try:

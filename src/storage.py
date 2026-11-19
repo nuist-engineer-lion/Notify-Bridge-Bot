@@ -96,6 +96,8 @@ class GroupDailyStats(NamedTuple):
     day: str
     total: int
     change: int | None
+    added: int | None
+    removed: int | None
 
 
 @contextmanager
@@ -118,6 +120,11 @@ def init_db_sync() -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with _connect() as conn:
         conn.executescript(_SCHEMA)
+        conn.execute("BEGIN IMMEDIATE")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(group_daily_stats)")}
+        for column, kind in (("added", "INTEGER"), ("removed", "INTEGER"), ("member_ids", "TEXT")):
+            if column not in columns:
+                conn.execute(f"ALTER TABLE group_daily_stats ADD COLUMN {column} {kind}")
     log.info("会话库已就绪: %s", path)
 
 
@@ -295,23 +302,47 @@ def _recent_friend_stats(limit: int) -> list[tuple[str, int, int, int]]:
 def _recent_group_stats(group_id: int, limit: int) -> list[GroupDailyStats]:
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT day, total, change FROM group_daily_stats WHERE group_id = ? ORDER BY day DESC LIMIT ?",
+            "SELECT day, total, change, added, removed FROM group_daily_stats WHERE group_id = ? ORDER BY day DESC LIMIT ?",
             (group_id, limit),
         ).fetchall()
     return [GroupDailyStats(*row) for row in rows]
 
 
-def _record_group_total(group_id: int, day: str, total: int) -> GroupDailyStats:
+def _compare_group_snapshot(conn: sqlite3.Connection, group_id: int, day: str | None, members: set[int]) -> GroupDailyStats:
+    previous = conn.execute(
+        "SELECT total, member_ids FROM group_daily_stats WHERE group_id = ? AND (? IS NULL OR day < ?) "
+        "ORDER BY day DESC LIMIT 1",
+        (group_id, day, day),
+    ).fetchone()
+    baseline = set(json.loads(previous[1])) if previous and previous[1] is not None else None
+    total = len(members)
+    return GroupDailyStats(
+        day or "", total, total - previous[0] if previous else None,
+        len(members - baseline) if baseline is not None else None,
+        len(baseline - members) if baseline is not None else None,
+    )
+
+
+def _preview_group_snapshot(group_id: int, members: set[int]) -> GroupDailyStats:
     with _connect() as conn:
+        return _compare_group_snapshot(conn, group_id, None, members)
+
+
+def _record_group_snapshot(group_id: int, day: str, members: set[int]) -> GroupDailyStats:
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        stats = _compare_group_snapshot(conn, group_id, day, members)
         conn.execute(
-            "INSERT INTO group_daily_stats (group_id, day, total, change) "
-            "VALUES (?, ?, ?, ? - (SELECT total FROM group_daily_stats "
-            "WHERE group_id = ? AND day < ? ORDER BY day DESC LIMIT 1)) "
-            "ON CONFLICT(group_id, day) DO NOTHING",
-            (group_id, day, total, total, group_id, day),
+            "INSERT INTO group_daily_stats (group_id, day, total, change, added, removed, member_ids) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(group_id, day) DO NOTHING",
+            (group_id, *stats, json.dumps(sorted(members))),
+        )
+        conn.execute(
+            "UPDATE group_daily_stats SET member_ids = NULL WHERE group_id = ? AND day < ? AND member_ids IS NOT NULL",
+            (group_id, day),
         )
         row = conn.execute(
-            "SELECT day, total, change FROM group_daily_stats WHERE group_id = ? AND day = ?",
+            "SELECT day, total, change, added, removed FROM group_daily_stats WHERE group_id = ? AND day = ?",
             (group_id, day),
         ).fetchone()
     return GroupDailyStats(*row)
@@ -351,8 +382,12 @@ async def recent_group_stats(group_id: int, limit: int) -> list[GroupDailyStats]
     return await asyncio.to_thread(_recent_group_stats, group_id, limit)
 
 
-async def record_group_total(group_id: int, day: str, total: int) -> GroupDailyStats:
-    return await asyncio.to_thread(_record_group_total, group_id, day, total)
+async def record_group_snapshot(group_id: int, day: str, members: set[int]) -> GroupDailyStats:
+    return await asyncio.to_thread(_record_group_snapshot, group_id, day, members)
+
+
+async def preview_group_snapshot(group_id: int, members: set[int]) -> GroupDailyStats:
+    return await asyncio.to_thread(_preview_group_snapshot, group_id, members)
 
 
 async def open_session(customer_uid: int, started_at: float) -> int:

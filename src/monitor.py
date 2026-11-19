@@ -1,6 +1,7 @@
 import time
 import asyncio
 from datetime import datetime, timedelta
+from unicodedata import combining, east_asian_width
 
 from nonebot.adapters.onebot.v11 import MessageSegment
 
@@ -20,20 +21,28 @@ from . import storage
 from .watch_chart import build_watch_chart
 
 
-async def _sample_group(group_id: int, day: str) -> storage.GroupDailyStats | None:
+async def _sample_group(group_id: int, day: str | None = None) -> storage.GroupDailyStats | None:
     try:
-        recent = await storage.recent_group_stats(group_id, 1)
-        if recent and recent[0].day >= day:
-            return recent[0] if recent[0].day == day else None
+        if day is not None:
+            recent = await storage.recent_group_stats(group_id, 1)
+            if recent and recent[0].day >= day:
+                return recent[0] if recent[0].day == day else None
 
         async with asyncio.timeout(5):
-            info = await cfg.client.call_api("get_group_info", group_id=group_id, no_cache=True)
-        total = info.get("member_count") if isinstance(info, dict) else None
-        if type(total) is not int or total < 0:
-            raise ValueError("群人数返回格式错误")
-        return await storage.record_group_total(group_id, day, total)
+            entries = await cfg.client.call_api("get_group_member_list", group_id=group_id, no_cache=True)
+        if not isinstance(entries, list) or not entries:
+            raise ValueError("群成员名单为空或格式错误")
+        members = set()
+        for entry in entries:
+            user_id = entry.get("user_id") if isinstance(entry, dict) else None
+            if type(user_id) not in (int, str) or int(user_id) <= 0:
+                raise ValueError("群成员名单包含无效 QQ 号")
+            members.add(int(user_id))
+        if day is not None:
+            return await storage.record_group_snapshot(group_id, day, members)
+        return await storage.preview_group_snapshot(group_id, members)
     except Exception as e:
-        log.warning("群 %s 人数采样失败，将在下次巡检重试: %s", group_id, e)
+        log.warning("群 %s 人数采样失败: %s", group_id, e)
         return None
 
 
@@ -53,12 +62,96 @@ async def _deliver_morning_report(day: str, message: str | list[MessageSegment])
     return complete
 
 
+def _format_headcount_table(rows: list[tuple[str, int | None, int | None, int | None, int | None]]) -> str:
+    cells = [("", "新增", "删除", "当前数量", "净改变")]
+    for name, added, removed, total, change in rows:
+        cells.append((name, *[str(value) if value is not None else "–" for value in (added, removed, total)],
+                      f"{change:+d}" if change is not None else "–"))
+
+    def width(text: str) -> int:
+        return sum(2 if east_asian_width(char) in ("F", "W") else 1 for char in text if not combining(char))
+
+    def pad(size: int) -> str:
+        return "　" * (size // 2) + " " * (size % 2)
+
+    widths = [max(map(width, column)) for column in zip(*cells)]
+    lines = []
+    for name, *values in cells:
+        columns = [name + pad(widths[0] - width(name))]
+        columns.extend(pad(size - width(value)) + value for size, value in zip(widths[1:], values, strict=True))
+        lines.append("　".join(columns))
+    return "\n".join(lines)
+
+
+async def _collect_group_stats(groups: dict[str, int], day: str | None = None) -> dict[int, storage.GroupDailyStats | None]:
+    group_ids = dict.fromkeys(groups.values())
+    samples = await asyncio.gather(*(_sample_group(group_id, day) for group_id in group_ids))
+    return dict(zip(group_ids, samples, strict=True))
+
+
+async def _build_headcount_report(
+    title: str,
+    friends: storage.FriendDailyStats | None,
+    groups: dict[str, int],
+    group_stats: dict[int, storage.GroupDailyStats | None],
+) -> str | list[MessageSegment]:
+    rows: list[tuple[str, int | None, int | None, int | None, int | None]] = [("好友", None, None, None, None)]
+    if friends is not None:
+        change = friends.added - friends.removed if friends.added is not None and friends.removed is not None else None
+        rows[0] = ("好友", friends.added, friends.removed, friends.total, change)
+    for name, group_id in groups.items():
+        group = group_stats[group_id]
+        rows.append((name, group.added, group.removed, group.total, group.change) if group else
+                    (name, None, None, None, None))
+    message = title + "\n\n" + _format_headcount_table(rows)
+    if friends is not None and friends.total >= cfg.FRIEND_COUNT_LIMIT:
+        message += f"\n⚠️ 好友数量已达 {friends.total}/{cfg.FRIEND_COUNT_LIMIT} 上限，请及时清理！"
+    if any(value is None for row in rows for value in row[1:]):
+        message += "\n\n– 表示暂未获取或缺少对比数据。"
+    if cfg.MORNING_REPORT_CHART_ENABLED:
+        try:
+            chart = await build_watch_chart(7)
+            if chart is not None:
+                return [MessageSegment.text(message + "\n"), chart]
+        except Exception:
+            log.exception("人数报表图片生成失败，本次发送文字报表")
+    return message
+
+
+async def send_startup_headcount_report() -> None:
+    targets = cfg.MORNING_REPORT_GROUP_IDS
+    if not cfg.FRIEND_NOTIFICATION_ENABLED or not targets:
+        return
+
+    async def preview_friends() -> storage.FriendDailyStats | None:
+        try:
+            current = await cfg.client.get_friend_ids()
+            latest = await storage.latest_friend_snapshot()
+            baseline = latest[1] if latest is not None else cfg.friend_summary_baseline
+            return storage.FriendDailyStats(
+                "", len(current - baseline) if baseline is not None else None,
+                len(baseline - current) if baseline is not None else None, len(current),
+            )
+        except Exception:
+            log.exception("启动报表好友采样失败")
+            return None
+
+    groups = cfg.MONITORED_GROUPS
+    friends, group_stats = await asyncio.gather(preview_friends(), _collect_group_stats(groups))
+    report = await _build_headcount_report("机器人已启动，当前人数如下（与上次采样比较）", friends, groups, group_stats)
+    for group_id in targets:
+        try:
+            await cfg.client.call_api("send_group_msg", group_id=str(group_id), message=report)
+        except Exception:
+            log.exception("启动人数报表发送失败: group_id=%s", group_id)
+
+
 async def _update_friend_summary(now: datetime) -> None:
     summary_time = datetime.strptime(cfg.NIGHT_SUMMARY_TIME, "%H:%M").time()
     summary_day = now.date() if now.time() >= summary_time else now.date() - timedelta(days=1)
     summary_date = summary_day.strftime("%Y%m%d")
-    group_ids = cfg.MONITORED_GROUP_IDS
-    group_stats = await asyncio.gather(*(_sample_group(group_id, summary_date) for group_id in group_ids))
+    groups = cfg.MONITORED_GROUPS
+    group_stats = await _collect_group_stats(groups, summary_date)
 
     try:
         latest = await storage.latest_friend_snapshot()
@@ -88,32 +181,7 @@ async def _update_friend_summary(now: datetime) -> None:
         if not pending:
             return
         if cfg.FRIEND_NOTIFICATION_ENABLED and cfg.MORNING_REPORT_GROUP_IDS:
-            message = (
-                "早上好！今天也辛苦大家了！\n"
-                f"新增好友：{stats.added} 人\n"
-                f"减少好友：{stats.removed} 人\n"
-                f"当前好友：{stats.total} 人"
-            )
-            if stats.total >= cfg.FRIEND_COUNT_LIMIT:
-                message += f"\n⚠️ 好友数量已达 {stats.total}/{cfg.FRIEND_COUNT_LIMIT} 上限，请及时清理！"
-            if group_ids:
-                lines = ["", "群聊人数"]
-                for group_id, group in zip(group_ids, group_stats, strict=True):
-                    if group is None:
-                        lines.append(f"{group_id}：暂未获取")
-                    elif group.change is None:
-                        lines.append(f"{group_id}：{group.total} 人（首次记录）")
-                    else:
-                        lines.append(f"{group_id}：{group.total} 人（{group.change:+d}）")
-                message += "\n" + "\n".join(lines)
-            report: str | list[MessageSegment] = message
-            if cfg.MORNING_REPORT_CHART_ENABLED:
-                try:
-                    chart = await build_watch_chart(7)
-                    if chart is not None:
-                        report = [MessageSegment.text(message + "\n"), chart]
-                except Exception:
-                    log.exception("晨报图片生成失败，本次发送文字晨报")
+            report = await _build_headcount_report("早上好！今天也辛苦大家了！", stats, groups, group_stats)
             if not await _deliver_morning_report(stats.day, report):
                 return
         await storage.mark_friend_summary_sent(stats.day)

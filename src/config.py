@@ -174,7 +174,7 @@ FRIEND_WELCOME_DELAY = 3
 FRIEND_WELCOME_RETRIES = 3
 FRIEND_WELCOME_RETRY_INTERVAL = 3
 FRIEND_COUNT_LIMIT = 3000
-MONITORED_GROUP_IDS: tuple[int, ...] = ()
+MONITORED_GROUPS: dict[str, int] = {}
 MORNING_REPORT_GROUP_IDS: tuple[int, ...] = ()
 MORNING_REPORT_CHART_ENABLED = False
 REPLY_DURATION_MAXLEN = 0
@@ -229,7 +229,7 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     global FRIEND_NOTIFICATION_ENABLED
     global FRIEND_WELCOME_DELAY, FRIEND_WELCOME_RETRIES, FRIEND_WELCOME_RETRY_INTERVAL
     global FRIEND_COUNT_LIMIT, REPLY_DURATION_MAXLEN, AVAILABILITY, MAX_LISTEN_AGE
-    global MONITORED_GROUP_IDS, MORNING_REPORT_GROUP_IDS
+    global MONITORED_GROUPS, MORNING_REPORT_GROUP_IDS
     global MORNING_REPORT_CHART_ENABLED
     global EMOJI_MAPPING, EMOJI_TO_CMD, RECALL_WINDOW_SECONDS, NIGHT_MODE, NIGHT_START, NIGHT_END
     global NIGHT_SUMMARY_TIME, ARCHIVE_DIR, STATE_FILE, RECENT_MESSAGE_MAX_AGE
@@ -245,7 +245,15 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     morning_report_chart_enabled = applied_config.get("morning_report_chart_enabled", False)
     if not isinstance(morning_report_chart_enabled, bool):
         raise ValueError("morning_report_chart_enabled 必须为布尔值 true 或 false")
-    monitored_group_ids = _parse_group_ids(applied_config.get("monitored_group_ids", []), "monitored_group_ids")
+    monitored_groups = applied_config.get("monitored_group_ids", {})
+    if isinstance(monitored_groups, list):
+        monitored_groups = {str(group_id): group_id for group_id in _parse_group_ids(monitored_groups, "monitored_group_ids")}
+    if not isinstance(monitored_groups, dict) or any(
+        not isinstance(name, str) or not name.strip() or not name.isprintable()
+        or type(group_id) is not int or not 0 < group_id < 2**63
+        for name, group_id in monitored_groups.items()
+    ):
+        raise ValueError("monitored_group_ids 必须为群名到正整数群号的映射")
     morning_report_group_ids = _parse_group_ids(
         applied_config.get("morning_report_group_ids", [applied_config["internal_group_id"]]),
         "morning_report_group_ids",
@@ -296,7 +304,7 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     FRIEND_WELCOME_RETRIES = config.get("friend_welcome_retries", 3)
     FRIEND_WELCOME_RETRY_INTERVAL = config.get("friend_welcome_retry_interval", 3)
     FRIEND_COUNT_LIMIT = config.get("friend_count_limit", 3000)
-    MONITORED_GROUP_IDS = monitored_group_ids
+    MONITORED_GROUPS = monitored_groups
     MORNING_REPORT_GROUP_IDS = morning_report_group_ids
     MORNING_REPORT_CHART_ENABLED = morning_report_chart_enabled
     REPLY_DURATION_MAXLEN = config["reply_duration_maxlen"]

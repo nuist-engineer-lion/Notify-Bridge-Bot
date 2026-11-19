@@ -151,11 +151,11 @@ async def build_watch_chart(limit: int) -> MessageSegment | None:
         date.fromisoformat(day): (total - added + removed, total)
         for day, added, removed, total in friends
     })]
-    for group_id in cfg.MONITORED_GROUP_IDS:
+    for name, group_id in cfg.MONITORED_GROUPS.items():
         rows = await storage.recent_group_stats(group_id, history_limit)
-        panels.append((f"群聊 {group_id}", {
+        panels.append((name, {
             date.fromisoformat(day): (total - change if change is not None else None, total)
-            for day, total, change in rows
+            for day, total, change, _, _ in rows
         }))
     latest = max((day for _, records in panels for day in records), default=None)
     if latest is None:

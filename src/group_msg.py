@@ -969,7 +969,7 @@ async def format_friend_stats(count: str) -> str:
 async def format_group_stats(args: list[str]) -> str:
     usage = "用法：.watch groups <群号> [条数]，默认 7 条，最多 30 条。"
     if not args:
-        groups = "、".join(map(str, cfg.MONITORED_GROUP_IDS)) or "暂无"
+        groups = "、".join(f"{name}（{group_id}）" for name, group_id in cfg.MONITORED_GROUPS.items()) or "暂无"
         return f"正在监控的群：{groups}\n{usage}"
     if len(args) > 2 or not args[0].isascii() or not args[0].isdecimal() or len(args[0]) > 19:
         return usage
@@ -988,10 +988,12 @@ async def format_group_stats(args: list[str]) -> str:
     if not records:
         return f"群 {group_id} 暂无人数记录。"
 
-    lines = [f"群 {group_id} 人数变化表（最近在前）", "日期 | 人数 | 净增减"]
-    for day, total, change in records:
-        delta = f"{change:+d}" if change is not None else "首次记录"
-        lines.append(f"{date.fromisoformat(day)} | {total} | {delta}")
+    name = next((name for name, monitored_id in cfg.MONITORED_GROUPS.items() if monitored_id == group_id), "群聊")
+    lines = [f"{name}（{group_id}）人数变化表", "日期 | 新增 | 删除 | 当前数量 | 净改变"]
+    for day, total, change, added, removed in records:
+        counts = [str(value) if value is not None else "–" for value in (added, removed, total)]
+        delta = f"{change:+d}" if change is not None else "–"
+        lines.append(" | ".join((str(date.fromisoformat(day)), *counts, delta)))
     return "\n".join(lines)
 
 
