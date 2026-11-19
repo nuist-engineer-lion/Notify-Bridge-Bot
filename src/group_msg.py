@@ -28,6 +28,7 @@ from .message_sender import (
 )
 from . import history, storage
 from .notice_pr import handle_notice_command
+from .watch_chart import build_watch_chart
 
 # 运维类命令（无需引用机器人消息）
 OPS_COMMAND_PREFIXES = ('.say', '.bye', '.more', '.help', '.close', '.list', '.reload', '.update', '.reboot', '.mute', '.unmute', '.status')
@@ -994,6 +995,20 @@ async def format_group_stats(args: list[str]) -> str:
     return "\n".join(lines)
 
 
+async def watch_chart_message(args: list[str]) -> MessageSegment:
+    count = args[0] if args else "7"
+    if len(args) > 1 or not count.isascii() or not count.isdecimal() or len(count) > 2 or not 1 <= int(count) <= 30:
+        return MessageSegment.text("用法：.watch chart [天数]，默认 7 天，最多 30 天。")
+    try:
+        image = await build_watch_chart(int(count))
+    except Exception:
+        log.exception("生成监控图片报表失败")
+        return MessageSegment.text("暂时无法生成监控图片报表，请稍后重试。")
+    if image is None:
+        return MessageSegment.text("暂无监控记录可生成图片报表。")
+    return image
+
+
 async def handle_group_command(event: GroupMessageEvent) -> bool:
     """处理内部群命令消息"""
     gid = event.group_id
@@ -1022,20 +1037,23 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
     if command == ".watch":
         subcommand, *args = watch_args or [""]
         if subcommand == "friends":
-            text = await format_friend_stats(" ".join(args))
+            result = MessageSegment.text(await format_friend_stats(" ".join(args)))
         elif subcommand == "groups":
-            text = await format_group_stats(args)
+            result = MessageSegment.text(await format_group_stats(args))
+        elif subcommand == "chart":
+            result = await watch_chart_message(args)
         else:
-            text = (
+            result = MessageSegment.text(
                 "监控查询\n"
                 ".watch friends [条数] 查看好友变化表\n"
                 ".watch groups 列出监控群\n"
-                ".watch groups <群号> [条数] 查看群人数变化表"
+                ".watch groups <群号> [条数] 查看群人数变化表\n"
+                ".watch chart [天数] 发送综合图片报表"
             )
         await cfg.client.call_api(
             "send_group_msg",
             group_id=str(gid),
-            message=[MessageSegment.reply(str(msg_id)), MessageSegment.text(text)],
+            message=[MessageSegment.reply(str(msg_id)), result],
         )
         return True
 
@@ -1118,6 +1136,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             "• .help – 显示此帮助信息\n"
             "• .watch friends [条数] – 查看好友变化表，默认最近 7 条，最多 30 条\n"
             "• .watch groups [群号] [条数] – 查看监控群列表或指定群的人数变化表\n"
+            "• .watch chart [天数] – 发送好友和群人数综合图片报表，默认 7 天\n"
             "\n"
             "使用方法：优先回复机器人消息；或 .命令 <客户QQ|all>；无参且待回复仅 1 人时自动匹配该客户。\n"
             "说明：all = 当前待回复队列；.say all 必须带内容；群内不允许 .more all。\n"

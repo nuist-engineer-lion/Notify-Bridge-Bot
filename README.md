@@ -63,6 +63,7 @@
 | `.watch` | 显示监控查询用法 | `.watch` | 否 |
 | `.watch friends [条数]` | 查看好友变化表，默认最近 7 条，最多 30 条 | `.watch friends 14` | 否 |
 | `.watch groups [群号] [条数]` | 无参数时列出监控群，指定群号时查看人数变化表，默认最近 7 条，最多 30 条 | `.watch groups 123456789 14` | 否 |
+| `.watch chart [天数]` | 发送好友和监控群的综合图片报表，默认最近 7 天，最多 30 天 | `.watch chart 14` | 否 |
 | `.mute [分钟]` | 临时静音（不带参数不限时；`.mute 30` 为 30 分钟） | `.mute` | 否 |
 | `.unmute` | 解除静音并汇总发出延后提醒（与终端 `unmute` 一致） | `.unmute` | 否 |
 | `.reload` | 重载当前明文配置（兼容 `.reload cfg`） | `.reload` | 否 |
@@ -142,6 +143,10 @@
 每天的新增、减少和当前总数写入 `archive.db`。内部群发送 `.watch friends` 可查看最近 7 条记录，发送 `.watch friends 30` 可查看最近 30 条。表格按日期倒序显示新增、减少、净增减和总数。关闭晨报推送后仍会记录统计。停机期间没有采样的日期会留空，恢复后将本次名单与上一次采样比较。
 
 在配置文件中设置 `monitored_group_ids: [123456789, 987654321]`，填入机器人所在的群号。晨报会在好友统计后列出每个群的当前人数和较上次采样的净增减。群人数记录也写入 `archive.db`，可用 `.watch groups <群号> [条数]` 查询。单个群查询失败时，晨报标为“暂未获取”，巡检会继续重试并补录。关闭晨报推送后，群人数仍会每日记录。
+
+使用 `.watch chart [天数]` 可在内部群发送综合图片报表。每个方框的两端表示上一次采样和当次采样的人数，绿色实心框表示增加，红色空心框表示减少，灰线表示持平或首次记录，缺少采样的日期留空。三条均线分别表示最近 3、5、10 次采样的平均人数。各群与好友使用独立的纵轴。设置 `morning_report_chart_enabled: true` 后，晨报也会附上最近 7 天的图片报表。
+
+图片报表使用系统中文字体。Debian 或 Ubuntu 可安装 `fonts-noto-cjk`，也可以通过环境变量 `WATCH_CHART_FONT` 指定中文字体文件的路径。
 
 ## 夜间免打扰模式
 
@@ -237,6 +242,7 @@ bot 启动后会在同一进程读取终端 stdin。控制台内 `quit` / `exit`
 | `processed_friend_requests_expire` | 好友申请去重窗口；也用于刚通过好友时的消息忽略窗口 |
 | `friend_notification_enabled` | 是否发送晨报，默认 `true`，支持 `.reload` 热重载 |
 | `morning_report_group_ids` | 晨报推送目标群列表，默认仅 `internal_group_id`，支持热重载 |
+| `morning_report_chart_enabled` | 是否随晨报发送综合图片报表，默认 `false`，支持热重载 |
 | `friend_welcome_delay` | 通过好友后延迟多久再发送欢迎消息 |
 | `friend_welcome_retries` / `friend_welcome_retry_interval` | 欢迎消息失败重试策略 |
 | `friend_count_limit` | 好友数量告警阈值 |

@@ -2,6 +2,8 @@ import time
 import asyncio
 from datetime import datetime, timedelta
 
+from nonebot.adapters.onebot.v11 import MessageSegment
+
 from . import config as cfg
 from .config import (
     log,
@@ -15,6 +17,7 @@ from .message_sender import send_reminder_with_at, pop_tracked_forward
 from .state import save_state
 from . import mute
 from . import storage
+from .watch_chart import build_watch_chart
 
 
 async def _sample_group(group_id: int, day: str) -> storage.GroupDailyStats | None:
@@ -34,7 +37,7 @@ async def _sample_group(group_id: int, day: str) -> storage.GroupDailyStats | No
         return None
 
 
-async def _deliver_morning_report(day: str, message: str) -> bool:
+async def _deliver_morning_report(day: str, message: str | list[MessageSegment]) -> bool:
     delivered = await storage.delivered_morning_report_groups(day)
     complete = True
     for group_id in cfg.MORNING_REPORT_GROUP_IDS:
@@ -103,7 +106,15 @@ async def _update_friend_summary(now: datetime) -> None:
                     else:
                         lines.append(f"{group_id}：{group.total} 人（{group.change:+d}）")
                 message += "\n" + "\n".join(lines)
-            if not await _deliver_morning_report(stats.day, message):
+            report: str | list[MessageSegment] = message
+            if cfg.MORNING_REPORT_CHART_ENABLED:
+                try:
+                    chart = await build_watch_chart(7)
+                    if chart is not None:
+                        report = [MessageSegment.text(message + "\n"), chart]
+                except Exception:
+                    log.exception("晨报图片生成失败，本次发送文字晨报")
+            if not await _deliver_morning_report(stats.day, report):
                 return
         await storage.mark_friend_summary_sent(stats.day)
     except Exception as e:

@@ -176,6 +176,7 @@ FRIEND_WELCOME_RETRY_INTERVAL = 3
 FRIEND_COUNT_LIMIT = 3000
 MONITORED_GROUP_IDS: tuple[int, ...] = ()
 MORNING_REPORT_GROUP_IDS: tuple[int, ...] = ()
+MORNING_REPORT_CHART_ENABLED = False
 REPLY_DURATION_MAXLEN = 0
 AVAILABILITY: dict[int, dict[str, list[tuple[str, str]]]] = {}
 MAX_LISTEN_AGE = 86400   # 24小时
@@ -229,6 +230,7 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     global FRIEND_WELCOME_DELAY, FRIEND_WELCOME_RETRIES, FRIEND_WELCOME_RETRY_INTERVAL
     global FRIEND_COUNT_LIMIT, REPLY_DURATION_MAXLEN, AVAILABILITY, MAX_LISTEN_AGE
     global MONITORED_GROUP_IDS, MORNING_REPORT_GROUP_IDS
+    global MORNING_REPORT_CHART_ENABLED
     global EMOJI_MAPPING, EMOJI_TO_CMD, RECALL_WINDOW_SECONDS, NIGHT_MODE, NIGHT_START, NIGHT_END
     global NIGHT_SUMMARY_TIME, ARCHIVE_DIR, STATE_FILE, RECENT_MESSAGE_MAX_AGE
     global ARCHIVE_RETENTION_DAYS
@@ -240,6 +242,9 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     friend_notification_enabled = applied_config.get("friend_notification_enabled", True)
     if not isinstance(friend_notification_enabled, bool):
         raise ValueError("friend_notification_enabled 必须为布尔值 true 或 false")
+    morning_report_chart_enabled = applied_config.get("morning_report_chart_enabled", False)
+    if not isinstance(morning_report_chart_enabled, bool):
+        raise ValueError("morning_report_chart_enabled 必须为布尔值 true 或 false")
     monitored_group_ids = _parse_group_ids(applied_config.get("monitored_group_ids", []), "monitored_group_ids")
     morning_report_group_ids = _parse_group_ids(
         applied_config.get("morning_report_group_ids", [applied_config["internal_group_id"]]),
@@ -293,6 +298,7 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     FRIEND_COUNT_LIMIT = config.get("friend_count_limit", 3000)
     MONITORED_GROUP_IDS = monitored_group_ids
     MORNING_REPORT_GROUP_IDS = morning_report_group_ids
+    MORNING_REPORT_CHART_ENABLED = morning_report_chart_enabled
     REPLY_DURATION_MAXLEN = config["reply_duration_maxlen"]
     AVAILABILITY = config["availability"]
     MAX_LISTEN_AGE = config.get("max_listen_age", 86400)   # 24小时
