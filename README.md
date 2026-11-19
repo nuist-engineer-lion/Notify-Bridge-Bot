@@ -60,6 +60,9 @@
 | `.close <QQ\|all>` | 不引用时，按客户 QQ 或队列全部关闭会话 | `.close all` | 否（用 QQ/all） |
 | `.list` | 列出当前待回复客户及等待时长 | `.list` | 否 |
 | `.status` | 发送运行状态面板（与戳一戳机器人相同） | `.status` | 否 |
+| `.watch` | 显示监控查询用法 | `.watch` | 否 |
+| `.watch friends [条数]` | 查看好友变化表，默认最近 7 条，最多 30 条 | `.watch friends 14` | 否 |
+| `.watch groups [群号] [条数]` | 无参数时列出监控群，指定群号时查看人数变化表，默认最近 7 条，最多 30 条 | `.watch groups 123456789 14` | 否 |
 | `.mute [分钟]` | 临时静音（不带参数不限时；`.mute 30` 为 30 分钟） | `.mute` | 否 |
 | `.unmute` | 解除静音并汇总发出延后提醒（与终端 `unmute` 一致） | `.unmute` | 否 |
 | `.reload` | 重载当前明文配置（兼容 `.reload cfg`） | `.reload` | 否 |
@@ -130,9 +133,15 @@
 
 ## 好友晨报
 
-每天到 `night_mode.summary_time` 后，机器人向内部群发送一条好友晨报，列出新增人数、减少人数和当前好友总数。达到 `friend_count_limit` 时，晨报会附上数量告警。
+每天到 `night_mode.summary_time` 后，机器人向各推送目标群发送晨报，列出新增人数、减少人数和当前好友总数。达到 `friend_count_limit` 时，晨报会附上数量告警。
+
+用 `morning_report_group_ids: [123456789, 987654321]` 设置多个推送目标。省略时发到 `internal_group_id`，设为 `[]` 时只记录数据。各群独立记录发送结果，重试时跳过已发送的群。
 
 首次连接后读取好友名单作为基准。从下一个汇总时间起，机器人通过 OneBot `get_friend_list` 获取当前名单，按 QQ 号与上次基准比较。新增和减少分别统计，同一位好友在两次采样之间的反复变动只以两端状态为准。读取名单或发送失败时，下一次在线巡检会重试。
+
+每天的新增、减少和当前总数写入 `archive.db`。内部群发送 `.watch friends` 可查看最近 7 条记录，发送 `.watch friends 30` 可查看最近 30 条。表格按日期倒序显示新增、减少、净增减和总数。关闭晨报推送后仍会记录统计。停机期间没有采样的日期会留空，恢复后将本次名单与上一次采样比较。
+
+在配置文件中设置 `monitored_group_ids: [123456789, 987654321]`，填入机器人所在的群号。晨报会在好友统计后列出每个群的当前人数和较上次采样的净增减。群人数记录也写入 `archive.db`，可用 `.watch groups <群号> [条数]` 查询。单个群查询失败时，晨报标为“暂未获取”，巡检会继续重试并补录。关闭晨报推送后，群人数仍会每日记录。
 
 ## 夜间免打扰模式
 
@@ -226,10 +235,12 @@ bot 启动后会在同一进程读取终端 stdin。控制台内 `quit` / `exit`
 | `monitored_forward_limit` | 同时保留多少条可引用的机器人消息映射 |
 | `debounce_seconds` | 各群命令的防抖窗口 |
 | `processed_friend_requests_expire` | 好友申请去重窗口；也用于刚通过好友时的消息忽略窗口 |
-| `friend_notification_enabled` | 是否向内部群发送好友晨报，默认 `true`，支持 `.reload` 热重载 |
+| `friend_notification_enabled` | 是否发送晨报，默认 `true`，支持 `.reload` 热重载 |
+| `morning_report_group_ids` | 晨报推送目标群列表，默认仅 `internal_group_id`，支持热重载 |
 | `friend_welcome_delay` | 通过好友后延迟多久再发送欢迎消息 |
 | `friend_welcome_retries` / `friend_welcome_retry_interval` | 欢迎消息失败重试策略 |
 | `friend_count_limit` | 好友数量告警阈值 |
+| `monitored_group_ids` | 与好友一起统计的群号列表，默认 `[]`，支持热重载 |
 | `reply_duration_maxlen` | 回复耗时统计样本上限 |
 | `availability` | 当前可用成员时间表；用于提醒时随机 `@` 一位值班成员 |
 | `max_listen_age` | 机器人消息保持可操作状态的最长时间 |
@@ -354,7 +365,7 @@ python main.py
 
 ### 运行状态（state.json）
 
-`state_file` 保存待回复客户（含其会话周期 ID）、监听消息映射、命令防抖时间、夜间延后通知、临时静音截止时间、最近一次夜间汇总日期以及好友晨报的基准 QQ 号和汇总日期，重启后自动恢复。
+`state_file` 保存待回复客户（含其会话周期 ID）、监听消息映射、命令防抖时间、夜间延后通知、临时静音截止时间和最近一次夜间汇总日期，重启后自动恢复。好友晨报的每日统计与最新基准名单存于 `archive.db`，升级时沿用旧状态文件中的名单作为首次比较的基准。
 
 ### 会话归档（SQLite 双保险机制）
 

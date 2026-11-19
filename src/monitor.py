@@ -17,35 +17,97 @@ from . import mute
 from . import storage
 
 
+async def _sample_group(group_id: int, day: str) -> storage.GroupDailyStats | None:
+    try:
+        recent = await storage.recent_group_stats(group_id, 1)
+        if recent and recent[0].day >= day:
+            return recent[0] if recent[0].day == day else None
+
+        async with asyncio.timeout(5):
+            info = await cfg.client.call_api("get_group_info", group_id=group_id, no_cache=True)
+        total = info.get("member_count") if isinstance(info, dict) else None
+        if type(total) is not int or total < 0:
+            raise ValueError("群人数返回格式错误")
+        return await storage.record_group_total(group_id, day, total)
+    except Exception as e:
+        log.warning("群 %s 人数采样失败，将在下次巡检重试: %s", group_id, e)
+        return None
+
+
+async def _deliver_morning_report(day: str, message: str) -> bool:
+    delivered = await storage.delivered_morning_report_groups(day)
+    complete = True
+    for group_id in cfg.MORNING_REPORT_GROUP_IDS:
+        if group_id in delivered:
+            continue
+        try:
+            await cfg.client.call_api("send_group_msg", group_id=str(group_id), message=message)
+            await storage.record_morning_report_delivery(day, group_id)
+            log.info("晨报已发送至群 %s，汇总日期 %s", group_id, day)
+        except Exception as e:
+            log.warning("群 %s 晨报发送未完成，将在下次巡检重试: %s", group_id, e)
+            complete = False
+    return complete
+
+
 async def _update_friend_summary(now: datetime) -> None:
     summary_time = datetime.strptime(cfg.NIGHT_SUMMARY_TIME, "%H:%M").time()
     summary_day = now.date() if now.time() >= summary_time else now.date() - timedelta(days=1)
     summary_date = summary_day.strftime("%Y%m%d")
-    baseline = cfg.friend_summary_baseline
-    if baseline is not None and summary_date <= cfg.last_friend_summary_date:
-        return
+    group_ids = cfg.MONITORED_GROUP_IDS
+    group_stats = await asyncio.gather(*(_sample_group(group_id, summary_date) for group_id in group_ids))
 
     try:
-        current = await cfg.client.get_friend_ids()
-        if baseline is None:
-            log.info("好友晨报基准已初始化，共 %d 位好友", len(current))
-        elif cfg.FRIEND_NOTIFICATION_ENABLED:
+        latest = await storage.latest_friend_snapshot()
+        if latest is None:
+            baseline = cfg.friend_summary_baseline
+            if baseline is not None and summary_date <= cfg.last_friend_summary_date:
+                return
+        else:
+            stats, baseline, pending = latest
+            if summary_date < stats.day:
+                return
+
+        if latest is None or summary_date > stats.day:
+            current = await cfg.client.get_friend_ids()
+            stats = storage.FriendDailyStats(
+                summary_date,
+                len(current - baseline) if baseline is not None else None,
+                len(baseline - current) if baseline is not None else None,
+                len(current),
+            )
+            pending = baseline is not None and cfg.FRIEND_NOTIFICATION_ENABLED
+            if not await storage.record_friend_snapshot(stats, current, pending):
+                return
+            cfg.friend_summary_baseline = None
+            cfg.last_friend_summary_date = ""
+
+        if not pending:
+            return
+        if cfg.FRIEND_NOTIFICATION_ENABLED and cfg.MORNING_REPORT_GROUP_IDS:
             message = (
                 "早上好！今天也辛苦大家了！\n"
-                f"新增好友：{len(current - baseline)} 人\n"
-                f"减少好友：{len(baseline - current)} 人\n"
-                f"当前好友：{len(current)} 人"
+                f"新增好友：{stats.added} 人\n"
+                f"减少好友：{stats.removed} 人\n"
+                f"当前好友：{stats.total} 人"
             )
-            if len(current) >= cfg.FRIEND_COUNT_LIMIT:
-                message += f"\n⚠️ 好友数量已达 {len(current)}/{cfg.FRIEND_COUNT_LIMIT} 上限，请及时清理！"
-            await cfg.client.call_api("send_group_msg", group_id=str(cfg.INTERNAL_GROUP_ID), message=message)
-            log.info("好友晨报已发送，汇总日期 %s", summary_date)
+            if stats.total >= cfg.FRIEND_COUNT_LIMIT:
+                message += f"\n⚠️ 好友数量已达 {stats.total}/{cfg.FRIEND_COUNT_LIMIT} 上限，请及时清理！"
+            if group_ids:
+                lines = ["", "群聊人数"]
+                for group_id, group in zip(group_ids, group_stats, strict=True):
+                    if group is None:
+                        lines.append(f"{group_id}：暂未获取")
+                    elif group.change is None:
+                        lines.append(f"{group_id}：{group.total} 人（首次记录）")
+                    else:
+                        lines.append(f"{group_id}：{group.total} 人（{group.change:+d}）")
+                message += "\n" + "\n".join(lines)
+            if not await _deliver_morning_report(stats.day, message):
+                return
+        await storage.mark_friend_summary_sent(stats.day)
     except Exception as e:
         log.warning("好友晨报处理失败，将在下次巡检重试: %s", e)
-        return
-
-    cfg.friend_summary_baseline = current
-    cfg.last_friend_summary_date = summary_date
 
 
 async def monitor_loop():

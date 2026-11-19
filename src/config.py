@@ -174,6 +174,8 @@ FRIEND_WELCOME_DELAY = 3
 FRIEND_WELCOME_RETRIES = 3
 FRIEND_WELCOME_RETRY_INTERVAL = 3
 FRIEND_COUNT_LIMIT = 3000
+MONITORED_GROUP_IDS: tuple[int, ...] = ()
+MORNING_REPORT_GROUP_IDS: tuple[int, ...] = ()
 REPLY_DURATION_MAXLEN = 0
 AVAILABILITY: dict[int, dict[str, list[tuple[str, str]]]] = {}
 MAX_LISTEN_AGE = 86400   # 24小时
@@ -210,6 +212,14 @@ RECENT_MESSAGE_MAX_AGE = 86400  # 默认1天
 ARCHIVE_RETENTION_DAYS = 0
 
 
+def _parse_group_ids(value: Any, key: str) -> tuple[int, ...]:
+    if not isinstance(value, list) or any(
+        type(group_id) is not int or not 0 < group_id < 2**63 for group_id in value
+    ):
+        raise ValueError(f"{key} 必须为正整数群号列表")
+    return tuple(dict.fromkeys(value))
+
+
 def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     global config
     global WS_URL, WS_TOKEN, INTERNAL_GROUP_ID, WHITELIST, MILESTONES
@@ -218,6 +228,7 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     global FRIEND_NOTIFICATION_ENABLED
     global FRIEND_WELCOME_DELAY, FRIEND_WELCOME_RETRIES, FRIEND_WELCOME_RETRY_INTERVAL
     global FRIEND_COUNT_LIMIT, REPLY_DURATION_MAXLEN, AVAILABILITY, MAX_LISTEN_AGE
+    global MONITORED_GROUP_IDS, MORNING_REPORT_GROUP_IDS
     global EMOJI_MAPPING, EMOJI_TO_CMD, RECALL_WINDOW_SECONDS, NIGHT_MODE, NIGHT_START, NIGHT_END
     global NIGHT_SUMMARY_TIME, ARCHIVE_DIR, STATE_FILE, RECENT_MESSAGE_MAX_AGE
     global ARCHIVE_RETENTION_DAYS
@@ -229,6 +240,11 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     friend_notification_enabled = applied_config.get("friend_notification_enabled", True)
     if not isinstance(friend_notification_enabled, bool):
         raise ValueError("friend_notification_enabled 必须为布尔值 true 或 false")
+    monitored_group_ids = _parse_group_ids(applied_config.get("monitored_group_ids", []), "monitored_group_ids")
+    morning_report_group_ids = _parse_group_ids(
+        applied_config.get("morning_report_group_ids", [applied_config["internal_group_id"]]),
+        "morning_report_group_ids",
+    )
     say_input_timeout = float(applied_config.get("say_input_timeout_seconds", 30))
     if not math.isfinite(say_input_timeout) or say_input_timeout <= 0:
         raise ValueError("say_input_timeout_seconds 必须为大于 0 的有限秒数")
@@ -275,6 +291,8 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     FRIEND_WELCOME_RETRIES = config.get("friend_welcome_retries", 3)
     FRIEND_WELCOME_RETRY_INTERVAL = config.get("friend_welcome_retry_interval", 3)
     FRIEND_COUNT_LIMIT = config.get("friend_count_limit", 3000)
+    MONITORED_GROUP_IDS = monitored_group_ids
+    MORNING_REPORT_GROUP_IDS = morning_report_group_ids
     REPLY_DURATION_MAXLEN = config["reply_duration_maxlen"]
     AVAILABILITY = config["availability"]
     MAX_LISTEN_AGE = config.get("max_listen_age", 86400)   # 24小时
@@ -373,7 +391,7 @@ processed_friend_requests: dict[str, float] = {}
 # 记录用户通过好友申请的时间戳（用于忽略刚通过申请后的第一条消息）
 friend_approve_time: dict[int, float] = {}
 
-# 好友晨报基准及已处理的汇总日期
+# 旧版状态文件中的好友晨报基准，首次写入 SQLite 时使用
 friend_summary_baseline: set[int] | None = None
 last_friend_summary_date: str = ""
 

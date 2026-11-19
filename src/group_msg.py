@@ -2,6 +2,8 @@ import time
 import asyncio
 import random
 from dataclasses import dataclass
+from datetime import date
+from sqlite3 import Error as SQLiteError
 
 from nonebot.adapters.onebot.v11 import MessageSegment
 from nonebot.adapters.onebot.v11.event import PokeNotifyEvent
@@ -24,7 +26,7 @@ from .message_sender import (
     build_say_feedback,
     register_recallable_send,
 )
-from . import history
+from . import history, storage
 from .notice_pr import handle_notice_command
 
 # 运维类命令（无需引用机器人消息）
@@ -940,6 +942,58 @@ async def handle_session_command_by_qq(
     return True
 
 
+async def format_friend_stats(count: str) -> str:
+    if not count:
+        limit = 7
+    elif count.isascii() and count.isdecimal() and len(count) <= 2 and 1 <= int(count) <= 30:
+        limit = int(count)
+    else:
+        return "用法：.watch friends [条数]，可查询 1 到 30 条，默认 7 条。"
+
+    try:
+        records = await storage.recent_friend_stats(limit)
+    except SQLiteError:
+        log.exception("读取好友变化记录失败")
+        return "好友变化记录暂时无法读取，请稍后重试。"
+    if not records:
+        return "暂无好友变化记录，首次晨报统计完成后可查询。"
+
+    lines = ["好友变化表（最近在前）", "日期 | 新增 | 减少 | 净增减 | 总数"]
+    for day, added, removed, total in records:
+        change = added - removed
+        lines.append(f"{date.fromisoformat(day)} | {added} | {removed} | {change:+d} | {total}")
+    return "\n".join(lines)
+
+
+async def format_group_stats(args: list[str]) -> str:
+    usage = "用法：.watch groups <群号> [条数]，默认 7 条，最多 30 条。"
+    if not args:
+        groups = "、".join(map(str, cfg.MONITORED_GROUP_IDS)) or "暂无"
+        return f"正在监控的群：{groups}\n{usage}"
+    if len(args) > 2 or not args[0].isascii() or not args[0].isdecimal() or len(args[0]) > 19:
+        return usage
+    group_id = int(args[0])
+    if not 0 < group_id < 2**63:
+        return usage
+    count = args[1] if len(args) == 2 else "7"
+    if not count.isascii() or not count.isdecimal() or len(count) > 2 or not 1 <= int(count) <= 30:
+        return usage
+
+    try:
+        records = await storage.recent_group_stats(group_id, int(count))
+    except SQLiteError:
+        log.exception("读取群人数记录失败: group_id=%s", group_id)
+        return "群人数记录暂时无法读取，请稍后重试。"
+    if not records:
+        return f"群 {group_id} 暂无人数记录。"
+
+    lines = [f"群 {group_id} 人数变化表（最近在前）", "日期 | 人数 | 净增减"]
+    for day, total, change in records:
+        delta = f"{change:+d}" if change is not None else "首次记录"
+        lines.append(f"{date.fromisoformat(day)} | {total} | {delta}")
+    return "\n".join(lines)
+
+
 async def handle_group_command(event: GroupMessageEvent) -> bool:
     """处理内部群命令消息"""
     gid = event.group_id
@@ -963,6 +1017,27 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
 
     cmd_text = ''.join(cmd_parts).strip()
     log.debug("群命令: reply_id=%s, cmd=%s", reply_id, cmd_text)
+
+    command, *watch_args = cmd_text.split() or [""]
+    if command == ".watch":
+        subcommand, *args = watch_args or [""]
+        if subcommand == "friends":
+            text = await format_friend_stats(" ".join(args))
+        elif subcommand == "groups":
+            text = await format_group_stats(args)
+        else:
+            text = (
+                "监控查询\n"
+                ".watch friends [条数] 查看好友变化表\n"
+                ".watch groups 列出监控群\n"
+                ".watch groups <群号> [条数] 查看群人数变化表"
+            )
+        await cfg.client.call_api(
+            "send_group_msg",
+            group_id=str(gid),
+            message=[MessageSegment.reply(str(msg_id)), MessageSegment.text(text)],
+        )
+        return True
 
     # 检查是否处于等待 .say 内容的状态：收到消息立即发送
     pending = cfg.pending_say.get(event.user_id)
@@ -1041,6 +1116,8 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             "• .reload remote – 获取并应用远程更新\n"
             "• .reboot [slient] – 保存状态并重启；slient 跳过重启后的启动群通知\n"
             "• .help – 显示此帮助信息\n"
+            "• .watch friends [条数] – 查看好友变化表，默认最近 7 条，最多 30 条\n"
+            "• .watch groups [群号] [条数] – 查看监控群列表或指定群的人数变化表\n"
             "\n"
             "使用方法：优先回复机器人消息；或 .命令 <客户QQ|all>；无参且待回复仅 1 人时自动匹配该客户。\n"
             "说明：all = 当前待回复队列；.say all 必须带内容；群内不允许 .more all。\n"

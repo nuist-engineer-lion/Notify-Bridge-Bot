@@ -59,8 +59,11 @@ debounce_seconds:
 # 好友申请去重缓存时间（秒）
 processed_friend_requests_expire: 5
 
-# 是否向客服内部群发送好友晨报（默认 true，支持热重载）
+# 是否发送晨报（默认 true，支持热重载）
 friend_notification_enabled: true
+
+# 晨报推送目标群。省略时发到 internal_group_id，设为 [] 则只记录数据。
+# morning_report_group_ids: [123456789, 987654321]
 
 # 好友通过后发送欢迎消息的延迟（秒），等待好友关系生效（默认 3）
 friend_welcome_delay: 5
@@ -71,6 +74,10 @@ friend_welcome_retry_interval: 3
 
 # 好友数量上限，达到时在好友晨报中附加警告（默认 3000）
 friend_count_limit: 3000
+
+# 好友晨报中同时统计的群号，机器人须在这些群内。留空则只统计好友。
+monitored_group_ids: []
+# monitored_group_ids: [123456789, 987654321]
 
 # 回复耗时记录最大保留条数
 reply_duration_maxlen: 1000

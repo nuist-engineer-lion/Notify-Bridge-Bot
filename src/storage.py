@@ -1,4 +1,4 @@
-"""对话周期历史存储层（SQLite）。
+"""对话周期与好友变化历史存储层（SQLite）。
 
 会话（sessions）与周期事件（session_events）的表结构和读写全部集中在本模块。
 内部使用同步 sqlite3 短连接，对外提供 async 接口（经 asyncio.to_thread），
@@ -15,6 +15,7 @@ import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import NamedTuple
 
 from . import config as cfg
 from .config import log
@@ -58,7 +59,43 @@ CREATE TABLE IF NOT EXISTS session_events (
 -- 对账审计等无消息 ID 的事件不建索引（partial index 允许多个 NULL）
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_message_id ON session_events(message_id) WHERE message_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_id, time);
+
+CREATE TABLE IF NOT EXISTS friend_daily_stats (
+    day TEXT PRIMARY KEY,
+    added INTEGER,
+    removed INTEGER,
+    total INTEGER NOT NULL,
+    friend_ids TEXT,
+    pending INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS group_daily_stats (
+    group_id INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    total INTEGER NOT NULL,
+    change INTEGER,
+    PRIMARY KEY (group_id, day)
+);
+
+CREATE TABLE IF NOT EXISTS morning_report_deliveries (
+    day TEXT NOT NULL,
+    group_id INTEGER NOT NULL,
+    PRIMARY KEY (day, group_id)
+);
 """
+
+
+class FriendDailyStats(NamedTuple):
+    day: str
+    added: int | None
+    removed: int | None
+    total: int
+
+
+class GroupDailyStats(NamedTuple):
+    day: str
+    total: int
+    change: int | None
 
 
 @contextmanager
@@ -202,10 +239,120 @@ def find_session_id_sync(customer_uid: int, started_at: float) -> int | None:
     return int(row[0]) if row else None
 
 
+def _latest_friend_snapshot() -> tuple[FriendDailyStats, set[int], bool] | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT day, added, removed, total, friend_ids, pending FROM friend_daily_stats ORDER BY day DESC LIMIT 1"
+        ).fetchone()
+    if row is None:
+        return None
+    day, added, removed, total, friend_ids, pending = row
+    return FriendDailyStats(day, added, removed, total), set(json.loads(friend_ids)), bool(pending)
+
+
+def _record_friend_snapshot(stats: FriendDailyStats, friend_ids: set[int], pending: bool) -> bool:
+    with _connect() as conn:
+        inserted = conn.execute(
+            "INSERT INTO friend_daily_stats (day, added, removed, total, friend_ids, pending) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(day) DO NOTHING",
+            (*stats, json.dumps(sorted(friend_ids)), pending),
+        )
+        if not inserted.rowcount:
+            return False
+        # 历史只保留人数，最新名单与当天统计在同一个事务内提交。
+        conn.execute(
+            "UPDATE friend_daily_stats SET friend_ids = NULL, pending = 0 WHERE friend_ids IS NOT NULL AND day < ?",
+            (stats.day,),
+        )
+        return True
+
+
+def _mark_friend_summary_sent(day: str) -> None:
+    with _connect() as conn:
+        conn.execute("UPDATE friend_daily_stats SET pending = 0 WHERE day = ?", (day,))
+
+
+def _delivered_morning_report_groups(day: str) -> set[int]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT group_id FROM morning_report_deliveries WHERE day = ?", (day,))
+        return {group_id for (group_id,) in rows}
+
+
+def _record_morning_report_delivery(day: str, group_id: int) -> None:
+    with _connect() as conn:
+        conn.execute("INSERT OR IGNORE INTO morning_report_deliveries (day, group_id) VALUES (?, ?)", (day, group_id))
+
+
+def _recent_friend_stats(limit: int) -> list[tuple[str, int, int, int]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT day, added, removed, total FROM friend_daily_stats WHERE added IS NOT NULL ORDER BY day DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return rows
+
+
+def _recent_group_stats(group_id: int, limit: int) -> list[GroupDailyStats]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT day, total, change FROM group_daily_stats WHERE group_id = ? ORDER BY day DESC LIMIT ?",
+            (group_id, limit),
+        ).fetchall()
+    return [GroupDailyStats(*row) for row in rows]
+
+
+def _record_group_total(group_id: int, day: str, total: int) -> GroupDailyStats:
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO group_daily_stats (group_id, day, total, change) "
+            "VALUES (?, ?, ?, ? - (SELECT total FROM group_daily_stats "
+            "WHERE group_id = ? AND day < ? ORDER BY day DESC LIMIT 1)) "
+            "ON CONFLICT(group_id, day) DO NOTHING",
+            (group_id, day, total, total, group_id, day),
+        )
+        row = conn.execute(
+            "SELECT day, total, change FROM group_daily_stats WHERE group_id = ? AND day = ?",
+            (group_id, day),
+        ).fetchone()
+    return GroupDailyStats(*row)
+
+
 # ======================= 异步封装 =======================
 
 async def init_db() -> None:
     await asyncio.to_thread(init_db_sync)
+
+
+async def latest_friend_snapshot() -> tuple[FriendDailyStats, set[int], bool] | None:
+    return await asyncio.to_thread(_latest_friend_snapshot)
+
+
+async def record_friend_snapshot(stats: FriendDailyStats, friend_ids: set[int], pending: bool) -> bool:
+    return await asyncio.to_thread(_record_friend_snapshot, stats, friend_ids, pending)
+
+
+async def mark_friend_summary_sent(day: str) -> None:
+    await asyncio.to_thread(_mark_friend_summary_sent, day)
+
+
+async def delivered_morning_report_groups(day: str) -> set[int]:
+    return await asyncio.to_thread(_delivered_morning_report_groups, day)
+
+
+async def record_morning_report_delivery(day: str, group_id: int) -> None:
+    await asyncio.to_thread(_record_morning_report_delivery, day, group_id)
+
+
+async def recent_friend_stats(limit: int) -> list[tuple[str, int, int, int]]:
+    return await asyncio.to_thread(_recent_friend_stats, limit)
+
+
+async def recent_group_stats(group_id: int, limit: int) -> list[GroupDailyStats]:
+    return await asyncio.to_thread(_recent_group_stats, group_id, limit)
+
+
+async def record_group_total(group_id: int, day: str, total: int) -> GroupDailyStats:
+    return await asyncio.to_thread(_record_group_total, group_id, day, total)
 
 
 async def open_session(customer_uid: int, started_at: float) -> int:
