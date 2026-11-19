@@ -151,7 +151,10 @@ async def build_watch_chart(limit: int) -> MessageSegment | None:
         date.fromisoformat(day): (total - added + removed, total)
         for day, added, removed, total in friends
     })]
-    for name, group_id in cfg.MONITORED_GROUPS.items():
+    series = [*cfg.MONITORED_GROUPS.items(), *(
+        (name, storage.cascade_key(group_ids)) for name, group_ids in cfg.MONITORED_GROUP_CASCADES.items()
+    )]
+    for name, group_id in series:
         rows = await storage.recent_group_stats(group_id, history_limit)
         panels.append((name, {
             date.fromisoformat(day): (total - change if change is not None else None, total)

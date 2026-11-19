@@ -967,29 +967,37 @@ async def format_friend_stats(count: str) -> str:
 
 
 async def format_group_stats(args: list[str]) -> str:
-    usage = "用法：.watch groups <群号> [条数]，默认 7 条，最多 30 条。"
+    usage = "用法：.watch groups <群号或级联名称> [条数]，默认 7 条，最多 30 条。"
     if not args:
         groups = "、".join(f"{name}（{group_id}）" for name, group_id in cfg.MONITORED_GROUPS.items()) or "暂无"
-        return f"正在监控的群：{groups}\n{usage}"
-    if len(args) > 2 or not args[0].isascii() or not args[0].isdecimal() or len(args[0]) > 19:
-        return usage
-    group_id = int(args[0])
-    if not 0 < group_id < 2**63:
-        return usage
-    count = args[1] if len(args) == 2 else "7"
+        cascades = "、".join(cfg.MONITORED_GROUP_CASCADES) or "暂无"
+        return f"正在监控的群：{groups}\n级联统计：{cascades}\n{usage}"
+    target = " ".join(args)
+    count = "7"
+    if target not in cfg.MONITORED_GROUP_CASCADES and len(args) > 1:
+        target, count = " ".join(args[:-1]), args[-1]
     if not count.isascii() or not count.isdecimal() or len(count) > 2 or not 1 <= int(count) <= 30:
+        return usage
+    key: int | str
+    if target in cfg.MONITORED_GROUP_CASCADES:
+        key = storage.cascade_key(cfg.MONITORED_GROUP_CASCADES[target])
+        label = target
+    elif target.isascii() and target.isdecimal() and len(target) <= 19 and 0 < int(target) < 2**63:
+        key = int(target)
+        name = next((name for name, group_id in cfg.MONITORED_GROUPS.items() if group_id == key), "群聊")
+        label = f"{name}（{key}）"
+    else:
         return usage
 
     try:
-        records = await storage.recent_group_stats(group_id, int(count))
+        records = await storage.recent_group_stats(key, int(count))
     except SQLiteError:
-        log.exception("读取群人数记录失败: group_id=%s", group_id)
+        log.exception("读取群人数记录失败: %s", label)
         return "群人数记录暂时无法读取，请稍后重试。"
     if not records:
-        return f"群 {group_id} 暂无人数记录。"
+        return f"{label} 暂无人数记录。"
 
-    name = next((name for name, monitored_id in cfg.MONITORED_GROUPS.items() if monitored_id == group_id), "群聊")
-    lines = [f"{name}（{group_id}）人数变化表", "日期 | 新增 | 删除 | 当前数量 | 净改变"]
+    lines = [f"{label}人数变化表", "日期 | 新增 | 删除 | 当前数量 | 净改变"]
     for day, total, change, added, removed in records:
         counts = [str(value) if value is not None else "–" for value in (added, removed, total)]
         delta = f"{change:+d}" if change is not None else "–"
@@ -1049,7 +1057,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
                 "监控查询\n"
                 ".watch friends [条数] 查看好友变化表\n"
                 ".watch groups 列出监控群\n"
-                ".watch groups <群号> [条数] 查看群人数变化表\n"
+                ".watch groups <群号或级联名称> [条数] 查看人数变化表\n"
                 ".watch chart [天数] 发送综合图片报表"
             )
         await cfg.client.call_api(
@@ -1137,7 +1145,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             "• .reboot [slient] – 保存状态并重启；slient 跳过重启后的启动群通知\n"
             "• .help – 显示此帮助信息\n"
             "• .watch friends [条数] – 查看好友变化表，默认最近 7 条，最多 30 条\n"
-            "• .watch groups [群号] [条数] – 查看监控群列表或指定群的人数变化表\n"
+            "• .watch groups [群号或级联名称] [条数] – 查看监控列表或人数变化表\n"
             "• .watch chart [天数] – 发送好友和群人数综合图片报表，默认 7 天\n"
             "\n"
             "使用方法：优先回复机器人消息；或 .命令 <客户QQ|all>；无参且待回复仅 1 人时自动匹配该客户。\n"

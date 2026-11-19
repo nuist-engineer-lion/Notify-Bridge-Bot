@@ -21,12 +21,12 @@ from . import storage
 from .watch_chart import build_watch_chart
 
 
-async def _sample_group(group_id: int, day: str | None = None) -> storage.GroupDailyStats | None:
+async def _sample_group(group_id: int, day: str | None) -> tuple[storage.GroupDailyStats, set[int] | None] | None:
     try:
         if day is not None:
-            recent = await storage.recent_group_stats(group_id, 1)
-            if recent and recent[0].day >= day:
-                return recent[0] if recent[0].day == day else None
+            latest = await storage.latest_group_snapshot(group_id)
+            if latest and latest[0].day >= day:
+                return latest if latest[0].day == day else None
 
         async with asyncio.timeout(5):
             entries = await cfg.client.call_api("get_group_member_list", group_id=group_id, no_cache=True)
@@ -39,8 +39,8 @@ async def _sample_group(group_id: int, day: str | None = None) -> storage.GroupD
                 raise ValueError("群成员名单包含无效 QQ 号")
             members.add(int(user_id))
         if day is not None:
-            return await storage.record_group_snapshot(group_id, day, members)
-        return await storage.preview_group_snapshot(group_id, members)
+            return await storage.record_group_snapshot(group_id, day, members), members
+        return await storage.preview_group_snapshot(group_id, members), members
     except Exception as e:
         log.warning("群 %s 人数采样失败: %s", group_id, e)
         return None
@@ -83,24 +83,51 @@ def _format_headcount_table(rows: list[tuple[str, int | None, int | None, int | 
     return "\n".join(lines)
 
 
-async def _collect_group_stats(groups: dict[str, int], day: str | None = None) -> dict[int, storage.GroupDailyStats | None]:
+async def _collect_group_stats(day: str | None = None) -> list[tuple[str, storage.GroupDailyStats | None]]:
+    groups = cfg.MONITORED_GROUPS
+    cascades = cfg.MONITORED_GROUP_CASCADES
     group_ids = dict.fromkeys(groups.values())
     samples = await asyncio.gather(*(_sample_group(group_id, day) for group_id in group_ids))
-    return dict(zip(group_ids, samples, strict=True))
+    stats = {}
+    member_sets = {}
+    for group_id, sample in zip(group_ids, samples, strict=True):
+        if sample is not None:
+            group_stats, members = sample
+            stats[group_id] = group_stats
+            if members is not None:
+                member_sets[group_id] = members
+
+    rows = [(name, stats.get(group_id)) for name, group_id in groups.items()]
+    for name, sources in cascades.items():
+        result = None
+        if all(group_id in member_sets for group_id in sources):
+            members = set().union(*(member_sets[group_id] for group_id in sources))
+            key = storage.cascade_key(sources)
+            try:
+                if day is None:
+                    result = await storage.preview_group_snapshot(key, members)
+                else:
+                    recent = await storage.recent_group_stats(key, 1)
+                    if not recent or recent[0].day < day:
+                        result = await storage.record_group_snapshot(key, day, members)
+                    elif recent[0].day == day:
+                        result = recent[0]
+            except Exception:
+                log.exception("级联人数统计失败: %s", name)
+        rows.append((name, result))
+    return rows
 
 
 async def _build_headcount_report(
     title: str,
     friends: storage.FriendDailyStats | None,
-    groups: dict[str, int],
-    group_stats: dict[int, storage.GroupDailyStats | None],
+    group_stats: list[tuple[str, storage.GroupDailyStats | None]],
 ) -> str | list[MessageSegment]:
     rows: list[tuple[str, int | None, int | None, int | None, int | None]] = [("好友", None, None, None, None)]
     if friends is not None:
         change = friends.added - friends.removed if friends.added is not None and friends.removed is not None else None
         rows[0] = ("好友", friends.added, friends.removed, friends.total, change)
-    for name, group_id in groups.items():
-        group = group_stats[group_id]
+    for name, group in group_stats:
         rows.append((name, group.added, group.removed, group.total, group.change) if group else
                     (name, None, None, None, None))
     message = title + "\n\n" + _format_headcount_table(rows)
@@ -136,9 +163,8 @@ async def send_startup_headcount_report() -> None:
             log.exception("启动报表好友采样失败")
             return None
 
-    groups = cfg.MONITORED_GROUPS
-    friends, group_stats = await asyncio.gather(preview_friends(), _collect_group_stats(groups))
-    report = await _build_headcount_report("机器人已启动，当前人数如下（与上次采样比较）", friends, groups, group_stats)
+    friends, group_stats = await asyncio.gather(preview_friends(), _collect_group_stats())
+    report = await _build_headcount_report("机器人已启动，当前人数如下（与上次采样比较）", friends, group_stats)
     for group_id in targets:
         try:
             await cfg.client.call_api("send_group_msg", group_id=str(group_id), message=report)
@@ -150,8 +176,7 @@ async def _update_friend_summary(now: datetime) -> None:
     summary_time = datetime.strptime(cfg.NIGHT_SUMMARY_TIME, "%H:%M").time()
     summary_day = now.date() if now.time() >= summary_time else now.date() - timedelta(days=1)
     summary_date = summary_day.strftime("%Y%m%d")
-    groups = cfg.MONITORED_GROUPS
-    group_stats = await _collect_group_stats(groups, summary_date)
+    group_stats = await _collect_group_stats(summary_date)
 
     try:
         latest = await storage.latest_friend_snapshot()
@@ -181,7 +206,7 @@ async def _update_friend_summary(now: datetime) -> None:
         if not pending:
             return
         if cfg.FRIEND_NOTIFICATION_ENABLED and cfg.MORNING_REPORT_GROUP_IDS:
-            report = await _build_headcount_report("早上好！今天也辛苦大家了！", stats, groups, group_stats)
+            report = await _build_headcount_report("早上好！今天也辛苦大家了！", stats, group_stats)
             if not await _deliver_morning_report(stats.day, report):
                 return
         await storage.mark_friend_summary_sent(stats.day)

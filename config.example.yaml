@@ -84,6 +84,11 @@ monitored_group_ids: {}
 #   群1: 123456789
 #   群2: 987654321
 
+# 级联统计，同一 QQ 出现在多个来源群时只计一次。
+monitored_group_cascades: {}
+# monitored_group_cascades:
+#   全部活动群: [群1, 群2]
+
 # 回复耗时记录最大保留条数
 reply_duration_maxlen: 1000
 
