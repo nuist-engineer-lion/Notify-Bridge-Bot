@@ -31,7 +31,7 @@ async def _update_friend_summary(now: datetime) -> None:
             log.info("好友晨报基准已初始化，共 %d 位好友", len(current))
         elif cfg.FRIEND_NOTIFICATION_ENABLED:
             message = (
-                "☀️ 好友晨报\n"
+                "早上好！今天也辛苦大家了！\n"
                 f"新增好友：{len(current - baseline)} 人\n"
                 f"减少好友：{len(baseline - current)} 人\n"
                 f"当前好友：{len(current)} 人"
