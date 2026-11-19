@@ -86,7 +86,7 @@ def _format_headcount_table(rows: list[tuple[str, int | None, int | None, int | 
 async def _collect_group_stats(day: str | None = None) -> list[tuple[str, storage.GroupDailyStats | None]]:
     groups = cfg.MONITORED_GROUPS
     cascades = cfg.MONITORED_GROUP_CASCADES
-    group_ids = dict.fromkeys(groups.values())
+    group_ids = dict.fromkeys([*groups.values(), *(group_id for sources in cascades.values() for group_id in sources)])
     samples = await asyncio.gather(*(_sample_group(group_id, day) for group_id in group_ids))
     stats = {}
     member_sets = {}
@@ -101,7 +101,7 @@ async def _collect_group_stats(day: str | None = None) -> list[tuple[str, storag
     for name, sources in cascades.items():
         result = None
         if all(group_id in member_sets for group_id in sources):
-            members = set().union(*(member_sets[group_id] for group_id in sources))
+            members = {f"{group_id}:{user_id}" for group_id in sources for user_id in member_sets[group_id]}
             key = storage.cascade_key(sources)
             try:
                 if day is None:

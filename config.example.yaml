@@ -78,13 +78,14 @@ friend_welcome_retry_interval: 3
 # 好友数量上限，达到时在好友晨报中附加警告（默认 3000）
 friend_count_limit: 3000
 
-# 晨报监控群，键为报表显示名称，值为机器人所在群的群号。
+# 晨报监控群，值可以是单个群号或需要相加的群号列表。
 monitored_group_ids: {}
 # monitored_group_ids:
 #   群1: 123456789
 #   群2: 987654321
+#   通知群: [234567891, 345678912]
 
-# 级联统计，同一 QQ 出现在多个来源群时只计一次。
+# 使用已配置的单群名称建立级联合计，同一 QQ 在不同群内分别计数。
 monitored_group_cascades: {}
 # monitored_group_cascades:
 #   全部活动群: [群1, 群2]

@@ -246,23 +246,30 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     morning_report_chart_enabled = applied_config.get("morning_report_chart_enabled", False)
     if not isinstance(morning_report_chart_enabled, bool):
         raise ValueError("morning_report_chart_enabled 必须为布尔值 true 或 false")
-    monitored_groups = applied_config.get("monitored_group_ids", {})
-    if isinstance(monitored_groups, list):
-        monitored_groups = {str(group_id): group_id for group_id in _parse_group_ids(monitored_groups, "monitored_group_ids")}
-    if not isinstance(monitored_groups, dict) or any(
-        not isinstance(name, str) or not name.strip() or not name.isprintable()
-        or type(group_id) is not int or not 0 < group_id < 2**63
-        for name, group_id in monitored_groups.items()
-    ):
-        raise ValueError("monitored_group_ids 必须为群名到正整数群号的映射")
+    group_config = applied_config.get("monitored_group_ids", {})
+    if isinstance(group_config, list):
+        group_config = {str(group_id): group_id for group_id in _parse_group_ids(group_config, "monitored_group_ids")}
+    if not isinstance(group_config, dict):
+        raise ValueError("monitored_group_ids 必须为名称到群号或群号列表的映射")
+    monitored_groups: dict[str, int] = {}
+    monitored_group_cascades: dict[str, tuple[int, ...]] = {}
+    for name, value in group_config.items():
+        if not isinstance(name, str) or not name.strip() or not name.isprintable() or name == "好友":
+            raise ValueError("monitored_group_ids 必须使用有效且独立的显示名称")
+        if type(value) is int and 0 < value < 2**63:
+            monitored_groups[name] = value
+        else:
+            group_ids = _parse_group_ids(value, f"monitored_group_ids.{name}")
+            if len(group_ids) < 2:
+                raise ValueError(f"合计 {name} 至少需要两个不同的群")
+            monitored_group_cascades[name] = tuple(sorted(group_ids))
     cascades = applied_config.get("monitored_group_cascades", {})
     if not isinstance(cascades, dict):
         raise ValueError("monitored_group_cascades 必须为级联名称到群名列表的映射")
-    monitored_group_cascades: dict[str, tuple[int, ...]] = {}
     for name, sources in cascades.items():
         if (
             not isinstance(name, str) or not name.strip() or not name.isprintable()
-            or name == "好友" or name in monitored_groups
+            or name == "好友" or name in group_config
             or not isinstance(sources, list)
             or any(not isinstance(source, str) or source not in monitored_groups for source in sources)
         ):

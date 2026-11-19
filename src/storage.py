@@ -13,7 +13,7 @@ import asyncio
 import json
 import os
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Set
 from contextlib import contextmanager
 from typing import NamedTuple
 
@@ -102,7 +102,7 @@ class GroupDailyStats(NamedTuple):
 
 def cascade_key(group_ids: tuple[int, ...]) -> str:
     # SQLite 的 INTEGER affinity 会保留带前缀的文本键，与单群整数键互不冲突。
-    return "cascade:" + ",".join(map(str, sorted(group_ids)))
+    return "cascade-sum:" + ",".join(map(str, sorted(group_ids)))
 
 
 @contextmanager
@@ -326,7 +326,7 @@ def _latest_group_snapshot(group_id: int) -> tuple[GroupDailyStats, set[int] | N
     return GroupDailyStats(*stats), set(json.loads(members)) if members is not None else None
 
 
-def _compare_group_snapshot(conn: sqlite3.Connection, group_id: int | str, day: str | None, members: set[int]) -> GroupDailyStats:
+def _compare_group_snapshot(conn: sqlite3.Connection, group_id: int | str, day: str | None, members: Set[int | str]) -> GroupDailyStats:
     previous = conn.execute(
         "SELECT total, member_ids FROM group_daily_stats WHERE group_id = ? AND (? IS NULL OR day < ?) "
         "ORDER BY day DESC LIMIT 1",
@@ -341,12 +341,12 @@ def _compare_group_snapshot(conn: sqlite3.Connection, group_id: int | str, day: 
     )
 
 
-def _preview_group_snapshot(group_id: int | str, members: set[int]) -> GroupDailyStats:
+def _preview_group_snapshot(group_id: int | str, members: Set[int | str]) -> GroupDailyStats:
     with _connect() as conn:
         return _compare_group_snapshot(conn, group_id, None, members)
 
 
-def _record_group_snapshot(group_id: int | str, day: str, members: set[int]) -> GroupDailyStats:
+def _record_group_snapshot(group_id: int | str, day: str, members: Set[int | str]) -> GroupDailyStats:
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         stats = _compare_group_snapshot(conn, group_id, day, members)
@@ -404,11 +404,11 @@ async def latest_group_snapshot(group_id: int) -> tuple[GroupDailyStats, set[int
     return await asyncio.to_thread(_latest_group_snapshot, group_id)
 
 
-async def record_group_snapshot(group_id: int | str, day: str, members: set[int]) -> GroupDailyStats:
+async def record_group_snapshot(group_id: int | str, day: str, members: Set[int | str]) -> GroupDailyStats:
     return await asyncio.to_thread(_record_group_snapshot, group_id, day, members)
 
 
-async def preview_group_snapshot(group_id: int | str, members: set[int]) -> GroupDailyStats:
+async def preview_group_snapshot(group_id: int | str, members: Set[int | str]) -> GroupDailyStats:
     return await asyncio.to_thread(_preview_group_snapshot, group_id, members)
 
 
