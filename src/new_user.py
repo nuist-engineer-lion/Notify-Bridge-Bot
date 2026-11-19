@@ -9,7 +9,7 @@ from .config import log
 
 
 async def handle_friend_request(event: FriendRequestEvent) -> bool:
-    """自动通过好友申请，按配置通知内部群。"""
+    """自动通过好友申请并私聊发送欢迎消息。"""
     uid = event.user_id
     comment = event.comment or ""
     flag = event.flag
@@ -27,9 +27,6 @@ async def handle_friend_request(event: FriendRequestEvent) -> bool:
         cfg.processed_friend_requests[flag] = time.time()
         cfg.friend_approve_time[uid] = time.time()
 
-        cfg.friend_count += 1
-        friend_count = cfg.friend_count
-
         await asyncio.sleep(cfg.FRIEND_WELCOME_DELAY)
 
         for attempt in range(cfg.FRIEND_WELCOME_RETRIES):
@@ -43,42 +40,19 @@ async def handle_friend_request(event: FriendRequestEvent) -> bool:
             except ActionFailed as e:
                 if attempt < cfg.FRIEND_WELCOME_RETRIES - 1:
                     log.warning(
-                        "欢迎消息发送失败，重试 %d/%d: user_id=%s, retcode=%s, friend_count=%s",
-                        attempt + 1, cfg.FRIEND_WELCOME_RETRIES, uid, e.info.get("retcode"), friend_count,
+                        "欢迎消息发送失败，重试 %d/%d: user_id=%s, retcode=%s",
+                        attempt + 1, cfg.FRIEND_WELCOME_RETRIES, uid, e.info.get("retcode"),
                     )
                     await asyncio.sleep(cfg.FRIEND_WELCOME_RETRY_INTERVAL)
                 else:
                     log.error(
-                        "欢迎消息全部重试失败: user_id=%s, retcode=%s, friend_count=%s, err=%s",
-                        uid, e.info.get("retcode"), friend_count, e, exc_info=True,
+                        "欢迎消息全部重试失败: user_id=%s, retcode=%s, err=%s",
+                        uid, e.info.get("retcode"), e, exc_info=True,
                     )
             except Exception as welcome_err:
                 log.error("欢迎消息发送失败: user_id=%s, err=%s", uid, welcome_err, exc_info=True)
                 break
 
-        notify_text = (
-            "✅ 已自动通过好友申请\n"
-            f"QQ: {uid}\n"
-            f"备注: {comment or '（无）'}\n"
-            f"当前好友数: {friend_count}"
-        )
-        if friend_count >= cfg.FRIEND_COUNT_LIMIT:
-            notify_text += (
-                f"\n⚠️ 警告: 好友数量已达 {friend_count}/{cfg.FRIEND_COUNT_LIMIT} 上限，请及时清理！"
-            )
-            log.error(
-                "好友数量已达上限: friend_count=%s, limit=%s, user_id=%s",
-                friend_count, cfg.FRIEND_COUNT_LIMIT, uid,
-            )
-        if cfg.FRIEND_NOTIFICATION_ENABLED:
-            try:
-                await cfg.client.call_api(
-                    "send_group_msg",
-                    group_id=str(cfg.INTERNAL_GROUP_ID),
-                    message=notify_text,
-                )
-            except Exception as notify_err:
-                log.error("好友申请群通知发送失败: user_id=%s, err=%s", uid, notify_err, exc_info=True)
         log.info("已自动通过好友申请: user_id=%s, comment=%s", uid, comment)
     except Exception as e:
         log.error("自动通过好友申请失败: user_id=%s, err=%s", uid, e, exc_info=True)

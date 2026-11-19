@@ -76,6 +76,10 @@ def save_state() -> None:
         "last_command_time": serializable_last_cmd,
         "delayed_notifications": serializable_delayed,
         "last_night_summary_sent_date": cfg.last_night_summary_sent_date,
+        "friend_summary_baseline": (
+            sorted(cfg.friend_summary_baseline) if cfg.friend_summary_baseline is not None else None
+        ),
+        "last_friend_summary_date": cfg.last_friend_summary_date,
         "mute_until": cfg.mute_until,
     }
 
@@ -166,6 +170,9 @@ def load_state() -> None:
 
     # 使用 global 声明以修改模块级变量
     cfg.last_night_summary_sent_date = state.get("last_night_summary_sent_date", "")
+    baseline = state.get("friend_summary_baseline")
+    cfg.friend_summary_baseline = set(baseline) if baseline is not None else None
+    cfg.last_friend_summary_date = state.get("last_friend_summary_date", "")
     cfg.mute_until = float(state.get("mute_until", 0) or 0)
 
     mute_desc = "未静音"

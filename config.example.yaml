@@ -59,7 +59,7 @@ debounce_seconds:
 # 好友申请去重缓存时间（秒）
 processed_friend_requests_expire: 5
 
-# 新好友通过申请后是否通知客服内部群（默认 true，支持热重载）
+# 是否向客服内部群发送好友晨报（默认 true，支持热重载）
 friend_notification_enabled: true
 
 # 好友通过后发送欢迎消息的延迟（秒），等待好友关系生效（默认 3）
@@ -69,7 +69,7 @@ friend_welcome_delay: 5
 friend_welcome_retries: 3
 friend_welcome_retry_interval: 3
 
-# 好友数量上限，达到时在群通知中附加警告（默认 3000）
+# 好友数量上限，达到时在好友晨报中附加警告（默认 3000）
 friend_count_limit: 3000
 
 # 回复耗时记录最大保留条数

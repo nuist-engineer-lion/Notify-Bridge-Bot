@@ -66,4 +66,6 @@ class AppState(TypedDict, total=False):
     last_command_time: dict[str, float]
     delayed_notifications: list["StateDelayedNotification"]
     last_night_summary_sent_date: str
+    friend_summary_baseline: list[int] | None
+    last_friend_summary_date: str
     mute_until: float  # 静音截止时间戳；0 或缺省表示未静音

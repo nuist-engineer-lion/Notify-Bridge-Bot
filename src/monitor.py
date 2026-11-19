@@ -17,6 +17,37 @@ from . import mute
 from . import storage
 
 
+async def _update_friend_summary(now: datetime) -> None:
+    summary_time = datetime.strptime(cfg.NIGHT_SUMMARY_TIME, "%H:%M").time()
+    summary_day = now.date() if now.time() >= summary_time else now.date() - timedelta(days=1)
+    summary_date = summary_day.strftime("%Y%m%d")
+    baseline = cfg.friend_summary_baseline
+    if baseline is not None and summary_date <= cfg.last_friend_summary_date:
+        return
+
+    try:
+        current = await cfg.client.get_friend_ids()
+        if baseline is None:
+            log.info("好友晨报基准已初始化，共 %d 位好友", len(current))
+        elif cfg.FRIEND_NOTIFICATION_ENABLED:
+            message = (
+                "☀️ 好友晨报\n"
+                f"新增好友：{len(current - baseline)} 人\n"
+                f"减少好友：{len(baseline - current)} 人\n"
+                f"当前好友：{len(current)} 人"
+            )
+            if len(current) >= cfg.FRIEND_COUNT_LIMIT:
+                message += f"\n⚠️ 好友数量已达 {len(current)}/{cfg.FRIEND_COUNT_LIMIT} 上限，请及时清理！"
+            await cfg.client.call_api("send_group_msg", group_id=str(cfg.INTERNAL_GROUP_ID), message=message)
+            log.info("好友晨报已发送，汇总日期 %s", summary_date)
+    except Exception as e:
+        log.warning("好友晨报处理失败，将在下次巡检重试: %s", e)
+        return
+
+    cfg.friend_summary_baseline = current
+    cfg.last_friend_summary_date = summary_date
+
+
 async def monitor_loop():
     log.info("巡检任务已启动，每 60 秒执行一次")
     last_archive_cleanup = 0.0
@@ -173,11 +204,5 @@ async def monitor_loop():
 
             cfg.last_night_summary_sent_date = today_str
 
-            # 夜间模式结束后刷新好友人数
-            try:
-                cfg.friend_count = await cfg.client.get_friend_count()
-                log.info("夜间汇总后刷新好友人数: %d", cfg.friend_count)
-            except Exception as e:
-                log.warning("夜间汇总后刷新好友人数失败: %s", e)
-
+        await _update_friend_summary(datetime.now())
         save_state()

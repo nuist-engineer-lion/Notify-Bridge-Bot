@@ -3,7 +3,6 @@ import os
 import signal
 
 from nonebot.adapters.onebot.v11.event import (
-    FriendAddNoticeEvent,
     FriendRequestEvent,
     PokeNotifyEvent,
 )
@@ -182,26 +181,9 @@ async def _bot_event_loop() -> None:
                     except Exception as e:
                         log.error("发送启动通知失败: %s", e, exc_info=True)
 
-                    for attempt in range(3):
-                        if _shutdown_requested:
-                            break
-                        try:
-                            cfg.friend_count = await cfg.client.get_friend_count()
-                            log.info("好友数量已初始化: %d", cfg.friend_count)
-                            break
-                        except Exception as e:
-                            log.warning("初始化好友数量失败 (尝试 %d/3): %s", attempt + 1, e)
-                            if attempt < 2:
-                                await asyncio.sleep(10)
-
                 log.debug("收到事件: type=%s, post_type=%s", type(event).__name__, getattr(event, 'post_type', '?'))
 
                 match event:
-                    case FriendAddNoticeEvent():
-                        if event.user_id not in cfg.friend_approve_time:
-                            cfg.friend_count += 1
-                            log.info("好友增加: user_id=%s, 好友数=%d", event.user_id, cfg.friend_count)
-
                     case FriendRequestEvent():
                         await handle_friend_request(event)
 

@@ -373,8 +373,9 @@ processed_friend_requests: dict[str, float] = {}
 # 记录用户通过好友申请的时间戳（用于忽略刚通过申请后的第一条消息）
 friend_approve_time: dict[int, float] = {}
 
-# 好友数量缓存（启动时初始化，通过事件增量更新）
-friend_count: int = 0
+# 好友晨报基准及已处理的汇总日期
+friend_summary_baseline: set[int] | None = None
+last_friend_summary_date: str = ""
 
 # ================= 运行时状态 =================
 # 内存字典：存储未回复的客户状态
