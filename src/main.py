@@ -155,9 +155,10 @@ def _register_background_task(coro, name: str) -> asyncio.Task:
 
 async def _bot_event_loop() -> None:
     """WebSocket 事件循环：连接、分发、断开重连，直到请求关停。"""
-    startup_notified = False
     suppress_startup_notice = os.environ.pop(REBOOT_SILENT_ENV, "") == "1"
     startup_report_scheduled = suppress_startup_notice
+    if suppress_startup_notice:
+        log.info("本次为静默重启，已跳过启动群通知")
     while not _shutdown_requested:
         log.info("正在连接 WebSocket...")
         try:
@@ -169,22 +170,6 @@ async def _bot_event_loop() -> None:
                 if not startup_report_scheduled:
                     startup_report_scheduled = True
                     _register_background_task(send_startup_headcount_report(), "startup-headcount-report")
-
-                if not startup_notified:
-                    try:
-                        if not suppress_startup_notice:
-                            await cfg.client.call_api(
-                                "send_group_msg",
-                                group_id=str(cfg.INTERNAL_GROUP_ID),
-                                message="🤖 客服机器人已启动，开始监听消息。",
-                            )
-                        startup_notified = True
-                        if suppress_startup_notice:
-                            log.info("本次为静默重启，已跳过启动群通知")
-                        else:
-                            log.info("启动通知已发送至群 %d", cfg.INTERNAL_GROUP_ID)
-                    except Exception as e:
-                        log.error("发送启动通知失败: %s", e, exc_info=True)
 
                 log.debug("收到事件: type=%s, post_type=%s", type(event).__name__, getattr(event, 'post_type', '?'))
 

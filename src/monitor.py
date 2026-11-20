@@ -118,8 +118,19 @@ async def _collect_group_stats(day: str | None = None) -> list[tuple[str, storag
     return rows
 
 
+def _headcount_greeting(hour: int) -> str:
+    if hour < 5:
+        return "夜深了，大家辛苦了！"
+    if hour < 12:
+        return "早上好！今天也辛苦大家了！"
+    if hour < 13:
+        return "中午好！今天也辛苦大家了！"
+    if hour < 18:
+        return "下午好！今天也辛苦大家了！"
+    return "晚上好！今天也辛苦大家了！"
+
+
 async def _build_headcount_report(
-    title: str,
     friends: storage.FriendDailyStats | None,
     group_stats: list[tuple[str, storage.GroupDailyStats | None]],
 ) -> str | list[MessageSegment]:
@@ -130,16 +141,16 @@ async def _build_headcount_report(
     for name, group in group_stats:
         rows.append((name, group.added, group.removed, group.total, group.change) if group else
                     (name, None, None, None, None))
-    message = title + "\n\n" + _format_headcount_table(rows)
+    message = _headcount_greeting(datetime.now().hour) + "\n\n" + _format_headcount_table(rows)
     if friends is not None and friends.total >= cfg.FRIEND_COUNT_LIMIT:
         message += f"\n⚠️ 好友数量已达 {friends.total}/{cfg.FRIEND_COUNT_LIMIT} 上限，请及时清理！"
     if any(value is None for row in rows for value in row[1:]):
         message += "\n\n– 表示暂未获取或缺少对比数据。"
     if cfg.MORNING_REPORT_CHART_ENABLED:
         try:
-            chart = await build_watch_chart(7)
+            chart = await build_watch_chart(7, summary=message)
             if chart is not None:
-                return [MessageSegment.text(message + "\n"), chart]
+                return [chart]
         except Exception:
             log.exception("人数报表图片生成失败，本次发送文字报表")
     return message
@@ -164,7 +175,7 @@ async def send_startup_headcount_report() -> None:
             return None
 
     friends, group_stats = await asyncio.gather(preview_friends(), _collect_group_stats())
-    report = await _build_headcount_report("机器人已启动，当前人数如下（与上次采样比较）", friends, group_stats)
+    report = await _build_headcount_report(friends, group_stats)
     for group_id in targets:
         try:
             await cfg.client.call_api("send_group_msg", group_id=str(group_id), message=report)
@@ -206,7 +217,7 @@ async def _update_friend_summary(now: datetime) -> None:
         if not pending:
             return
         if cfg.FRIEND_NOTIFICATION_ENABLED and cfg.MORNING_REPORT_GROUP_IDS:
-            report = await _build_headcount_report("早上好！今天也辛苦大家了！", stats, group_stats)
+            report = await _build_headcount_report(stats, group_stats)
             if not await _deliver_morning_report(stats.day, report):
                 return
         await storage.mark_friend_summary_sent(stats.day)

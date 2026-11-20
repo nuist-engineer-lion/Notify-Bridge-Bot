@@ -65,7 +65,8 @@ friend_notification_enabled: true
 # 晨报推送目标群。省略时发到 internal_group_id，设为 [] 则只记录数据。
 # morning_report_group_ids: [123456789, 987654321]
 
-# 是否在文字晨报后附上最近 7 天的好友和群人数图片报表
+# true 优先发送一张含问候语和人数摘要的图片，false 发送文字报表
+# 启动通知和定时晨报共用此设置，图片不可用时发文字
 morning_report_chart_enabled: false
 
 # 好友通过后发送欢迎消息的延迟（秒），等待好友关系生效（默认 3）
