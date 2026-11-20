@@ -63,7 +63,7 @@ async def _deliver_morning_report(day: str, message: str | list[MessageSegment])
 
 
 def _format_headcount_table(rows: list[tuple[str, int | None, int | None, int | None, int | None]]) -> str:
-    cells = [("", "新增", "删除", "当前数量", "净改变")]
+    cells = [("", "新增", "减少", "当前数量", "净改变")]
     for name, added, removed, total, change in rows:
         cells.append((name, *[str(value) if value is not None else "–" for value in (added, removed, total)],
                       f"{change:+d}" if change is not None else "–"))

@@ -997,7 +997,7 @@ async def format_group_stats(args: list[str]) -> str:
     if not records:
         return f"{label} 暂无人数记录。"
 
-    lines = [f"{label}人数变化表", "日期 | 新增 | 删除 | 当前数量 | 净改变"]
+    lines = [f"{label}人数变化表", "日期 | 新增 | 减少 | 当前数量 | 净改变"]
     for day, total, change, added, removed in records:
         counts = [str(value) if value is not None else "–" for value in (added, removed, total)]
         delta = f"{change:+d}" if change is not None else "–"
