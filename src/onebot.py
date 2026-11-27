@@ -33,7 +33,7 @@ from .messages import message_segments
 
 log = get_logger(__name__)
 
-_FORWARD_REPORT_GRACE_SECONDS = 30.0
+_FORWARD_REPORT_GRACE_SECONDS = 600.0
 
 # 协议字段核对基线（2026-10-31）：
 # SnowLuma/SnowLuma v2.2.1 @8ffd314260e9e2b6967eeca494d87aa5be046c34，已实测；
