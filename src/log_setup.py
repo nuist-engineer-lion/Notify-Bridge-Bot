@@ -3,6 +3,7 @@
 import logging
 import re
 import sys
+from copy import copy
 
 from nonebot.log import default_filter, logger as nonebot_logger, logger_id
 
@@ -17,6 +18,8 @@ def get_logger(module: str) -> logging.Logger:
 
 class ConsoleFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
+        record = copy(record)
+        record.name = record.name.removeprefix(project_logger.name + ".")
         # 适配器可能在连接日志和异常末尾输出含鉴权参数的完整 WS 地址。
         return re.sub(r"\bwss?://[^\s<>]+", "[OneBot WS]", super().format(record), flags=re.I)
 
@@ -51,7 +54,7 @@ def configure_logging() -> None:
     if _nonebot_sink is not None:
         return
     console_handler.setFormatter(ConsoleFormatter(
-        "%(asctime)s [%(levelname)s] %(name)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
+        "%(asctime)s [%(levelname)s] %(name)s | %(message)s", datefmt="%H:%M:%S",
     ))
     root = logging.getLogger()
     if root.handlers:
