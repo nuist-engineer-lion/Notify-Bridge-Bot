@@ -10,10 +10,12 @@ import sqlite3
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any, Literal
+from uuid import uuid4
 
 from nonebot.adapters import Adapter as BaseAdapter
 from nonebot.adapters.onebot.v11 import Adapter, Message, MessageSegment
 from nonebot.adapters.onebot.v11.config import Config as OneBotConfig
+from nonebot.adapters.onebot.v11.exception import ActionFailed, NetworkError
 from nonebot.adapters.onebot.v11.event import (
     GroupMessageEvent as BaseGroupMessageEvent,
     LifecycleMetaEvent,
@@ -30,6 +32,8 @@ from .log_setup import get_logger
 from .messages import message_segments
 
 log = get_logger(__name__)
+
+_FORWARD_REPORT_GRACE_SECONDS = 30.0
 
 # 协议字段核对基线（2026-10-31）：
 # SnowLuma/SnowLuma v2.2.1 @8ffd314260e9e2b6967eeca494d87aa5be046c34，已实测；
@@ -113,6 +117,54 @@ def _forward_nodes(messages: Any) -> list[dict[str, Any]]:
                 data["content"] = _forward_nodes(data["content"])
         result.append(segment)
     return result
+
+
+def _forward_reference(messages: Any) -> str | None:
+    """只读取第一个资料节点末行的编号，聊天记录中的文本不参与匹配。"""
+    if not isinstance(messages, list) or not messages or not isinstance(messages[0], dict):
+        return None
+    first = messages[0]
+    if first.get("type") == "node":
+        first = first.get("data") or {}
+    if not isinstance(first, dict):
+        return None
+    parts = message_segments(first.get("message") or first.get("content"), tolerant=True)
+    text = "".join(str(p["data"].get("text", "")) for p in parts if p["type"] == "text")
+    _, separator, reference = text.rpartition("\n转发编号：")
+    return reference if separator else None
+
+
+class _ForwardReport:
+    def __init__(self, group_id: int):
+        self.group_id = group_id
+        self.reference = uuid4().hex[:16]
+        self.confirmed_id: int | None = None
+        self.candidates: asyncio.Queue[tuple[int, str]] = asyncio.Queue(maxsize=128)
+
+    def observe(self, message_id: int, resource: str, reference: str | None) -> None:
+        if reference is not None:
+            if reference != self.reference:
+                return
+            self.confirmed_id = message_id
+        if self.candidates.full():
+            self.candidates.get_nowait()
+        self.candidates.put_nowait((message_id, resource))
+
+    async def confirm(self, bot) -> int:
+        while self.confirmed_id is None:
+            message_id, resource = await self.candidates.get()
+            if self.confirmed_id is not None:
+                break
+            try:
+                result = await bot.call_api("get_forward_msg", id=resource)
+                reference = _forward_reference(result.get("messages") or result.get("message"))
+            except Exception as e:
+                log.warning("读取自身转发上报失败: group_id=%d message_id=%d error=%s",
+                            self.group_id, message_id, type(e).__name__)
+                continue
+            if reference == self.reference:
+                return message_id
+        return self.confirmed_id
 
 
 class _EventBuffer:
@@ -230,6 +282,7 @@ class OneBotClient:
         self._worker: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._queue = _EventBuffer()
+        self._forward_reports: set[_ForwardReport] = set()
 
     @property
     def is_running(self) -> bool:
@@ -240,6 +293,40 @@ class OneBotClient:
         if raw.get("post_type") == "meta_event" and raw.get("meta_event_type") != "lifecycle":
             return
         self._queue.put_nowait(raw)
+        # 业务循环可能正 await 这次发送，必须在 WS 入队时捕获自身上报。
+        if (self._forward_reports and raw.get("post_type") in ("message_sent", "message")
+                and raw.get("message_type") == "group" and self.self_id
+                and str(raw.get("user_id")) == str(self.self_id)):
+            self._observe_forward(raw)
+
+    def _observe_forward(self, raw: dict[str, Any]) -> None:
+        reports = [r for r in self._forward_reports if str(r.group_id) == str(raw.get("group_id"))]
+        if not reports or raw.get("message_id") is None:
+            return
+        mid = int(raw["message_id"])
+        for segment in message_segments(raw.get("message") or raw.get("raw_message"), tolerant=True):
+            data = segment["data"]
+            reference = None
+            if segment["type"] == "forward":
+                reference = _forward_reference(data.get("content"))
+                resource = str(data.get("id") or mid)
+            elif segment["type"] == "json":
+                card = data.get("data")
+                if isinstance(card, str):
+                    try:
+                        card = json.loads(card)
+                    except ValueError:
+                        continue
+                if not isinstance(card, dict) or card.get("app") != "com.tencent.multimsg":
+                    continue
+                meta = card.get("meta")
+                detail = meta.get("detail") if isinstance(meta, dict) else None
+                resource = str(detail.get("resid") or mid) if isinstance(detail, dict) else str(mid)
+            else:
+                continue
+            for report in reports:
+                report.observe(mid, resource, reference)
+            break
 
     @staticmethod
     def _parse_event(raw: dict[str, Any]):
@@ -314,10 +401,40 @@ class OneBotClient:
         if bot is None:
             raise RuntimeError("OneBot 客户端未连接")
         if action == "send_group_forward_msg":
-            params["messages"] = _forward_nodes(params.get("messages", []))
-            # 嵌套记录和媒体上传可能超过普通 API 的 10 秒等待时间。
-            params.setdefault("_timeout", 120.0)
+            return await self._send_group_forward(bot, params)
         return await bot.call_api(action, **params)
+
+    async def _send_group_forward(self, bot, params: dict) -> Any:
+        nodes = params["messages"] = _forward_nodes(params.get("messages", []))
+        # 嵌套记录和媒体上传可能超过普通 API 的 10 秒等待时间。
+        params.setdefault("_timeout", 120.0)
+        # 提醒与 .more 的首节点均为客户资料。
+        content = nodes[0]["data"].get("content") if nodes and nodes[0]["type"] == "node" else None
+        if not content or len(content) != 1 or content[0]["type"] != "text":
+            return await bot.call_api("send_group_forward_msg", **params)
+        report = _ForwardReport(int(params["group_id"]))
+        content[0]["data"]["text"] += f"\n转发编号：{report.reference}"
+        self._forward_reports.add(report)
+        try:
+            try:
+                result = await bot.call_api("send_group_forward_msg", **params)
+                if isinstance(result, dict) and result.get("message_id") is not None:
+                    return result
+            except (NetworkError, TimeoutError):
+                pass
+            except ActionFailed as e:
+                if not any("未确认发送回执" in str(e.info.get(key, "")) for key in ("message", "wording")):
+                    raise
+            log.warning("合并转发缺少发送回执，核对自身上报: group_id=%d", report.group_id)
+            try:
+                async with asyncio.timeout(_FORWARD_REPORT_GRACE_SECONDS):
+                    mid = await report.confirm(bot)
+            except TimeoutError:
+                raise TimeoutError("未收到可匹配的合并转发自身上报") from None
+            log.info("自身上报已确认合并转发: group_id=%d message_id=%d", report.group_id, mid)
+            return {"message_id": mid}
+        finally:
+            self._forward_reports.discard(report)
 
     async def get_friend_ids(self) -> set[int]:
         """读取好友晨报所需的 QQ 号集合。"""
