@@ -49,6 +49,7 @@ welcome_message: |-
   如有其他问题可随时留言，我们会在工作时间尽快回复。
 
 # 各命令防抖间隔（秒）：say / more / bye / close / list
+# 使用非负数值，0 表示关闭对应命令的防抖。say、bye、more 必填。
 debounce_seconds:
   say: 5
   more: 5

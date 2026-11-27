@@ -13,9 +13,9 @@ import asyncio
 import json
 import os
 import sqlite3
-from collections.abc import Iterator, Set
+from collections.abc import Iterable, Iterator, Set
 from contextlib import contextmanager
-from typing import NamedTuple
+from typing import NamedTuple, NotRequired, TypedDict
 
 from . import config as cfg
 from .config import log
@@ -27,6 +27,14 @@ def _default_db_path() -> str:
 
 # 外部脚本可覆盖（如 --db 参数）；为 None 时按 cfg.ARCHIVE_DIR 动态解析
 DB_PATH: str | None = None
+
+
+class SessionEvent(TypedDict):
+    event_type: str
+    time: float
+    actor_uid: NotRequired[int | None]
+    message_id: NotRequired[int | None]
+    payload: NotRequired[dict]
 
 
 def get_db_path() -> str:
@@ -185,14 +193,31 @@ def record_event_sync(
     payload: dict | None = None,
 ) -> bool:
     """写入一条周期事件。message_id 撞唯一索引（重复上报）时忽略并返回 False。"""
-    encoded = json.dumps(payload or {}, ensure_ascii=False, default=str)
+    return record_events_sync(session_id, [{
+        "event_type": event_type, "time": time, "actor_uid": actor_uid,
+        "message_id": message_id, "payload": payload or {},
+    }]) > 0
+
+
+def record_events_sync(session_id: int, events: Iterable[SessionEvent]) -> int:
+    """在一个事务中批量写入周期事件，返回去重后的新增数量；失败时整批回滚。"""
+    rows = [
+        (
+            session_id, event["time"], event["event_type"],
+            event.get("actor_uid"), event.get("message_id"),
+            json.dumps(event.get("payload") or {}, ensure_ascii=False, default=str),
+        )
+        for event in events
+    ]
+    if not rows:
+        return 0
     with _connect() as conn:
-        cur = conn.execute(
+        cur = conn.executemany(
             "INSERT OR IGNORE INTO session_events (session_id, time, event_type, actor_uid, message_id, payload) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (session_id, time, event_type, actor_uid, message_id, encoded),
+            rows,
         )
-        return cur.rowcount > 0
+        return cur.rowcount
 
 
 def has_message_sync(message_id: int) -> bool:
@@ -437,6 +462,10 @@ async def record_event(
         record_event_sync, session_id, event_type,
         time=time, actor_uid=actor_uid, message_id=message_id, payload=payload,
     )
+
+
+async def record_events(session_id: int, events: Iterable[SessionEvent]) -> int:
+    return await asyncio.to_thread(record_events_sync, session_id, events)
 
 
 async def has_message(message_id: int) -> bool:

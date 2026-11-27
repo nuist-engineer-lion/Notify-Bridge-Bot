@@ -167,7 +167,7 @@ def parse_message_config(raw):
 
 CLOSING_MESSAGE = ""
 WELCOME_MESSAGE = ""
-DEBOUNCE_SECONDS: dict[str, int] = {}
+DEBOUNCE_SECONDS: dict[str, int | float] = {}
 PROCESSED_FRIEND_REQUESTS_EXPIRE = 0
 FRIEND_NOTIFICATION_ENABLED = True
 FRIEND_WELCOME_DELAY = 3
@@ -223,22 +223,7 @@ def _parse_group_ids(value: Any, key: str) -> tuple[int, ...]:
 
 
 def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
-    global config
-    global WS_URL, WS_TOKEN, INTERNAL_GROUP_ID, WHITELIST, MILESTONES
-    global MONITORED_FORWARD_LIMIT, CLOSING_MESSAGE, WELCOME_MESSAGE
-    global DEBOUNCE_SECONDS, PROCESSED_FRIEND_REQUESTS_EXPIRE
-    global FRIEND_NOTIFICATION_ENABLED
-    global FRIEND_WELCOME_DELAY, FRIEND_WELCOME_RETRIES, FRIEND_WELCOME_RETRY_INTERVAL
-    global FRIEND_COUNT_LIMIT, REPLY_DURATION_MAXLEN, AVAILABILITY, MAX_LISTEN_AGE
-    global MONITORED_GROUPS, MONITORED_GROUP_CASCADES, MORNING_REPORT_GROUP_IDS
-    global MORNING_REPORT_CHART_ENABLED
-    global EMOJI_MAPPING, EMOJI_TO_CMD, RECALL_WINDOW_SECONDS, NIGHT_MODE, NIGHT_START, NIGHT_END
-    global NIGHT_SUMMARY_TIME, ARCHIVE_DIR, STATE_FILE, RECENT_MESSAGE_MAX_AGE
-    global ARCHIVE_RETENTION_DAYS
-    global AI_SUGGESTION, NOTICE_PR, reply_durations
-    global SAY_INPUT_TIMEOUT_SECONDS
-    global BYE_CONFIRM_TIMEOUT_SECONDS, BYE_CONFIRM_EMOJI_POOL
-
+    """完整构造候选配置后统一生效，任何解析失败都保留当前运行状态。"""
     applied_config = dict(new_config)
     friend_notification_enabled = applied_config.get("friend_notification_enabled", True)
     if not isinstance(friend_notification_enabled, bool):
@@ -309,67 +294,76 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
                 restart_only_changes.append(key)
                 applied_config[key] = config.get(key)
 
-    previous_maxlen = REPLY_DURATION_MAXLEN
-    config = applied_config
-
-    WS_URL = config["ws_url"]
-    WS_TOKEN = config["ws_token"]
-    INTERNAL_GROUP_ID = config["internal_group_id"]
-    WHITELIST = list(config["whitelist"])
-    MILESTONES = list(config["milestones"])
-    MONITORED_FORWARD_LIMIT = config["monitored_forward_limit"]
-
-    CLOSING_MESSAGE = parse_message_config(config["closing_message"])
-    WELCOME_MESSAGE = parse_message_config(config["welcome_message"])
-    DEBOUNCE_SECONDS = dict(config["debounce_seconds"])
-    PROCESSED_FRIEND_REQUESTS_EXPIRE = config["processed_friend_requests_expire"]
-    FRIEND_NOTIFICATION_ENABLED = friend_notification_enabled
-    FRIEND_WELCOME_DELAY = config.get("friend_welcome_delay", 3)
-    FRIEND_WELCOME_RETRIES = config.get("friend_welcome_retries", 3)
-    FRIEND_WELCOME_RETRY_INTERVAL = config.get("friend_welcome_retry_interval", 3)
-    FRIEND_COUNT_LIMIT = config.get("friend_count_limit", 3000)
-    MONITORED_GROUPS = monitored_groups
-    MONITORED_GROUP_CASCADES = monitored_group_cascades
-    MORNING_REPORT_GROUP_IDS = morning_report_group_ids
-    MORNING_REPORT_CHART_ENABLED = morning_report_chart_enabled
-    REPLY_DURATION_MAXLEN = config["reply_duration_maxlen"]
-    AVAILABILITY = config["availability"]
-    MAX_LISTEN_AGE = config.get("max_listen_age", 86400)   # 24小时
-    EMOJI_MAPPING = dict(config.get("emoji_mapping", DEFAULT_EMOJI_MAPPING))
+    emoji_mapping = dict(applied_config.get("emoji_mapping", DEFAULT_EMOJI_MAPPING))
     # 未显式配置撤回表情时回退到默认值，保证旧配置也能使用新功能
-    EMOJI_MAPPING.setdefault("recall", DEFAULT_EMOJI_MAPPING["recall"])
+    emoji_mapping.setdefault("recall", DEFAULT_EMOJI_MAPPING["recall"])
     # 超时表情仅标记等待结束；旧配置缺少该项时使用“困”。
-    EMOJI_MAPPING.setdefault("say_timeout", DEFAULT_EMOJI_MAPPING["say_timeout"])
+    emoji_mapping.setdefault("say_timeout", DEFAULT_EMOJI_MAPPING["say_timeout"])
     # 已回复消息使用“收到”替换 say，点击后仍进入 say 流程。
-    EMOJI_MAPPING.setdefault("say_replied", DEFAULT_EMOJI_MAPPING["say_replied"])
-    EMOJI_TO_CMD = {v: "say" if k == "say_replied" else k for k, v in EMOJI_MAPPING.items() if k != "say_timeout"}
-    RECALL_WINDOW_SECONDS = int(config.get("recall_window_seconds", 60))
-    SAY_INPUT_TIMEOUT_SECONDS = say_input_timeout
-    BYE_CONFIRM_TIMEOUT_SECONDS = bye_confirm_timeout
-    BYE_CONFIRM_EMOJI_POOL = bye_confirm_pool
-
-    # ================= 夜间模式配置 =================
-    NIGHT_MODE = dict(config.get("night_mode", {}))
-    NIGHT_START = NIGHT_MODE.get("start", "22:00")
-    NIGHT_END = NIGHT_MODE.get("end", "08:00")
-    NIGHT_SUMMARY_TIME = NIGHT_MODE.get("summary_time", "08:00")
-
-    # ================= AI 回复建议 =================
-    AI_SUGGESTION = dict(config.get("ai_suggestion", {}) or {})
-
-    # ================= 通知 PR =================
-    NOTICE_PR = dict(config.get("notice_pr", {}) or {})
-
-    # ================= 可配置的存档与状态持久化 =================
-    ARCHIVE_DIR = config.get("archive_dir", "archives")
-    STATE_FILE = config.get("state_file", "state.json")
-    RECENT_MESSAGE_MAX_AGE = config.get("recent_message_max_age", 86400)  # 默认1天
-    ARCHIVE_RETENTION_DAYS = int(config.get("archive_retention_days", 0))
-
+    emoji_mapping.setdefault("say_replied", DEFAULT_EMOJI_MAPPING["say_replied"])
+    night_mode = dict(applied_config.get("night_mode", {}))
+    debounce = applied_config["debounce_seconds"]
+    if not isinstance(debounce, dict) or not {"say", "bye", "more"}.issubset(debounce):
+        raise ValueError("debounce_seconds 必须包含 say、bye、more 的防抖秒数")
+    for value in debounce.values():
+        if type(value) not in (int, float) or value < 0 or (isinstance(value, float) and not math.isfinite(value)):
+            raise ValueError("debounce_seconds 的值必须为非负有限数值")
+    # 此阶段只创建局部值；消息解析、反向表及数值转换均可能失败。
+    snapshot = {
+        "config": applied_config,
+        "WS_URL": applied_config["ws_url"],
+        "WS_TOKEN": applied_config["ws_token"],
+        "INTERNAL_GROUP_ID": applied_config["internal_group_id"],
+        "WHITELIST": list(applied_config["whitelist"]),
+        "MILESTONES": list(applied_config["milestones"]),
+        "MONITORED_FORWARD_LIMIT": applied_config["monitored_forward_limit"],
+        "CLOSING_MESSAGE": parse_message_config(applied_config["closing_message"]),
+        "WELCOME_MESSAGE": parse_message_config(applied_config["welcome_message"]),
+        "DEBOUNCE_SECONDS": dict(debounce),
+        "MONITORED_GROUPS": monitored_groups,
+        "MONITORED_GROUP_CASCADES": monitored_group_cascades,
+        "MORNING_REPORT_GROUP_IDS": morning_report_group_ids,
+        "MORNING_REPORT_CHART_ENABLED": morning_report_chart_enabled,
+        "BYE_CONFIRM_TIMEOUT_SECONDS": bye_confirm_timeout,
+        "BYE_CONFIRM_EMOJI_POOL": bye_confirm_pool,
+        "PROCESSED_FRIEND_REQUESTS_EXPIRE": applied_config["processed_friend_requests_expire"],
+        "FRIEND_NOTIFICATION_ENABLED": friend_notification_enabled,
+        "FRIEND_WELCOME_DELAY": applied_config.get("friend_welcome_delay", 3),
+        "FRIEND_WELCOME_RETRIES": applied_config.get("friend_welcome_retries", 3),
+        "FRIEND_WELCOME_RETRY_INTERVAL": applied_config.get("friend_welcome_retry_interval", 3),
+        "FRIEND_COUNT_LIMIT": applied_config.get("friend_count_limit", 3000),
+        "REPLY_DURATION_MAXLEN": applied_config["reply_duration_maxlen"],
+        "AVAILABILITY": applied_config["availability"],
+        "MAX_LISTEN_AGE": applied_config.get("max_listen_age", 86400),
+        "EMOJI_MAPPING": emoji_mapping,
+        "EMOJI_TO_CMD": {
+            v: "say" if k == "say_replied" else k
+            for k, v in emoji_mapping.items() if k != "say_timeout"
+        },
+        "RECALL_WINDOW_SECONDS": int(applied_config.get("recall_window_seconds", 60)),
+        "SAY_INPUT_TIMEOUT_SECONDS": say_input_timeout,
+        "NIGHT_MODE": night_mode,
+        "NIGHT_START": night_mode.get("start", "22:00"),
+        "NIGHT_END": night_mode.get("end", "08:00"),
+        "NIGHT_SUMMARY_TIME": night_mode.get("summary_time", "08:00"),
+        "AI_SUGGESTION": dict(applied_config.get("ai_suggestion", {}) or {}),
+        "NOTICE_PR": dict(applied_config.get("notice_pr", {}) or {}),
+        "ARCHIVE_DIR": applied_config.get("archive_dir", "archives"),
+        "STATE_FILE": applied_config.get("state_file", "state.json"),
+        "RECENT_MESSAGE_MAX_AGE": applied_config.get("recent_message_max_age", 86400),
+        "ARCHIVE_RETENTION_DAYS": int(applied_config.get("archive_retention_days", 0)),
+    }
+    next_maxlen = snapshot["REPLY_DURATION_MAXLEN"]
     if initial:
-        reply_durations = deque(maxlen=REPLY_DURATION_MAXLEN)
-    elif REPLY_DURATION_MAXLEN != previous_maxlen:
-        reply_durations = deque(reply_durations, maxlen=REPLY_DURATION_MAXLEN)
+        next_durations = deque(maxlen=next_maxlen)
+    elif next_maxlen != REPLY_DURATION_MAXLEN:
+        next_durations = deque(reply_durations, maxlen=next_maxlen)
+    else:
+        next_durations = reply_durations
+    snapshot["reply_durations"] = next_durations
+
+    # 无 await：验证全部通过后一次性发布，失败路径不需要回滚。
+    globals().update(snapshot)
 
     return restart_only_changes
 

@@ -1,4 +1,4 @@
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 
 class CustomerData(TypedDict):
@@ -17,6 +17,7 @@ class ForwardMonitorData(TypedDict):
 
 
 class DelayedNotification(TypedDict):
+    forward_unconfirmed: NotRequired[bool]
     type: str
     customers: list[tuple[int, "CustomerData"]]
     milestone: int | None
@@ -53,6 +54,7 @@ class StateForwardData(TypedDict):
 
 
 class StateDelayedNotification(TypedDict):
+    forward_unconfirmed: NotRequired[bool]
     type: str
     customers: list[tuple[int, "StateCustomerData"]]  # 存储的是 StateCustomerData
     milestone: int | None

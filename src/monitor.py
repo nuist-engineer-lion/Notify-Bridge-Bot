@@ -11,10 +11,9 @@ from .config import (
     unreplied_customers,
     processed_friend_requests,
     friend_approve_time,
-    delayed_notifications,
 )
 from .models import CustomerData
-from .message_sender import send_reminder_with_at, pop_tracked_forward
+from .message_sender import send_reminder_with_at, pop_tracked_forward, prune_expired_command_times
 from .state import save_state
 from . import mute
 from . import storage
@@ -262,6 +261,7 @@ async def monitor_loop():
 
         # ===== 清理超时的监听消息 =====
         now = time.time()
+        prune_expired_command_times(now)
         to_remove = [mid for mid, data in cfg.monitored_forwards.items() if now - data["created_at"] > cfg.MAX_LISTEN_AGE]
         for mid in to_remove:
             pop_tracked_forward(mid)
@@ -358,28 +358,17 @@ async def monitor_loop():
             in_summary_window = now_time >= lower_bound or now_time <= upper_bound
 
         if in_summary_window and cfg.last_night_summary_sent_date != today_str:
-            if delayed_notifications:
-                customers_aggregated: dict[int, CustomerData] = {}
-                for notif in delayed_notifications:
-                    for qq, data in notif["customers"]:
-                        customers_aggregated[qq] = data
-                if customers_aggregated:
-                    customers_list = list(customers_aggregated.items())
-                    summary_text = f"🌙 夜间免打扰时段汇总：共有 {len(customers_list)} 名客户发来消息，请及时处理。"
+            night_start_t = datetime.strptime(cfg.NIGHT_START, "%H:%M").time()
+            night_start_dt = datetime.combine(datetime.today(), night_start_t)
+            night_summary_dt = summary_dt
+            if night_summary_dt <= night_start_dt:
+                night_summary_dt += timedelta(days=1)
+            night_max_age = int((night_summary_dt - night_start_dt).total_seconds()) + 300
 
-                    night_start_t = datetime.strptime(cfg.NIGHT_START, "%H:%M").time()
-                    night_summary_t = datetime.strptime(cfg.NIGHT_SUMMARY_TIME, "%H:%M").time()
-                    night_start_dt = datetime.combine(datetime.today(), night_start_t)
-                    night_summary_dt = datetime.combine(datetime.today(), night_summary_t)
-                    if night_summary_dt <= night_start_dt:
-                        night_summary_dt += timedelta(days=1)
-                    night_max_age = int((night_summary_dt - night_start_dt).total_seconds()) + 300
-
-                    asyncio.create_task(send_reminder_with_at(cfg.INTERNAL_GROUP_ID, summary_text, customers_list, max_age_seconds=night_max_age, notice_type="night_summary"))
-                    log.info("夜间汇总已发送：%s", summary_text)
-                delayed_notifications.clear()
-
-            cfg.last_night_summary_sent_date = today_str
+            await mute.flush_delayed_notifications(
+                reason="night_summary", max_age_seconds=night_max_age,
+                night_summary_date=today_str,
+            )
 
         await _update_friend_summary(datetime.now())
         save_state()

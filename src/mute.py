@@ -8,7 +8,10 @@ mute_until 语义：
 
 from __future__ import annotations
 
+import asyncio
 import time
+
+from nonebot.adapters.onebot.v11.exception import ActionFailed
 
 from . import config as cfg
 from .config import log
@@ -18,6 +21,7 @@ from .utils import format_duration, is_night_time
 
 # 不限时静音哨兵值
 MUTE_UNLIMITED = -1.0
+_flush_lock = asyncio.Lock()
 
 
 def is_muted() -> bool:
@@ -105,6 +109,8 @@ async def unmute_and_flush() -> tuple[bool, int, str]:
 
     if flushed > 0:
         text = f"已解除静音，并汇总发出 {flushed} 名客户的延后提醒。"
+    elif any(notif.get("forward_unconfirmed") for notif in cfg.delayed_notifications):
+        text = "延后转发的发送结果待确认。请核对群记录，确需补发时，在连接恢复后的非夜间时段执行 unmute。"
     elif was and not client_up:
         text = (
             f"已解除静音；客户端未运行，仍有 {pending_before} 条延后通知，"
@@ -144,32 +150,75 @@ def queue_delayed_notification(
     log.info("%s：%s 通知已延后，涉及 %d 名客户", reason, notify_type, len(customers))
 
 
-async def flush_delayed_notifications(reason: str = "unmute") -> int:
+async def flush_delayed_notifications(
+    reason: str = "unmute", *, max_age_seconds: int | None = None,
+    night_summary_date: str | None = None,
+) -> int:
     """
     汇总并发送延后通知到内部群。
-    夜间时段仍保留队列（交给夜间汇总），其他情况立即发出。
+    夜间时段保留队列，night_summary 可在汇总窗口发送，但始终遵守临时静音。
     由群内 .unmute、终端 unmute（经 unmute_and_flush）或巡检静音到期触发。
     返回发送涉及的客户数；未发送返回 0。
     """
-    from .message_sender import send_reminder_with_at  # 延迟导入避免循环依赖
+    async with _flush_lock:
+        return await _flush_delayed_notifications(
+            reason, max_age_seconds=max_age_seconds, night_summary_date=night_summary_date,
+        )
 
-    if is_night_time():
+
+async def _flush_delayed_notifications(
+    reason: str, *, max_age_seconds: int | None, night_summary_date: str | None,
+) -> int:
+    from .message_sender import build_reminder_nodes, mention_available_member, register_reminder, send_reminder_nodes
+
+    if is_muted():
+        return 0
+    if reason != "night_summary" and is_night_time():
         log.info("当前仍在夜间模式，延后通知保留至次日汇总 (reason=%s)", reason)
         return 0
-    if not cfg.delayed_notifications:
+    if night_summary_date is not None and cfg.last_night_summary_sent_date == night_summary_date:
         return 0
     if not cfg.client.is_running:
         log.warning("客户端未运行，延后通知暂不发送 (reason=%s)", reason)
         return 0
+    if not cfg.delayed_notifications:
+        if night_summary_date is not None:
+            cfg.last_night_summary_sent_date = night_summary_date
+            save_state()
+        return 0
 
+    # 保留已持久化的待发快照，直到收到发送成功结果；取消与异常均不消耗队列。
+    snapshot: list[DelayedNotification] = []
     customers_aggregated: dict[int, CustomerData] = {}
     for notif in cfg.delayed_notifications:
+        active = {}
         for qq, data in notif["customers"]:
-            customers_aggregated[qq] = data
-    cfg.delayed_notifications.clear()
-    save_state()
+            current = cfg.unreplied_customers.get(qq)
+            if current is None or current["pending_since"] != data["pending_since"]:
+                continue
+            old_sid, current_sid = data.get("session_id"), current.get("session_id")
+            if old_sid is not None and current_sid is not None and old_sid != current_sid:
+                continue
+            active[qq] = current
+        if active and notif.get("forward_unconfirmed") and reason != "unmute":
+            continue
+        snapshot.append(notif)
+        customers_aggregated.update(active)
+
+    snapshot_ids = {id(notif) for notif in snapshot}
+
+    def consume_snapshot() -> None:
+        # await 发送期间可能有新通知入队，只移除本次取出的对象。
+        cfg.delayed_notifications[:] = [
+            notif for notif in cfg.delayed_notifications if id(notif) not in snapshot_ids
+        ]
+        if night_summary_date is not None and not cfg.delayed_notifications:
+            cfg.last_night_summary_sent_date = night_summary_date
 
     if not customers_aggregated:
+        if snapshot:
+            consume_snapshot()
+            save_state()
         return 0
 
     customers_list = list(customers_aggregated.items())
@@ -181,44 +230,52 @@ async def flush_delayed_notifications(reason: str = "unmute") -> int:
         summary_text = (
             f"🔕 静音到期，期间共有 {len(customers_list)} 名客户发来消息，请及时处理。"
         )
+    elif reason == "night_summary":
+        summary_text = f"🌙 夜间免打扰时段汇总：共有 {len(customers_list)} 名客户发来消息，请及时处理。"
     else:
         summary_text = (
             f"🔕 延后通知补发，共有 {len(customers_list)} 名客户发来消息，请及时处理。"
         )
 
-    def _restore_queue() -> None:
-        cfg.delayed_notifications.append({
-            "type": "mute_flush",
-            "customers": customers_list,
-            "milestone": None,
-            "timestamp": time.time(),
-        })
-        save_state()
-
+    save_state()
+    group_id = cfg.INTERNAL_GROUP_ID
     try:
-        message_id = await send_reminder_with_at(
-            cfg.INTERNAL_GROUP_ID,
-            summary_text,
-            customers_list,
-            notice_type="mute_flush",
-        )
+        nodes = await build_reminder_nodes(group_id, customers_list, max_age_seconds)
     except Exception as e:
-        log.error("静音延后通知发送失败: %s", e, exc_info=True)
-        _restore_queue()
+        log.error("延后通知构造失败 (reason=%s): %s", reason, e, exc_info=True)
+        return 0
+    if not nodes or not cfg.client.is_running or is_muted():
+        return 0
+    if any(cfg.unreplied_customers.get(qq) is not data for qq, data in customers_list):
         return 0
 
-    # 内容为空或未取得可操作的群消息 ID 时，保留通知以便补发。
-    if message_id is None:
-        log.error(
-            "静音延后通知发送未成功（无消息 ID），已恢复 %d 名客户通知 (reason=%s)",
-            len(customers_list),
-            reason,
-        )
-        _restore_queue()
+    # 请求发出后可能丢回执或重启。提前落盘，自动巡检只重试确定未发送的批次。
+    newly_marked = [notif for notif in snapshot if not notif.get("forward_unconfirmed")]
+    for notif in newly_marked:
+        notif["forward_unconfirmed"] = True
+    if not save_state():
+        for notif in newly_marked:
+            notif.pop("forward_unconfirmed", None)
+        return 0
+    try:
+        message_id = await send_reminder_nodes(group_id, nodes)
+    except ActionFailed as e:
+        for notif in newly_marked:
+            notif.pop("forward_unconfirmed", None)
+        save_state()
+        log.warning("协议端拒绝延后转发 (reason=%s): %s", reason, e)
+        return 0
+    except Exception as e:
+        log.warning("延后转发回执未确认，保留队列。请核对群记录，需要补发时执行 unmute: %s", e)
         return 0
 
+    consume_snapshot()
+    notice_type = "night_summary" if reason == "night_summary" else "mute_flush"
+    # register_reminder 在首次 await 前登记消息 ID 并连同队列一起保存。
+    await register_reminder(group_id, message_id, customers_list, summary_text, notice_type)
+    await mention_available_member(group_id, summary_text)
     log.info(
-        "静音延后通知已汇总发送 (reason=%s, msg_id=%s)：%s",
+        "延后通知已汇总发送 (reason=%s, msg_id=%s)：%s",
         reason,
         message_id,
         summary_text,

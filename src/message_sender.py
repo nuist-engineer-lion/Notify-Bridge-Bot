@@ -71,7 +71,17 @@ async def get_recent_message_ids(
 
 # ======================= 合并转发监听管理 =======================
 
+def prune_expired_command_times(now: float) -> int:
+    """按最长防抖窗口清理过期记录，避免消息 ID 与客户 QQ 同号时误删有效记录。"""
+    retention = max([5, *cfg.DEBOUNCE_SECONDS.values()])
+    keys_to_remove = [key for key, ts in last_command_time.items() if now - ts >= retention]
+    for key in keys_to_remove:
+        del last_command_time[key]
+    return len(keys_to_remove)
+
+
 def track_forward_message(message_id: int, customer_ids: list[int], group_id: int) -> None:
+    now = time.time()
     if message_id in cfg.monitored_forwards:
         try:
             monitored_forward_order.remove(message_id)
@@ -82,19 +92,21 @@ def track_forward_message(message_id: int, customer_ids: list[int], group_id: in
     cfg.monitored_forwards[message_id] = {
         "customer_ids": customer_ids,
         "group_id": group_id,
-        "created_at": time.time(),
+        "created_at": now,
     }
 
     while len(monitored_forward_order) > cfg.MONITORED_FORWARD_LIMIT:
         expired_id = monitored_forward_order.popleft()
         cfg.monitored_forwards.pop(expired_id, None)
 
+    prune_expired_command_times(now)
+
     log.debug("监听合并转发已更新: message_id=%s, 当前监听数=%d", message_id, len(monitored_forward_order))
     save_state()
 
 
 def pop_tracked_forward(message_id: int) -> dict | None:
-    """移除监听的合并转发，并清理其防抖记录"""
+    """移除监听的合并转发，并清理已过期的防抖记录。"""
     data = cfg.monitored_forwards.pop(message_id, None)
     if data is None:
         return None
@@ -104,9 +116,7 @@ def pop_tracked_forward(message_id: int) -> dict | None:
     except ValueError:
         pass
 
-    keys_to_remove = [key for key in last_command_time if key[0] == message_id]
-    for key in keys_to_remove:
-        del last_command_time[key]
+    prune_expired_command_times(time.time())
 
     save_state()
     return data
@@ -296,17 +306,16 @@ def format_customer_profile(user_id: int, nickname: str, remark: str) -> str:
     return f"QQ号：{user_id}\n昵称：{nickname}\n备注：{remark}"
 
 
-async def send_nested_forward(group_id: int, customer_list: list[tuple[int, CustomerData]], summary_text: str, max_age_seconds: int | None = None) -> int | None:
-    """
-    按客户连续展示资料、AI 建议和聊天记录，三类节点均使用该客户身份。
-    summary_text 保留调用兼容，摘要只在转发外的提醒中展示。
-    """
+async def build_reminder_nodes(
+    group_id: int, customer_list: list[tuple[int, CustomerData]], max_age_seconds: int | None,
+) -> list[MessageSegment]:
+    """按客户构造资料、AI 建议及聊天记录，尚未向群发送消息。"""
     if max_age_seconds is None:
         max_age_seconds = cfg.RECENT_MESSAGE_MAX_AGE
 
     if not customer_list:
-        log.debug("send_nested_forward: customer_list 为空，跳过发送")
-        return None
+        log.debug("提醒客户列表为空，跳过转发")
+        return []
 
     log.info("开始构造合并转发 -> 群 %d, 共 %d 名客户", group_id, len(customer_list))
 
@@ -330,7 +339,7 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
 
     if not forwarded_customers:
         log.warning("所有客户均无%d秒内消息，取消发送合并转发", max_age_seconds)
-        return None
+        return []
 
     customer_history_nodes: dict[int, list[MessageSegment]] = {}
     context_by_customer: dict[int, list[dict]] = {}
@@ -387,18 +396,29 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
         suggestion_count, len(forwarded_customers),
     )
 
+    return outer_nodes
+
+
+async def send_reminder_nodes(group_id: int, nodes: list[MessageSegment]) -> int:
+    response = await client.call_api("send_group_forward_msg", group_id=str(group_id), messages=nodes)
+    message_id = int(response["message_id"])
+    log.info("合并转发发送成功 -> 群 %d, message_id=%s", group_id, message_id)
+    return message_id
+
+
+async def send_nested_forward(
+    group_id: int, customer_list: list[tuple[int, CustomerData]], summary_text: str,
+    max_age_seconds: int | None = None,
+) -> int | None:
+    """摘要仅在转发外展示，返回已确认的合并转发消息 ID。"""
+    nodes = await build_reminder_nodes(group_id, customer_list, max_age_seconds)
+    if not nodes:
+        return None
     try:
-        response = await client.call_api(
-            "send_group_forward_msg",
-            group_id=str(group_id),
-            messages=outer_nodes,
-        )
-        message_id = int(response["message_id"])
+        return await send_reminder_nodes(group_id, nodes)
     except Exception as e:
         log.error("群 %d 合并转发未取得消息 ID，本次跳过贴表情: %s", group_id, e, exc_info=True)
         return None
-    log.info("合并转发发送成功 -> 群 %d, message_id=%s", group_id, message_id)
-    return message_id
 
 
 async def send_forward_from_message_ids(
@@ -521,19 +541,7 @@ def register_recallable_send(feedback_msg_id: int, customer_msg_id: int, custome
     }
 
 
-async def send_reminder_with_at(
-    group_id: int,
-    summary: str,
-    customer_list: list[tuple[int, CustomerData]],
-    max_age_seconds: int | None = None,
-    notice_type: str | None = None,
-    milestone: int | None = None,
-) -> int | None:
-    """
-    发送提醒：先尝试 @ 一位当前可用成员，再发送合并转发。
-    若无可用成员，则直接发送合并转发（无 @）。
-    notice_type 用于把本次通知作为 bot_notice 事件记入各客户的会话周期。
-    """
+async def mention_available_member(group_id: int, summary: str) -> None:
     available = get_current_available_members()
     if available:
         chosen = random.choice(available)
@@ -547,24 +555,41 @@ async def send_reminder_with_at(
         except Exception as e:
             log.error("发送 @ 提醒失败: %s", e, exc_info=True)
     else:
-        log.debug("当前无可用成员，直接发送合并转发")
+        log.debug("当前无可用成员，跳过 @ 提醒")
 
-    message_id = await send_nested_forward(group_id, customer_list, summary, max_age_seconds=max_age_seconds)
+
+async def register_reminder(
+    group_id: int, message_id: int, customer_list: list[tuple[int, CustomerData]],
+    summary: str, notice_type: str | None, milestone: int | None = None,
+) -> None:
+    track_forward_message(
+        message_id=message_id,
+        customer_ids=[qq for qq, _ in customer_list],
+        group_id=group_id,
+    )
+    asyncio.create_task(add_emoji_to_message(message_id, action_emoji_ids()))
+    if notice_type:
+        for qq, _data in customer_list:
+            try:
+                await history.record_bot_notice(
+                    qq, notice_type, milestone=milestone, group_msg_id=message_id, summary=summary,
+                )
+            except Exception as e:
+                log.error("记录客户 %d 的通知事件失败: %s", qq, e)
+
+
+async def send_reminder_with_at(
+    group_id: int,
+    summary: str,
+    customer_list: list[tuple[int, CustomerData]],
+    max_age_seconds: int | None = None,
+    notice_type: str | None = None,
+    milestone: int | None = None,
+) -> int | None:
+    await mention_available_member(group_id, summary)
+    message_id = await send_nested_forward(group_id, customer_list, summary, max_age_seconds)
     if message_id is not None:
-        track_forward_message(
-            message_id=message_id,
-            customer_ids=[qq for qq, _ in customer_list],
-            group_id=group_id,
-        )
-        asyncio.create_task(add_emoji_to_message(message_id, action_emoji_ids()))
-        if notice_type:
-            for qq, _data in customer_list:
-                try:
-                    await history.record_bot_notice(
-                        qq, notice_type, milestone=milestone, group_msg_id=message_id, summary=summary,
-                    )
-                except Exception as e:
-                    log.error("记录客户 %d 的通知事件失败: %s", qq, e)
+        await register_reminder(group_id, message_id, customer_list, summary, notice_type, milestone)
     return message_id
 
 
