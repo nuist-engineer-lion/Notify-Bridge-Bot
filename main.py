@@ -1,12 +1,13 @@
 import asyncio
-import logging
 import os
 import signal
 import sys
 
 from src import main as app
-from src.config import log
+from src.log_setup import get_logger
 from src.state import save_state
+
+log = get_logger("entrypoint")
 
 
 def _install_signal_handlers(loop: asyncio.AbstractEventLoop, stop_event: asyncio.Event) -> None:
@@ -62,8 +63,8 @@ async def run_app() -> None:
             await main_task
         except asyncio.CancelledError:
             pass
-        except Exception as e:
-            log.error("主任务退出异常: %s", e, exc_info=True)
+        except Exception:
+            log.exception("主任务退出异常")
 
     stop_task.cancel()
     try:
@@ -88,12 +89,12 @@ def main() -> None:
         asyncio.run(run_app())
     except KeyboardInterrupt:
         # 信号处理器未生效时的兜底：至少把状态落盘
-        logging.getLogger("Notify-Bridge-Bot").warning("强制中断，执行兜底状态保存...")
+        log.warning("强制中断，执行兜底状态保存...")
         try:
             save_state()
         except Exception:
-            pass
-        logging.getLogger("Notify-Bridge-Bot").info("程序已停止。")
+            log.exception("强制中断时保存状态失败")
+        log.info("程序已停止。")
         return
 
     if app.is_reboot_requested():

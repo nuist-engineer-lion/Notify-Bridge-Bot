@@ -1,7 +1,9 @@
 from datetime import datetime
 
 from . import config as cfg
-from .config import log
+from .log_setup import get_logger
+
+log = get_logger(__name__)
 
 
 def format_duration(seconds: float) -> str:

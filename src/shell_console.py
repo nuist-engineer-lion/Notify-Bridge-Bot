@@ -20,7 +20,7 @@ import time
 from nonebot.adapters.onebot.v11 import MessageSegment
 
 from . import config as cfg
-from .config import log
+from .log_setup import console_handler, get_logger
 from . import mute
 from .group_msg import (
     handle_bye_command,
@@ -30,12 +30,13 @@ from .group_msg import (
 )
 from .utils import format_duration
 
+log = get_logger(__name__)
+
 _PROMPT = "notifybot> "
 # 供日志 Handler 重绘：是否正在等待输入、当前已键入内容
 _reading = False
 _input_buffer = ""
 _log_handler: logging.Handler | None = None
-_installed_logger_names: list[str] = []
 # 关停时置位，使阻塞在 executor 中的 stdin 读取尽快返回
 _stop_stdin_read = threading.Event()
 # 终端防抖：独立内存字典，不写入 last_command_time（避免破坏 state 持久化键格式）
@@ -77,109 +78,42 @@ def _clear_current_line(stream) -> None:
 class ConsoleSafeLogHandler(logging.Handler):
     """日志输出时清行打印，并在控制台读入中重绘 prompt+缓冲，避免打断输入。"""
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.setFormatter(
-            logging.Formatter(
-                "%(asctime)s [%(levelname)s] %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
-            )
-        )
-
     def emit(self, record: logging.LogRecord) -> None:
         try:
             msg = self.format(record)
             stream = sys.stderr
-            _clear_current_line(stream)
+            redraw = _reading and stream.isatty() and sys.stdout.isatty()
+            if redraw:
+                _clear_current_line(stream)
             stream.write(msg + "\n")
-            if _reading:
+            if redraw:
                 stream.write(_PROMPT + _input_buffer)
             stream.flush()
         except Exception:
             self.handleError(record)
 
 
-def _is_terminal_stream_handler(h: logging.Handler) -> bool:
-    """是否为写向终端的 StreamHandler（FileHandler 等保留）。"""
-    if isinstance(h, logging.FileHandler):
-        return False
-    if isinstance(h, logging.StreamHandler):
-        stream = getattr(h, "stream", None)
-        if stream in (sys.stdout, sys.stderr):
-            return True
-        # basicConfig 默认挂 stderr；未识别 stream 的 StreamHandler 也视为控制台
-        if stream is None:
-            return True
-        # 常见：stream 是 sys.__stderr__
-        if stream is getattr(sys, "__stdout__", None) or stream is getattr(sys, "__stderr__", None):
-            return True
-    return False
-
-
-def _remove_console_handlers(logger: logging.Logger) -> None:
-    for h in list(logger.handlers):
-        if isinstance(h, ConsoleSafeLogHandler) or _is_terminal_stream_handler(h):
-            logger.removeHandler(h)
-
-
 def install_console_log_handler() -> None:
-    """
-    安装控制台安全日志 Handler。
-
-    只挂在 root 上一次；子 logger 默认 propagate 到 root，避免同一 Handler
-    在 root + 子 logger 各 emit 一次导致输出重复。
-    propagate=False 的 logger 单独挂同一 handler。
-    """
-    global _log_handler, _installed_logger_names
-    if _log_handler is not None:
-        return
-
-    handler = ConsoleSafeLogHandler()
+    """只替换应用启动时安装的 stderr 输出，保留宿主和第三方的日志设置。"""
+    global _log_handler
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
-
-    _remove_console_handlers(root)
+    if _log_handler is not None or console_handler not in root.handlers:
+        return
+    handler = ConsoleSafeLogHandler(console_handler.level)
+    handler.setFormatter(console_handler.formatter)
+    root.removeHandler(console_handler)
     root.addHandler(handler)
-
-    # 清理已创建 logger 上的控制台 StreamHandler / 重复的本 Handler
-    manager = root.manager
-    attached_non_propagating: list[str] = []
-    for name, lg in list(manager.loggerDict.items()):
-        if not isinstance(lg, logging.Logger):
-            continue
-        _remove_console_handlers(lg)
-        if not lg.propagate:
-            lg.addHandler(handler)
-            attached_non_propagating.append(name)
-
-    # 确保关键 logger 会冒泡到 root（不各自挂 handler）
-    for name in ("Notify-Bridge-Bot",):
-        lg = logging.getLogger(name)
-        _remove_console_handlers(lg)
-        lg.propagate = True
-
     _log_handler = handler
-    _installed_logger_names = ["root", *attached_non_propagating]
 
 
 def uninstall_console_log_handler() -> None:
-    global _log_handler, _installed_logger_names
-    if _log_handler is None:
-        return
-    root = logging.getLogger()
-    try:
+    global _log_handler
+    if _log_handler is not None:
+        root = logging.getLogger()
         root.removeHandler(_log_handler)
-    except Exception:
-        pass
-    manager = root.manager
-    for lg in manager.loggerDict.values():
-        if isinstance(lg, logging.Logger):
-            try:
-                lg.removeHandler(_log_handler)
-            except Exception:
-                pass
-    _log_handler = None
-    _installed_logger_names = []
+        root.addHandler(console_handler)
+        _log_handler.close()
+        _log_handler = None
 
 
 HELP_TEXT = """\
@@ -539,8 +473,8 @@ async def handle_shell_command(raw: str) -> bool:
         try:
             from . import main as app_main
             app_main.request_shutdown("console-quit")
-        except Exception as e:
-            log.error("触发关停失败: %s", e, exc_info=True)
+        except Exception:
+            log.exception("触发关停失败")
             _print("停止失败，请使用 Ctrl+C 重试。")
         return False
 
@@ -649,7 +583,6 @@ async def shell_console_loop() -> None:
     global _reading, _input_buffer
 
     _stop_stdin_read.clear()
-    install_console_log_handler()
 
     try:
         if sys.stdin is None or sys.stdin.closed:
@@ -660,10 +593,10 @@ async def shell_console_loop() -> None:
         return
 
     loop = asyncio.get_running_loop()
-    log.info("Shell 控制台已启动，Ctrl+C 或 quit 以停止")
-    _print("输入 help 查看命令。")
-
+    install_console_log_handler()
     try:
+        log.info("Shell 控制台已启动，Ctrl+C 或 quit 以停止")
+        _print("输入 help 查看命令。")
         while True:
             try:
                 line = await loop.run_in_executor(None, _read_line_sync)
@@ -689,9 +622,9 @@ async def shell_console_loop() -> None:
 
             try:
                 alive = await handle_shell_command(line)
-            except Exception as e:
+            except Exception:
                 # 已由日志 handler 输出（含 traceback），不再 _print 重复错误
-                log.error("控制台命令执行失败: %s", e, exc_info=True)
+                log.exception("控制台命令执行失败")
                 alive = True
 
             if not alive:
@@ -700,3 +633,4 @@ async def shell_console_loop() -> None:
         _reading = False
         _input_buffer = ""
         _stop_stdin_read.set()
+        uninstall_console_log_handler()

@@ -13,8 +13,10 @@ import time
 
 from . import storage
 from . import config as cfg
-from .config import log
+from .log_setup import get_logger
 from .messages import message_segments
+
+log = get_logger(__name__)
 
 
 def _failed_events_file() -> str:
@@ -69,8 +71,8 @@ async def _safe_record(
         if not inserted:
             log.debug("事件因 message_id 重复被跳过: session=%s type=%s mid=%s", session_id, event_type, message_id)
         return inserted
-    except Exception as e:
-        log.error("事件写入失败(已落盘兜底): session=%s type=%s err=%s", session_id, event_type, e, exc_info=True)
+    except Exception:
+        log.exception("会话事件写库失败，尝试写入兜底文件: session_id=%s event_type=%s", session_id, event_type)
         _dump_failed(event_type, {
             "session_id": session_id, "time": ts, "actor_uid": actor_uid,
             "message_id": message_id, "payload": payload,
@@ -114,8 +116,8 @@ async def ensure_session(uid: int) -> int | None:
             sid = await storage.open_session(uid, data["pending_since"])
             await _safe_record(sid, "session_open", time_=data["pending_since"], customer_uid=uid)
         data["session_id"] = sid
-    except Exception as e:
-        log.error("会话周期建立失败: uid=%s, err=%s", uid, e, exc_info=True)
+    except Exception:
+        log.exception("会话周期建立失败: uid=%s", uid)
         return None
     return sid
 
@@ -226,9 +228,8 @@ async def reconcile_session_history(
             parse_mult_msg=True,
         )
         msgs = resp.get("messages", []) or []
-    except Exception as e:
-        log.error("会话 %d 历史拉取失败（实时事件已在库中，跳过补录）: uid=%s, err=%s",
-                  session_id, uid, e, exc_info=True)
+    except Exception:
+        log.exception("会话 %d 历史拉取失败（实时事件已在库中，跳过补录）: uid=%s", session_id, uid)
 
     if msgs is not None:
         self_id = int(cfg.client.self_id)
@@ -274,8 +275,8 @@ async def reconcile_session_history(
     try:
         db_ids = await storage.get_session_message_ids(session_id)
         missing = [mid for mid in seen_msg_ids if mid not in pulled_ids and mid not in db_ids]
-    except Exception as e:
-        log.error("会话 %d 对账核对查询失败: %s", session_id, e, exc_info=True)
+    except Exception:
+        log.exception("会话 %d 对账核对查询失败", session_id)
 
     if missing:
         log.warning("会话 %d 对账发现 %d 条实时已见消息未入库且未拉取到: %s",
@@ -309,14 +310,14 @@ async def recover_sessions() -> None:
             else:
                 recovered += 1
             data["session_id"] = sid
-        except Exception as e:
-            log.error("恢复客户 %d 会话周期失败: %s", uid, e, exc_info=True)
+        except Exception:
+            log.exception("恢复客户 %d 会话周期失败", uid)
 
     queue_sids = {d["session_id"] for d in cfg.unreplied_customers.values() if d.get("session_id")}
     try:
         orphans = await storage.close_stale_open_sessions(queue_sids, time.time(), "restart_cleanup")
-    except Exception as e:
-        log.error("清理孤儿会话失败: %s", e, exc_info=True)
+    except Exception:
+        log.exception("清理孤儿会话失败")
         orphans = 0
 
     if recovered or created or orphans:
@@ -328,8 +329,8 @@ async def restore_reply_durations() -> None:
     from .config import reply_durations, REPLY_DURATION_MAXLEN
     try:
         durations = await storage.load_recent_durations(REPLY_DURATION_MAXLEN)
-    except Exception as e:
-        log.error("恢复回复耗时统计失败: %s", e, exc_info=True)
+    except Exception:
+        log.exception("恢复回复耗时统计失败")
         return
     reply_durations.extend(durations)
     if durations:

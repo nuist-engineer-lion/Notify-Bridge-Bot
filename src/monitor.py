@@ -6,8 +6,8 @@ from unicodedata import combining, east_asian_width
 from nonebot.adapters.onebot.v11 import MessageSegment
 
 from . import config as cfg
+from .log_setup import get_logger
 from .config import (
-    log,
     unreplied_customers,
     processed_friend_requests,
     friend_approve_time,
@@ -18,6 +18,8 @@ from .state import save_state
 from . import mute
 from . import storage
 from .watch_chart import build_watch_chart
+
+log = get_logger(__name__)
 
 
 async def _sample_group(group_id: int, day: str | None) -> tuple[storage.GroupDailyStats, set[int] | None] | None:
@@ -243,21 +245,21 @@ async def monitor_loop():
                     flushed = await mute.flush_delayed_notifications(reason="client_reconnect")
                     if flushed > 0:
                         log.info("客户端恢复后补发延后通知，涉及 %d 名客户", flushed)
-                except Exception as e:
-                    log.error("客户端恢复后补发延后通知失败: %s", e, exc_info=True)
+                except Exception:
+                    log.exception("客户端恢复后补发延后通知失败")
 
         # 检测明文配置是否被远端解密更新
         try:
             cfg.maybe_reload_config_from_disk()
-        except Exception as e:
-            log.error("巡检配置热重载异常: %s", e, exc_info=True)
+        except Exception:
+            log.exception("巡检配置热重载异常")
 
         # ===== 临时静音到期自动解除并汇总 =====
         try:
             if mute.expire_if_due():
                 await mute.flush_delayed_notifications(reason="expire")
-        except Exception as e:
-            log.error("静音到期处理失败: %s", e, exc_info=True)
+        except Exception:
+            log.exception("静音到期处理失败")
 
         # ===== 清理超时的监听消息 =====
         now = time.time()
@@ -284,8 +286,8 @@ async def monitor_loop():
                 removed = await storage.cleanup_expired(cfg.ARCHIVE_RETENTION_DAYS, now)
                 if removed:
                     log.info("已清理 %d 个超出保留期(%d天)的会话周期", removed, cfg.ARCHIVE_RETENTION_DAYS)
-            except Exception as e:
-                log.error("会话周期过期清理失败: %s", e, exc_info=True)
+            except Exception:
+                log.exception("会话周期过期清理失败")
             last_archive_cleanup = now
 
         # 清理过期好友申请缓存（经 cfg 读取，保证热重载后生效）

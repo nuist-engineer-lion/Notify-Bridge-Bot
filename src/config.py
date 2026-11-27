@@ -1,7 +1,6 @@
 import asyncio
 import time
 import json
-import logging
 import math
 import os
 import subprocess
@@ -14,40 +13,14 @@ from typing import Any
 import yaml
 
 from nonebot.adapters.onebot.v11 import MessageSegment
-from nonebot.log import default_filter, logger as nonebot_logger, logger_id as nonebot_logger_id
 
 from .models import CustomerData, ForwardMonitorData, DelayedNotification, RecallableSendData
 from .onebot import OneBotClient
 
-# ================= 日志配置 =================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-log = logging.getLogger("Notify-Bridge-Bot")
+from .log_setup import configure_logging, get_logger, project_logger
 
-
-def _forward_nonebot_log(message) -> None:
-    """将 NoneBot 日志交给项目 logging，统一格式和异常输出。"""
-    record = message.record
-    exception = record["exception"]
-    log.log(
-        record["level"].no,
-        record["message"],
-        exc_info=(exception.type, exception.value, exception.traceback) if exception else None,
-    )
-
-
-nonebot_logger.remove(nonebot_logger_id)
-nonebot_logger.add(
-    _forward_nonebot_log,
-    level=0,
-    filter=default_filter,
-    format="{message}",
-    backtrace=False,
-    diagnose=False,
-)
+log = get_logger(__name__)
+configure_logging()
 
 # ================= 加载配置 =================
 CONFIG_PATH = "config.yaml"
@@ -68,7 +41,12 @@ def _normalize_availability(raw_availability: dict[Any, Any]) -> dict[int, dict[
 
 def load_config(path: str = CONFIG_PATH):
     with open(path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+        try:
+            cfg = yaml.safe_load(f)
+        except yaml.MarkedYAMLError as e:
+            mark = e.problem_mark
+            location = f"（第 {mark.line + 1} 行，第 {mark.column + 1} 列）" if mark else ""
+            raise ValueError(f"配置文件 YAML 格式错误{location}") from None
     if not isinstance(cfg, dict):
         raise ValueError("config.yaml must contain a top-level mapping")
     # 转换 availability 中的时段列表为元组
@@ -225,6 +203,9 @@ def _parse_group_ids(value: Any, key: str) -> tuple[int, ...]:
 def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
     """完整构造候选配置后统一生效，任何解析失败都保留当前运行状态。"""
     applied_config = dict(new_config)
+    level = applied_config.get("log_level", "INFO")
+    if not isinstance(level, str) or level.upper() not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        raise ValueError("log_level 必须为 DEBUG、INFO、WARNING、ERROR 或 CRITICAL")
     friend_notification_enabled = applied_config.get("friend_notification_enabled", True)
     if not isinstance(friend_notification_enabled, bool):
         raise ValueError("friend_notification_enabled 必须为布尔值 true 或 false")
@@ -364,6 +345,7 @@ def _apply_config(new_config: dict[str, Any], *, initial: bool) -> list[str]:
 
     # 无 await：验证全部通过后一次性发布，失败路径不需要回滚。
     globals().update(snapshot)
+    project_logger.setLevel(level.upper())
 
     return restart_only_changes
 
@@ -386,7 +368,7 @@ def reload_config_if_changed(path: str = CONFIG_PATH) -> bool:
         restart_only_changes = reload_config(path)
     except Exception as e:
         if _failed_config_mtime != current_mtime:
-            log.error("配置重载失败，继续沿用旧配置: %s", e, exc_info=True)
+            log.error("配置重载失败，继续沿用旧配置: source=mtime_watch error=%s", type(e).__name__)
             _failed_config_mtime = current_mtime
         write_reload_status(ok=False, source="mtime_watch", error=str(e))
         return False
@@ -501,7 +483,7 @@ def force_reload_config(path: str = CONFIG_PATH, *, source: str = "manual") -> t
     except Exception as e:
         _failed_config_mtime = current_mtime
         err = str(e)
-        log.error("配置重载失败，继续沿用旧配置: %s", e, exc_info=True)
+        log.error("配置重载失败，继续沿用旧配置: source=%s error=%s", source, type(e).__name__)
         write_reload_status(ok=False, source=source, error=err)
         return False, [], err
 
@@ -585,16 +567,16 @@ def _apply_remote_config() -> tuple[bool, str]:
             message = f"❌ 远程配置更新失败：{stage} 超时（{timeout} 秒），后续步骤已停止"
             if detail:
                 message += f"\n{detail}"
-            log.error("%s", message)
+            log.error("远程配置更新超时: stage=%s timeout=%ds", stage, timeout)
             return False, message
         except OSError as exc:
             message = f"❌ 远程配置更新失败：无法执行 {stage}，后续步骤已停止\n{exc}"
-            log.error("%s", message)
+            log.error("远程配置更新无法执行: stage=%s errno=%s", stage, exc.errno)
             return False, message
         if result.returncode:
             detail = _command_feedback(result.stdout, result.stderr) or "命令未输出错误详情"
             message = f"❌ 远程配置更新失败：{stage} 退出码 {result.returncode}，后续步骤已停止\n{detail}"
-            log.error("%s", message)
+            log.error("远程配置更新失败: stage=%s exit_code=%s", stage, result.returncode)
             return False, message
         log.info("远程配置更新：%s 完成", stage)
 

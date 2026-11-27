@@ -1,31 +1,16 @@
 import time
-from collections.abc import Iterable
 
-from nonebot.adapters.onebot.v11 import MessageSegment
 from nonebot.adapters.onebot.v11.event import PokeNotifyEvent
 
 from .onebot import PrivateMessageEvent
 from . import config as cfg
-from .config import log
+from .log_setup import get_logger
 from .state import save_state
 from .message_sender import close_session
 from .customer_profiles import cache as customer_profiles
 from . import history, storage
 
-
-def extract_message_text(segments: Iterable[MessageSegment]) -> str:
-    """
-    从消息段可迭代对象中提取纯文本，用于日志记录。
-    只提取 Text 段中的文本，忽略其他类型。
-    """
-    texts: list[str] = []
-    for seg in segments:
-        if seg.type == "text":
-            texts.append(seg.data["text"])
-    full = ''.join(texts).strip()
-    if len(full) > 100:
-        full = full[:100] + '…'
-    return full or '<无文本内容>'
+log = get_logger(__name__)
 
 
 async def _is_duplicate_message(uid: int, message_id: int) -> bool:
@@ -62,7 +47,6 @@ async def handle_private_msg(event: PrivateMessageEvent) -> bool:
     customer_profiles.observe(uid, nickname, observed_at=float(event.time))
 
     if uid not in cfg.unreplied_customers:
-        msg_text = extract_message_text(event.message)
         cfg.unreplied_customers[uid] = {
             "last_active": now,
             "msg_ids": [event.message_id],
@@ -71,8 +55,8 @@ async def handle_private_msg(event: PrivateMessageEvent) -> bool:
             "pending_since": now,
             "session_id": None,
         }
-        log.info("新增客户 %d 进入待回复队列 (msg_id=%s, 内容: %s)。当前队列长度: %d",
-                 uid, event.message_id, msg_text, len(cfg.unreplied_customers))
+        log.info("新增客户 %d 进入待回复队列 (message_id=%s)。当前队列长度: %d",
+                 uid, event.message_id, len(cfg.unreplied_customers))
     else:
         cfg.unreplied_customers[uid]["last_active"] = now
         cfg.unreplied_customers[uid]["msg_ids"].append(event.message_id)

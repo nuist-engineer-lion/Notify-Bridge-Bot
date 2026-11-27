@@ -14,10 +14,12 @@ import time
 from nonebot.adapters.onebot.v11.exception import ActionFailed
 
 from . import config as cfg
-from .config import log
+from .log_setup import get_logger
 from .models import CustomerData, DelayedNotification
 from .state import save_state
 from .utils import format_duration, is_night_time
+
+log = get_logger(__name__)
 
 # 不限时静音哨兵值
 MUTE_UNLIMITED = -1.0
@@ -241,8 +243,8 @@ async def _flush_delayed_notifications(
     group_id = cfg.INTERNAL_GROUP_ID
     try:
         nodes = await build_reminder_nodes(group_id, customers_list, max_age_seconds)
-    except Exception as e:
-        log.error("延后通知构造失败 (reason=%s): %s", reason, e, exc_info=True)
+    except Exception:
+        log.exception("延后通知构造失败 (reason=%s)", reason)
         return 0
     if not nodes or not cfg.client.is_running or is_muted():
         return 0
@@ -263,10 +265,11 @@ async def _flush_delayed_notifications(
         for notif in newly_marked:
             notif.pop("forward_unconfirmed", None)
         save_state()
-        log.warning("协议端拒绝延后转发 (reason=%s): %s", reason, e)
+        log.warning("协议端拒绝延后转发，保留队列: group_id=%d reason=%s retcode=%s", group_id, reason, e.info.get("retcode"))
         return 0
     except Exception as e:
-        log.warning("延后转发回执未确认，保留队列。请核对群记录，需要补发时执行 unmute: %s", e)
+        log.warning("延后转发回执未确认，自动重发已暂停。请核对群记录，需要补发时执行 unmute: group_id=%d reason=%s error=%s",
+                    group_id, reason, type(e).__name__)
         return 0
 
     consume_snapshot()

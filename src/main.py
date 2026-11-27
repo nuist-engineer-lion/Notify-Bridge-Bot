@@ -14,7 +14,7 @@ from .onebot import (
 )
 
 from . import config as cfg
-from .config import log
+from .log_setup import get_logger
 from .state import load_state, save_state
 from .monitor import monitor_loop, send_startup_headcount_report
 from .private_msg import handle_private_msg, handle_sent_msg, handle_friend_poke
@@ -25,6 +25,8 @@ from .shell_console import shell_console_loop
 from . import storage
 from . import history
 from .customer_profiles import cache as customer_profiles
+
+log = get_logger(__name__)
 
 # 后台任务句柄，优雅关停时统一取消
 _background_tasks: list[asyncio.Task] = []
@@ -117,19 +119,10 @@ async def graceful_shutdown(reason: str = "signal") -> None:
         log.info("正在取消 %d 个后台任务...", len(tasks))
         for t in tasks:
             t.cancel()
-        done, pending = await asyncio.wait(tasks, timeout=5.0)
+        _, pending = await asyncio.wait(tasks, timeout=5.0)
         for t in pending:
             name = t.get_name() if hasattr(t, "get_name") else repr(t)
             log.warning("后台任务未在 5 秒内结束: %s", name)
-        for t in done:
-            if t.cancelled():
-                continue
-            try:
-                exc = t.exception()
-            except asyncio.CancelledError:
-                continue
-            if exc is not None:
-                log.debug("后台任务结束时异常: %s", exc)
 
     await customer_profiles.close()
 
@@ -139,16 +132,22 @@ async def graceful_shutdown(reason: str = "signal") -> None:
         log.warning("关闭 OneBot 客户端时出错: %s", e)
 
     try:
-        save_state()
-        log.info("运行状态已保存: %s", cfg.STATE_FILE)
-    except Exception as e:
-        log.error("关停时保存状态失败: %s", e, exc_info=True)
+        if save_state():
+            log.info("运行状态已保存: %s", cfg.STATE_FILE)
+    except Exception:
+        log.exception("关停时保存状态失败")
 
     log.info("===== 关停完成 =====")
 
 
+def _report_background_error(task: asyncio.Task) -> None:
+    if not task.cancelled() and (error := task.exception()) is not None:
+        log.error("后台任务异常退出: task=%s", task.get_name(), exc_info=error)
+
+
 def _register_background_task(coro, name: str) -> asyncio.Task:
     task = asyncio.create_task(coro, name=name)
+    task.add_done_callback(_report_background_error)
     _background_tasks.append(task)
     return task
 
@@ -212,15 +211,15 @@ async def _bot_event_loop() -> None:
                 log.info("事件循环已取消（关停）")
                 break
             raise
-        except Exception as e:
+        except Exception:
             if _shutdown_requested:
                 break
-            log.error("事件循环异常: %s", e, exc_info=True)
+            log.exception("事件循环异常")
             await asyncio.sleep(5)
 
 
 async def main():
-    log.info("程序启动, WS_URL=%s, 通知群=%d, 白名单=%s", cfg.WS_URL, cfg.INTERNAL_GROUP_ID, cfg.WHITELIST)
+    log.info("程序启动: group_id=%d whitelist_count=%d", cfg.INTERNAL_GROUP_ID, len(cfg.WHITELIST))
     log.info("里程碑阈值(分钟): %s", cfg.MILESTONES)
 
     load_state()
@@ -230,8 +229,8 @@ async def main():
         await storage.init_db()
         await history.recover_sessions()
         await history.restore_reply_durations()
-    except Exception as e:
-        log.error("会话库初始化/恢复失败: %s", e, exc_info=True)
+    except Exception:
+        log.exception("会话库初始化/恢复失败")
 
     _register_background_task(monitor_loop(), "monitor-loop")
     # 冲刷上次运行中发送失败的通知 PR ack（已落盘队列）

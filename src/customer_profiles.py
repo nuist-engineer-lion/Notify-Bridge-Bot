@@ -6,7 +6,10 @@ from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from .log_setup import get_logger
 from . import config as cfg
+
+log = get_logger(__name__)
 
 
 @dataclass
@@ -114,7 +117,7 @@ class CustomerProfileCache:
                 entry.refresh_after = time.monotonic() + self._ttl
         except Exception as e:
             entry.refresh_after = time.monotonic() + self._retry_delay
-            cfg.log.warning(
+            log.warning(
                 "后台获取客户 %d 资料失败，%.0f 秒后可重试，继续使用缓存: %s",
                 user_id, self._retry_delay, e,
             )

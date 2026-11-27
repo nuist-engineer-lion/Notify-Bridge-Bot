@@ -6,7 +6,6 @@
 
 import asyncio
 import json
-import logging
 import sqlite3
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -27,9 +26,10 @@ from nonebot.drivers.aiohttp import Driver
 from nonebot.internal.driver import Timeout
 from pydantic import Field
 
+from .log_setup import get_logger
 from .messages import message_segments
 
-log = logging.getLogger("Notify-Bridge-Bot")
+log = get_logger(__name__)
 
 # 协议字段核对基线（2026-10-31）：
 # SnowLuma/SnowLuma v2.2.1 @8ffd314260e9e2b6967eeca494d87aa5be046c34，已实测；
@@ -199,8 +199,8 @@ class _BridgeAdapter(Adapter):
         )
         try:
             self.owner._receive(json_data)
-        except (TypeError, ValueError, KeyError):
-            log.warning("忽略无法解析的 OneBot 事件", exc_info=True)
+        except (TypeError, ValueError, KeyError) as e:
+            log.warning("忽略无法入队的 OneBot 事件: error=%s", type(e).__name__)
         return event if isinstance(event, LifecycleMetaEvent) else None
 
     def bot_connect(self, bot):
@@ -290,8 +290,8 @@ class OneBotClient:
                     break
                 try:
                     event = self._parse_event(raw)
-                except (TypeError, ValueError, KeyError):
-                    log.warning("忽略无法解析的 OneBot 事件", exc_info=True)
+                except (TypeError, ValueError, KeyError) as e:
+                    log.warning("忽略无法解析的 OneBot 事件: error=%s", type(e).__name__)
                     continue
                 if event is not None:
                     yield event

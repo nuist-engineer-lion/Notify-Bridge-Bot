@@ -4,12 +4,13 @@ import random
 import statistics
 
 from nonebot.adapters.onebot.v11 import MessageSegment
+from nonebot.adapters.onebot.v11.exception import ActionFailed, NetworkError
 
 from . import config as cfg
 from . import ai
 from .customer_profiles import cache as customer_profiles
+from .log_setup import get_logger
 from .config import (
-    log,
     STARTED_AT,
     monitored_forward_order,
     last_command_time,
@@ -21,6 +22,8 @@ from .utils import format_duration, get_current_available_members
 from .state import save_state
 from . import history
 from . import mute
+
+log = get_logger(__name__)
 
 
 # ======================= 历史消息获取 =======================
@@ -64,8 +67,8 @@ async def get_recent_message_ids(
         log.debug("客户 %d 历史消息: 获取到 %d 条，过滤后 %d 条（%d 秒内）",
                   user_id, len(messages), len(msg_ids), max_age_seconds)
         return msg_ids
-    except Exception as e:
-        log.error("获取客户 %d 历史消息失败: %s", user_id, e, exc_info=True)
+    except Exception:
+        log.exception("获取客户 %d 历史消息失败", user_id)
         return []
 
 
@@ -402,7 +405,7 @@ async def build_reminder_nodes(
 async def send_reminder_nodes(group_id: int, nodes: list[MessageSegment]) -> int:
     response = await client.call_api("send_group_forward_msg", group_id=str(group_id), messages=nodes)
     message_id = int(response["message_id"])
-    log.info("合并转发发送成功 -> 群 %d, message_id=%s", group_id, message_id)
+    log.info("收到合并转发回执: group_id=%d message_id=%d", group_id, message_id)
     return message_id
 
 
@@ -416,8 +419,14 @@ async def send_nested_forward(
         return None
     try:
         return await send_reminder_nodes(group_id, nodes)
-    except Exception as e:
-        log.error("群 %d 合并转发未取得消息 ID，本次跳过贴表情: %s", group_id, e, exc_info=True)
+    except (NetworkError, TimeoutError) as e:
+        log.warning("合并转发回执未确认，跳过贴表情: group_id=%d error=%s", group_id, e)
+        return None
+    except ActionFailed as e:
+        log.error("协议端拒绝合并转发: group_id=%d retcode=%s", group_id, e.info.get("retcode"))
+        return None
+    except Exception:
+        log.exception("合并转发未取得消息 ID，跳过贴表情: group_id=%d", group_id)
         return None
 
 
@@ -457,8 +466,8 @@ async def send_forward_from_message_ids(
             messages=outer_nodes,
         )
         return int(response["message_id"])
-    except Exception as e:
-        log.error("发送合并转发失败: %s", e, exc_info=True)
+    except Exception:
+        log.exception("发送合并转发失败")
         return None
 
 
@@ -469,7 +478,7 @@ async def add_emoji_to_message(message_id: int, emoji_ids: list[int]) -> None:
             await client.call_api(
                 "set_msg_emoji_like", message_id=str(message_id), emoji_id=str(emoji_id), set=True,
             )
-            log.debug("已为消息 %s 添加表情 %s", message_id, emoji_id)
+            log.debug("已添加表情: message_id=%s emoji_id=%s", message_id, emoji_id)
         except Exception as e:
             log.error("添加表情失败: message_id=%s, emoji_id=%s, err=%s", message_id, emoji_id, e)
 
@@ -482,7 +491,7 @@ async def remove_emoji_from_message(message_id: int, emoji_ids: list[int]) -> No
                 "set_msg_emoji_like",
                 message_id=str(message_id), emoji_id=str(emoji_id), set=False,
             )
-            log.debug("已为消息 %s 移除表情 %s", message_id, emoji_id)
+            log.debug("已移除表情: message_id=%s emoji_id=%s", message_id, emoji_id)
         except Exception as e:
             log.error("移除表情失败: message_id=%s, emoji_id=%s, err=%s", message_id, emoji_id, e)
 
@@ -552,8 +561,8 @@ async def mention_available_member(group_id: int, summary: str) -> None:
         try:
             await client.call_api("send_group_msg", group_id=str(group_id), message=at_msg)
             log.info("已发送 @%d 提醒: %s", chosen, summary)
-        except Exception as e:
-            log.error("发送 @ 提醒失败: %s", e, exc_info=True)
+        except Exception:
+            log.exception("发送 @ 提醒失败")
     else:
         log.debug("当前无可用成员，跳过 @ 提醒")
 
@@ -644,8 +653,8 @@ async def close_session(user_id: int, send_closing: bool = False, close_reason: 
                     user_id, int(mid) if mid is not None else None,
                     "closing_message", cfg.CLOSING_MESSAGE, session_id=session_id,
                 )
-        except Exception as e:
-            log.error("自动发送结束语失败: user_id=%s, err=%s", user_id, e, exc_info=True)
+        except Exception:
+            log.exception("自动发送结束语失败: user_id=%s", user_id)
             if session_id:
                 await history.record_bot_send(
                     user_id, None, "closing_message", cfg.CLOSING_MESSAGE, ok=False, session_id=session_id,
@@ -654,8 +663,8 @@ async def close_session(user_id: int, send_closing: bool = False, close_reason: 
     if session_id:
         try:
             await history.close_session_record(session_id, user_id, pending, now, close_reason, data["msg_ids"])
-        except Exception as e:
-            log.error("关闭会话周期失败: session=%s, err=%s", session_id, e, exc_info=True)
+        except Exception:
+            log.exception("关闭会话周期失败: session=%s", session_id)
 
     save_state()
     await mark_completed_say_emoji(user_id)
@@ -702,5 +711,5 @@ async def send_status_panel(group_id: int):
             message=panel,
         )
         log.debug("状态面板已发送至群 %d", group_id)
-    except Exception as e:
-        log.error("发送状态面板失败: %s", e, exc_info=True)
+    except Exception:
+        log.exception("发送状态面板失败")

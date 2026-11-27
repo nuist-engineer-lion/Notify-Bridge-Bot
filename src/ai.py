@@ -19,8 +19,10 @@ from typing import Any
 import aiohttp
 
 from . import config as cfg
-from .config import log
+from .log_setup import get_logger
 from .messages import message_segments
+
+log = get_logger(__name__)
 
 _SYSTEM_PROMPT = (
     "你是一家维修客服的助手。请根据以下客服与客户的最近对话，以客服身份草拟下一条发给客户的回复。"
@@ -216,27 +218,27 @@ async def _download_image_as_data_url(url: str, *, timeout: float) -> str | None
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
-                    log.warning("AI建议: 图片下载 HTTP %s: %s", resp.status, url[:120])
+                    log.warning("AI建议: 图片下载失败: status=%d", resp.status)
                     return None
                 chunks: list[bytes] = []
                 total = 0
                 async for chunk in resp.content.iter_chunked(_IMAGE_DOWNLOAD_CHUNK):
                     total += len(chunk)
                     if total > _MAX_IMAGE_BYTES:
-                        log.warning("AI建议: 图片超过 %d 字节，跳过: %s", _MAX_IMAGE_BYTES, url[:120])
+                        log.warning("AI建议: 图片超过 %d 字节，跳过", _MAX_IMAGE_BYTES)
                         return None
                     chunks.append(chunk)
                 data = b"".join(chunks)
                 mime = _sniff_image_mime(data, resp.headers.get("Content-Type"))
                 if not mime:
-                    log.warning("AI建议: 无法识别图片格式，跳过: %s", url[:120])
+                    log.warning("AI建议: 无法识别图片格式，跳过")
                     return None
                 return _to_data_url(data, mime)
     except asyncio.TimeoutError:
-        log.warning("AI建议: 图片下载超时，跳过: %s", url[:120])
+        log.warning("AI建议: 图片下载超时，跳过")
         return None
     except Exception as e:
-        log.warning("AI建议: 图片下载失败，跳过: %s (%s)", url[:120], e)
+        log.warning("AI建议: 图片下载失败，跳过: error=%s", type(e).__name__)
         return None
 
 
@@ -249,9 +251,9 @@ async def resolve_images_to_data_urls(urls: list[str], *, timeout: float) -> lis
         return_exceptions=True,
     )
     ready: list[str] = []
-    for u, result in zip(urls, results):
+    for result in results:
         if isinstance(result, BaseException):
-            log.warning("AI建议: 图片处理异常，跳过: %s (%s)", u[:120], result)
+            log.warning("AI建议: 图片处理异常，跳过: error=%s", type(result).__name__)
             continue
         if result:
             ready.append(result)
@@ -288,16 +290,14 @@ async def _call_llm(
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(url, json=payload, headers=headers) as resp:
             if resp.status != 200:
-                body = await resp.text()
-                img_note = f", images={len(image_urls)}" if image_urls else ""
-                log.warning("AI建议: LLM 接口返回 %s%s: %s", resp.status, img_note, body[:200])
+                log.warning("AI建议: 模型请求失败: status=%d images=%d", resp.status, len(image_urls))
                 return None
             data = await resp.json()
     try:
         content = data["choices"][0]["message"]["content"]
         return str(content).strip() or None
     except (KeyError, IndexError, TypeError):
-        log.warning("AI建议: LLM 响应格式异常: %s", str(data)[:200])
+        log.warning("AI建议: LLM 响应缺少可用的消息内容")
         return None
 
 
@@ -350,7 +350,7 @@ async def generate_reply_suggestion(uid: int, messages: list[dict]) -> str | Non
                 log.warning("AI建议: 客户 %d 含图片请求超时，回退纯文本重试", uid)
                 suggestion = None
             except Exception as e:
-                log.warning("AI建议: 客户 %d 含图片请求失败，回退纯文本重试: %s", uid, e)
+                log.warning("AI建议: 客户 %d 含图片请求失败，回退纯文本重试: error=%s", uid, type(e).__name__)
                 suggestion = None
             else:
                 if not suggestion:
@@ -369,7 +369,7 @@ async def generate_reply_suggestion(uid: int, messages: list[dict]) -> str | Non
         log.warning("AI建议: 为客户 %d 生成建议超时（%s 秒），跳过", uid, timeout)
         return None
     except Exception as e:
-        log.warning("AI建议: 为客户 %d 生成建议失败: %s", uid, e)
+        log.warning("AI建议: 为客户 %d 生成建议失败: error=%s", uid, type(e).__name__)
         return None
 
     if not suggestion:
@@ -384,7 +384,7 @@ async def suggest_for_customers(messages_by_customer: dict[int, list[dict]]) -> 
     if total == 0:
         return {}
     if not is_enabled():
-        log.info("AI建议未启用，跳过 %d 名客户", total)
+        log.debug("AI建议未启用，跳过 %d 名客户", total)
         return {}
     s = _settings()
     log.info(
@@ -401,7 +401,7 @@ async def suggest_for_customers(messages_by_customer: dict[int, list[dict]]) -> 
     suggestions: dict[int, str] = {}
     for qq, result in zip(messages_by_customer, results):
         if isinstance(result, BaseException):
-            log.warning("AI建议: 客户 %d 生成异常: %s", qq, result)
+            log.warning("AI建议: 客户 %d 生成异常: error=%s", qq, type(result).__name__)
             continue
         if result:
             suggestions[qq] = result

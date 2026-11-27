@@ -5,8 +5,8 @@ import time
 from typing import cast
 
 from . import config as cfg
+from .log_setup import get_logger
 from .config import (
-    log,
     unreplied_customers,
     monitored_forward_order,
     last_command_time,
@@ -19,6 +19,8 @@ from .models import (
     StateDelayedNotification,
     AppState,
 )
+
+log = get_logger(__name__)
 
 
 def _serialize_customer(data: CustomerData) -> StateCustomerData:
@@ -106,8 +108,8 @@ def save_state() -> bool:
         temp_path = None
         log.debug("状态已保存至 %s", cfg.STATE_FILE)
         return True
-    except Exception as e:
-        log.error("状态保存失败: %s", e, exc_info=True)
+    except Exception:
+        log.exception("状态保存失败")
         return False
     finally:
         if temp_path is not None:
@@ -128,8 +130,8 @@ def load_state() -> None:
             raw = json.load(f)
         # 使用 TypedDict 进行类型断言
         state = cast(AppState, raw)
-    except Exception as e:
-        log.error("状态文件读取失败: %s", e, exc_info=True)
+    except Exception:
+        log.exception("状态文件读取失败")
         return
 
     # 恢复 unreplied_customers（旧版状态文件无 session_id 字段，恢复后由 history.recover_sessions 补建）

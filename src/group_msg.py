@@ -11,7 +11,7 @@ from nonebot.adapters.onebot.v11.event import PokeNotifyEvent
 from .onebot import GroupMsgEmojiLikeEvent, GroupMessageEvent
 
 from . import config as cfg
-from .config import log
+from .log_setup import get_logger
 from .utils import format_duration
 from . import mute
 from .message_sender import (
@@ -29,6 +29,8 @@ from .message_sender import (
 from . import history, storage
 from .notice_pr import handle_notice_command
 from .watch_chart import build_watch_chart
+
+log = get_logger(__name__)
 
 # 运维类命令（无需引用机器人消息）
 OPS_COMMAND_PREFIXES = ('.say', '.bye', '.more', '.help', '.close', '.list', '.reload', '.update', '.reboot', '.mute', '.unmute', '.status')
@@ -378,8 +380,8 @@ async def send_private_and_close(
             recall_hint=via != "shell",
         )
         return feedback, closed, customer_msg_id
-    except Exception as e:
-        log.error("发送私聊消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
+    except Exception:
+        log.exception("发送私聊消息失败: customer=%s", customer_id)
         return "❌ 发送失败，请稍后重试。", False, customer_msg_id
 
 
@@ -487,8 +489,8 @@ async def handle_bye_command(
         )
         closed = await close_session(customer_id, send_closing=False, close_reason="bye")
         return f"✅ 已向客户 {customer_id} 发送结束语。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
-    except Exception as e:
-        log.error("发送结束语失败: customer=%s, err=%s", customer_id, e, exc_info=True)
+    except Exception:
+        log.exception("发送结束语失败: customer=%s", customer_id)
         return "❌ 发送失败，请稍后重试。"
 
 
@@ -507,8 +509,8 @@ async def handle_close_command(
         )
         closed = await close_session(customer_id, send_closing=False, close_reason="close")
         return f"✅ 已关闭客户 {customer_id} 的会话（未发送结束语）。" + ("（客户已在待回复队列）" if closed else "（客户不在待回复队列）")
-    except Exception as e:
-        log.error("关闭会话失败: customer=%s, err=%s", customer_id, e, exc_info=True)
+    except Exception:
+        log.exception("关闭会话失败: customer=%s", customer_id)
         return "❌ 关闭失败，请稍后重试。"
 
 
@@ -551,8 +553,8 @@ async def handle_more_command(
         if new_fwd_id:
             return True, None, new_fwd_id
         return False, "❌ 历史消息发送失败，请稍后重试。", None
-    except Exception as e:
-        log.error("获取历史消息失败: customer=%s, err=%s", customer_id, e, exc_info=True)
+    except Exception:
+        log.exception("获取历史消息失败: customer=%s", customer_id)
         return False, "❌ 获取历史消息失败，请稍后重试。", None
 
 
@@ -578,9 +580,8 @@ async def handle_recall_click(gid: int, mid: int, user_id: int) -> bool:
 
     try:
         await cfg.client.call_api("delete_msg", message_id=str(data["customer_msg_id"]))
-    except Exception as e:
-        log.error("撤回私聊消息失败: customer=%s, msg_id=%s, err=%s",
-                  customer_id, data["customer_msg_id"], e, exc_info=True)
+    except Exception:
+        log.exception("撤回私聊消息失败: customer=%s, msg_id=%s", customer_id, data["customer_msg_id"])
         # 仍在时限内则恢复记录，允许重试
         if time.time() - data["sent_at"] <= cfg.RECALL_WINDOW_SECONDS:
             cfg.recallable_sends[mid] = data
@@ -622,9 +623,9 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
     if gid != cfg.INTERNAL_GROUP_ID:
         return False
 
-    log.info(
-        "内部群贴表情: group=%d, user=%d, message_id=%d, action=%s, likes=%s",
-        gid, event.user_id, mid, "add" if event.is_add else "remove", event.likes,
+    log.debug(
+        "内部群表情上报: group_id=%d user_id=%d message_id=%d action=%s count=%d",
+        gid, event.user_id, mid, "add" if event.is_add else "remove", len(event.likes),
     )
 
     if event.user_id == cfg.client.self_id:
@@ -697,7 +698,7 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
             if feedback:
                 await send_and_track_feedback(gid, mid, feedback, customer_id)
         except Exception:
-            pass
+            log.exception("表情操作失败: command=more group_id=%d message_id=%d", gid, mid)
         return True
 
     # say / bye / close：作用域 = 转发内全部客户
@@ -759,7 +760,7 @@ async def handle_group_emoji(event: GroupMsgEmojiLikeEvent) -> bool:
                     message=[MessageSegment.reply(str(mid)), MessageSegment.text(summary)],
                 )
     except Exception:
-        pass
+        log.exception("表情操作失败: command=%s group_id=%d message_id=%d", cmd, gid, mid)
     return True
 
 
@@ -1041,7 +1042,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
             cmd_parts.append(seg.data["text"])
 
     cmd_text = ''.join(cmd_parts).strip()
-    log.debug("群命令: reply_id=%s, cmd=%s", reply_id, cmd_text)
+    log.debug("处理群消息: group_id=%d message_id=%d reply_id=%s", gid, msg_id, reply_id)
 
     command, *watch_args = cmd_text.split() or [""]
     if command == ".watch":
@@ -1296,8 +1297,8 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
                 track_forward_message(feedback_msg_id, [], gid)
             cfg.last_command_time[key] = now
             log.info(".list 命令执行成功，返回 %d 名客户", len(customer_ids))
-        except Exception as e:
-            log.error("发送 .list 结果失败: %s", e, exc_info=True)
+        except Exception:
+            log.exception("发送 .list 结果失败")
         return True
 
     elif cmd_text.startswith(".reboot"):
@@ -1327,7 +1328,7 @@ async def handle_group_command(event: GroupMessageEvent) -> bool:
         else:
             arg = raw[len("update"):].strip()
             cmd_name = ".update"
-        log.info("%s: user=%s group=%s arg=%s", cmd_name, event.user_id, gid, arg)
+        log.info("收到配置命令: command=%s user_id=%s group_id=%s remote=%s", cmd_name, event.user_id, gid, arg == "remote")
         # .reload / .update 可不带参数；cfg 为兼容旧写法
         if arg not in ("", "cfg", "remote"):
             await cfg.client.call_api(

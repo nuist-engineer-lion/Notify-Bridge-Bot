@@ -21,8 +21,10 @@ import jwt
 from .onebot import GroupMessageEvent
 
 from . import config as cfg
-from .config import log
+from .log_setup import get_logger
 from .notice_images import prepare_notice_content
+
+log = get_logger(__name__)
 
 GITHUB_API = "https://api.github.com"
 # 国内业务按东八区取通知日期
@@ -187,7 +189,7 @@ async def _delete_branch(session: aiohttp.ClientSession, repo: str, token: str, 
         if status == 204:
             log.info("已清理未完成 PR 的分支 %s", branch)
         else:
-            log.warning("清理分支 %s 失败: HTTP %s %s", branch, status, resp)
+            log.warning("清理分支 %s 失败: HTTP %s", branch, status)
     except Exception as e:
         log.warning("清理分支 %s 异常: %s", branch, e)
 
@@ -269,7 +271,7 @@ async def _create_installation_token(gh: dict[str, Any]) -> str | None:
                 encoded,
             )
             if status != 201:
-                log.error("获取 installation token 失败: HTTP %s %s", status, resp)
+                log.error("获取 installation token 失败: HTTP %s", status)
                 return None
             return resp.get("token")
     except Exception as e:
@@ -369,7 +371,7 @@ async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
             status, ref = await _gh_request(session, "GET", f"/repos/{repo}/git/ref/heads/{base_branch}", token)
             if status != 200:
-                log.error("获取基准分支 %s 失败: HTTP %s %s", base_branch, status, ref)
+                log.error("获取基准分支 %s 失败: HTTP %s", base_branch, status)
                 return
             base_sha = ref["object"]["sha"]
 
@@ -393,7 +395,7 @@ async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
                         if attempt < 2:
                             await asyncio.sleep(2)
                     continue
-                log.error("创建分支 %s 失败: HTTP %s %s", candidate, status, resp)
+                log.error("创建分支 %s 失败: HTTP %s", candidate, status)
                 return
             if branch_name is None:
                 log.error("通知分支创建失败：候选分支均已存在（%s…）", branch)
@@ -414,7 +416,7 @@ async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
                         json_body={"message": commit_msg, "content": content_b64, "branch": branch_name},
                     )
                     if status != 201:
-                        raise RuntimeError(f"提交通知文件 {path} 失败: HTTP {status}: {resp}")
+                        raise RuntimeError(f"提交通知文件 {path} 失败: HTTP {status}")
 
                 status, resp = await _gh_request(
                     session, "POST", f"/repos/{repo}/pulls", token,
@@ -430,15 +432,14 @@ async def _submit_notice_pr(*, text: str, group_id: int, user_id: int,
                     },
                 )
                 if status != 201:
-                    raise RuntimeError(f"创建 PR 失败: HTTP {status}: {resp}")
+                    raise RuntimeError(f"创建 PR 失败: HTTP {status}")
                 pr_number = resp.get("number")
                 pr_url = resp.get("html_url")
             except Exception:
                 await _delete_branch(session, repo, token, branch_name)
                 raise
-    except Exception as e:
-        log.error("通知 PR 创建失败: group=%d user=%d msg=%s: %s",
-                  group_id, user_id, message_id, e, exc_info=True)
+    except Exception:
+        log.exception("通知 PR 创建失败: group=%d user=%d msg=%s", group_id, user_id, message_id)
         await _notice_feedback(group_id, "通知文件或图片上传、PR 创建失败，未发布通知，请稍后重试。")
         return
 
@@ -547,8 +548,8 @@ async def _ack_retry_loop() -> None:
             except Exception as e:
                 ack["retries"] = ack.get("retries", 0) + 1
                 if ack["retries"] >= _ACK_MAX_RETRIES:
-                    log.error("通知 PR ack 重发 %d 次仍失败，放弃: %s (%s)",
-                              _ACK_MAX_RETRIES, ack["text"], e)
+                    log.error("通知 PR ack 重发 %d 次仍失败: group_id=%s error=%s",
+                              _ACK_MAX_RETRIES, ack.get("group_id", cfg.INTERNAL_GROUP_ID), type(e).__name__)
                 else:
                     remaining.append(ack)
         _save_ack_queue(remaining)

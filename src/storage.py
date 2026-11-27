@@ -18,7 +18,9 @@ from contextlib import contextmanager
 from typing import NamedTuple, NotRequired, TypedDict
 
 from . import config as cfg
-from .config import log
+from .log_setup import get_logger
+
+log = get_logger(__name__)
 
 
 def _default_db_path() -> str:
