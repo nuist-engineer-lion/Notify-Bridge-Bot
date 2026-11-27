@@ -671,7 +671,7 @@ async def close_session(user_id: int, send_closing: bool = False, close_reason: 
     return True
 
 
-async def send_status_panel(group_id: int):
+async def send_status_panel(group_id: int) -> bool:
     """向指定群发送机器人状态统计面板"""
     uptime = time.time() - STARTED_AT
     uptime_str = format_duration(uptime)
@@ -711,5 +711,7 @@ async def send_status_panel(group_id: int):
             message=panel,
         )
         log.debug("状态面板已发送至群 %d", group_id)
+        return True
     except Exception:
         log.exception("发送状态面板失败")
+        return False

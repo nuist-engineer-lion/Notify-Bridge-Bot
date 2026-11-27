@@ -81,8 +81,8 @@ class ConsoleSafeLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             msg = self.format(record)
-            stream = sys.stderr
-            redraw = _reading and stream.isatty() and sys.stdout.isatty()
+            stream = sys.stdout
+            redraw = _reading and stream.isatty()
             if redraw:
                 _clear_current_line(stream)
             stream.write(msg + "\n")
@@ -94,13 +94,15 @@ class ConsoleSafeLogHandler(logging.Handler):
 
 
 def install_console_log_handler() -> None:
-    """只替换应用启动时安装的 stderr 输出，保留宿主和第三方的日志设置。"""
+    """日志与命令提示符共用 stdout，保留宿主和第三方的日志设置。"""
     global _log_handler
     root = logging.getLogger()
     if _log_handler is not None or console_handler not in root.handlers:
         return
     handler = ConsoleSafeLogHandler(console_handler.level)
     handler.setFormatter(console_handler.formatter)
+    for log_filter in console_handler.filters:
+        handler.addFilter(log_filter)
     root.removeHandler(console_handler)
     root.addHandler(handler)
     _log_handler = handler

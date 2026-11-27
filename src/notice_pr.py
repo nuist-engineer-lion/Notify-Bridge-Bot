@@ -662,14 +662,21 @@ async def handle_notice_command(event: GroupMessageEvent) -> bool:
     if not _claim_notice_event(event):
         return True
 
+    def log_status(status: str) -> None:
+        log.info("群指令%s: command=.notice group_id=%d user_id=%d message_id=%d",
+                 status, event.group_id, event.user_id, event.message_id)
+
+    log_status("开始处理")
     match = re.fullmatch(r"\.notice\s+([0-9]{1,3})", command)
     if (not match or any(seg.type != "text" for seg in event.message)
             or not 1 <= int(match[1]) <= _NOTICE_MAX_COUNT):
+        log_status("参数无效")
         await _notice_feedback(event.group_id, _NOTICE_USAGE)
         return True
 
     ncfg = _notice_cfg()
     if not ncfg.get("enabled"):
+        log_status("未启用通知 PR 功能")
         await _notice_feedback(event.group_id, "通知 PR 功能未启用，请先配置 notice_pr.enabled。")
         return True
     try:
@@ -679,9 +686,11 @@ async def handle_notice_command(event: GroupMessageEvent) -> bool:
         await _notice_feedback(event.group_id, "notice_pr.groups 配置格式错误，需为群号列表，未创建 PR。")
         return True
     if not groups:
+        log_status("缺少通知来源群")
         await _notice_feedback(event.group_id, "请先配置 notice_pr.groups 通知来源群，未创建 PR。")
         return True
 
     # 历史和 GitHub API 调用放在后台，按指令时间固定通知内容的截止时间。
     asyncio.create_task(_create_notice_from_history(event, int(match[1]), groups))
+    log_status("已转入后台处理")
     return True
