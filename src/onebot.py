@@ -315,6 +315,8 @@ class OneBotClient:
             raise RuntimeError("OneBot 客户端未连接")
         if action == "send_group_forward_msg":
             params["messages"] = _forward_nodes(params.get("messages", []))
+            # 嵌套记录和媒体上传可能超过普通 API 的 10 秒等待时间。
+            params.setdefault("_timeout", 120.0)
         return await bot.call_api(action, **params)
 
     async def get_friend_ids(self) -> set[int]:

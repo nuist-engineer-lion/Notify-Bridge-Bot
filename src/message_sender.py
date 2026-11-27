@@ -393,13 +393,12 @@ async def send_nested_forward(group_id: int, customer_list: list[tuple[int, Cust
             group_id=str(group_id),
             messages=outer_nodes,
         )
-        message_id = response["message_id"]
-        log.info("合并转发发送成功 -> 群 %d, message_id=%s", group_id, message_id)
-        asyncio.create_task(add_emoji_to_message(message_id, action_emoji_ids()))
-        return message_id
+        message_id = int(response["message_id"])
     except Exception as e:
-        log.error("发送合并转发失败: %s", e, exc_info=True)
+        log.error("群 %d 合并转发未取得消息 ID，本次跳过贴表情: %s", group_id, e, exc_info=True)
         return None
+    log.info("合并转发发送成功 -> 群 %d, message_id=%s", group_id, message_id)
+    return message_id
 
 
 async def send_forward_from_message_ids(
@@ -437,7 +436,7 @@ async def send_forward_from_message_ids(
             group_id=str(group_id),
             messages=outer_nodes,
         )
-        return response["message_id"]
+        return int(response["message_id"])
     except Exception as e:
         log.error("发送合并转发失败: %s", e, exc_info=True)
         return None
@@ -557,6 +556,7 @@ async def send_reminder_with_at(
             customer_ids=[qq for qq, _ in customer_list],
             group_id=group_id,
         )
+        asyncio.create_task(add_emoji_to_message(message_id, action_emoji_ids()))
         if notice_type:
             for qq, _data in customer_list:
                 try:

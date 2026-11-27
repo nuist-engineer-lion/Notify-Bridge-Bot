@@ -192,6 +192,10 @@ async def _bot_event_loop() -> None:
                     case PokeNotifyEvent():
                         await handle_group_poke(event)
 
+                    case GroupMessageEvent(post_type="message_sent", group_id=gid, message_id=mid):
+                        if gid == cfg.INTERNAL_GROUP_ID:
+                            log.info("收到内部群自身消息上报: group=%d, message_id=%d", gid, mid)
+
                     case GroupMessageEvent():
                         await handle_group_command(event)
 

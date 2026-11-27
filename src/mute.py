@@ -207,7 +207,7 @@ async def flush_delayed_notifications(reason: str = "unmute") -> int:
         _restore_queue()
         return 0
 
-    # send_reminder_with_at 在转发失败/内容为空时返回 None 且不抛异常，不能当作成功
+    # 内容为空或未取得可操作的群消息 ID 时，保留通知以便补发。
     if message_id is None:
         log.error(
             "静音延后通知发送未成功（无消息 ID），已恢复 %d 名客户通知 (reason=%s)",
