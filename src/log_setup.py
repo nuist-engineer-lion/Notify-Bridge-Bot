@@ -54,7 +54,7 @@ def configure_logging() -> None:
     if _nonebot_sink is not None:
         return
     console_handler.setFormatter(ConsoleFormatter(
-        "%(asctime)s [%(levelname)s] %(name)s | %(message)s", datefmt="%H:%M:%S",
+        "%(asctime)s [%(levelname)s] %(name)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
     ))
     root = logging.getLogger()
     if root.handlers:
